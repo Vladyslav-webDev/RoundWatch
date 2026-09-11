@@ -1,12 +1,11 @@
 {
   "name": "x402-challenge",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@12.3.4",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
+    "typecheck": "pnpm -C apps/server run typecheck && pnpm -C apps/client run typecheck",
+    "dev:server": "pnpm -C apps/server run dev",
+    "dev:client": "pnpm -C apps/client run dev"
+  }
 }
