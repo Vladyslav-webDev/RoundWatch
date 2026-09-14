@@ -1,24 +1,15 @@
+import { resolve } from 'node:path';
+
 import { config } from 'dotenv';
-
-import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
-
-import { paymentMiddleware, x402ResourceServer } from '@x402/hono';
 import { HTTPFacilitatorClient } from '@x402/core/server';
-import type { ResourceServerExtension } from '@x402/core/types';
 
-import { ExactAvmScheme } from '@x402/avm/exact/server';
-import { USDC_TESTNET_ASA_ID } from '@x402/avm';
-
-import {
-   declareDiscoveryExtension,
-   bazaarResourceServerExtension,
-} from '@x402-avm/extensions';
+import { createApp } from './app.js';
+import { AlgorandIndexerClient } from './roundwatch-indexer.js';
+import { RoundWatchPoller } from './roundwatch-poller.js';
+import { RoundWatchStore } from './roundwatch-store.js';
 
 config();
-
-const ALGORAND_TESTNET =
-   'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=' as const;
 
 const avmAddress = process.env.AVM_ADDRESS;
 const facilitatorUrl = process.env.FACILITATOR_URL;
@@ -30,78 +21,31 @@ if (!avmAddress || !facilitatorUrl) {
    process.exit(1);
 }
 
-// Hosted GoPlausible facilitator
+const databasePath = resolve(
+   process.env.ROUNDWATCH_DB_PATH ?? 'data/roundwatch.sqlite',
+);
+const indexerUrl =
+   process.env.ALGORAND_INDEXER_URL ?? 'https://testnet-idx.algonode.cloud';
+const pollIntervalMilliseconds = parsePositiveInteger(
+   process.env.ROUNDWATCH_POLL_INTERVAL_MS,
+   5_000,
+);
+
 const facilitatorClient = new HTTPFacilitatorClient({
    url: facilitatorUrl,
 });
-
-// x402 resource server
-const resourceServer = new x402ResourceServer(facilitatorClient);
-
-// Algorand TestNet exact-payment scheme
-resourceServer.register(
-   ALGORAND_TESTNET,
-   new ExactAvmScheme(),
+const store = new RoundWatchStore(databasePath);
+const indexer = new AlgorandIndexerClient(indexerUrl);
+const poller = new RoundWatchPoller(
+   store,
+   indexer,
+   pollIntervalMilliseconds,
 );
-
-// Bazaar discovery
-resourceServer.registerExtension(
-   bazaarResourceServerExtension as unknown as ResourceServerExtension,
-);
-
-const demoDiscovery = declareDiscoveryExtension({
-   output: {
-      example: {
-         ok: true,
-         message: 'x402 payment verified',
-         timestamp: '2026-09-11T12:00:00.000Z',
-      },
-   },
-});
-
-const app = new Hono();
-
-// Free health endpoint
-app.get('/health', c => {
-   return c.json({
-      status: 'ok',
-   });
-});
-
-// x402 middleware
-app.use(
-   paymentMiddleware(
-      {
-         'GET /demo': {
-            accepts: [
-               {
-                  scheme: 'exact',
-                  price: '$0.005',
-                  network: ALGORAND_TESTNET,
-                  payTo: avmAddress,
-                  extra: {
-                     asset: USDC_TESTNET_ASA_ID,
-                     tag: 'x402-global-challenge',
-                  },
-               },
-            ],
-            description:
-               'Test x402 endpoint returning proof of successful Algorand USDC payment',
-            mimeType: 'application/json',
-            extensions: demoDiscovery,
-         },
-      },
-      resourceServer,
-   ),
-);
-
-// Protected endpoint
-app.get('/demo', c => {
-   return c.json({
-      ok: true,
-      message: 'x402 payment verified',
-      timestamp: new Date().toISOString(),
-   });
+const app = createApp({
+   avmAddress,
+   facilitatorClient,
+   store,
+   indexer,
 });
 
 const port = 4021;
@@ -112,15 +56,37 @@ const server = serve({
 });
 
 server.on('listening', () => {
+   poller.start();
    console.log(
       `x402 Resource Server listening at http://localhost:${port}`,
    );
 });
 
 server.on('close', () => {
+   poller.stop();
+   store.close();
    console.log('x402 Resource Server CLOSED');
 });
 
 server.on('error', error => {
    console.error('x402 Resource Server ERROR:', error);
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+   process.once(signal, () => {
+      server.close();
+   });
+}
+
+function parsePositiveInteger(
+   value: string | undefined,
+   fallback: number,
+): number {
+   if (!value) {
+      return fallback;
+   }
+
+   const parsed = Number(value);
+
+   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
