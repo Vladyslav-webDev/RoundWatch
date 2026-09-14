@@ -1,0 +1,147 @@
+/* Identity motion: the interrupted ring stays fixed; only its signal orbits. */
+.orbital-brand .brand-ring {
+  stroke: var(--orbital-ring, var(--orange));
+  filter: drop-shadow(0 0 var(--orbital-glow, 0px) #ffc09a);
+}
+.orbital-brand .orbital-signal {
+  transform-box: view-box;
+  transform-origin: 20px 20px;
+}
+.orbital-trail {
+  fill: none;
+  stroke: #ffe9cb;
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  opacity: var(--orbital-trail, 0);
+}
+.orbital-trail.trail-far {
+  stroke: #ff642d;
+  stroke-width: 2.2;
+  opacity: calc(var(--orbital-trail, 0) * 0.3);
+}
+.orbital-ring-pulse {
+  stroke: #f5f3ee;
+  opacity: 0;
+  animation: orbital-charge-pulse 3.2s ease-in-out infinite;
+}
+.orbital-brand[data-orbital-stopped="true"] .orbital-ring-pulse {
+  animation-play-state: paused;
+}
+@keyframes orbital-charge-pulse {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: var(--orbital-pulse, 0);
+  }
+}
+
+/* A small number of evidence signals follow the approved curved SVG leads. */
+.stack-input-signal {
+  stroke: #ff9b61;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-dasharray: 1.6 100;
+  opacity: 0;
+  animation: stack-evidence-input 10s linear infinite;
+  animation-delay: var(--signal-delay);
+}
+.stack-emission {
+  fill: #ff7335;
+  opacity: 0;
+  animation: stack-source-emission 10s ease-out infinite;
+  animation-delay: var(--signal-delay);
+}
+.stack-convergence {
+  opacity: 0;
+  animation: stack-evidence-join 10s ease-out infinite;
+  animation-delay: var(--signal-delay);
+}
+.state-stack .stack-traveler {
+  animation: stack-converged-continuation 10s linear infinite;
+}
+@keyframes stack-evidence-input {
+  0%,
+  5% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+  8% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  27% {
+    stroke-dashoffset: -98;
+    opacity: 1;
+  }
+  29%,
+  100% {
+    stroke-dashoffset: -100;
+    opacity: 0;
+  }
+}
+@keyframes stack-source-emission {
+  0%,
+  4%,
+  14%,
+  100% {
+    opacity: 0;
+  }
+  7% {
+    opacity: 0.2;
+  }
+}
+@keyframes stack-evidence-join {
+  0%,
+  24%,
+  36%,
+  100% {
+    opacity: 0;
+  }
+  28% {
+    opacity: 0.8;
+  }
+}
+@keyframes stack-converged-continuation {
+  0%,
+  49% {
+    transform: translateY(72px);
+    opacity: 0;
+  }
+  52% {
+    transform: translateY(72px);
+    opacity: 1;
+  }
+  93% {
+    transform: translateY(478px);
+    opacity: 1;
+  }
+  97%,
+  100% {
+    transform: translateY(488px);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orbital-brand .brand-ring {
+    filter: none;
+    transition: stroke 180ms ease;
+  }
+  .orbital-brand[data-orbital-active="true"] .brand-ring {
+    stroke: #f5f3ee;
+  }
+  .orbital-brand .orbital-trail,
+  .orbital-brand .orbital-ring-pulse,
+  .state-stack .stack-input-signal,
+  .state-stack .stack-emission,
+  .state-stack .stack-convergence {
+    display: none;
+    animation: none;
+  }
+  .state-stack .stack-traveler {
+    animation: none;
+    opacity: 1;
+    transform: translateY(285px);
+  }
+}

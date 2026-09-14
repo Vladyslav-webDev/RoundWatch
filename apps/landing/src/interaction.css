@@ -1,0 +1,305 @@
+/* Interaction layers retain the approved section geometry and typography. */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.capability {
+  position: relative;
+  transition: border-color 400ms var(--ease);
+}
+.capability-control {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  transition: color 400ms var(--ease);
+}
+.capability-control::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.capability:has(:focus-visible) {
+  outline: 2px solid var(--orange-bright);
+  outline-offset: 5px;
+}
+.capability-control:focus-visible {
+  outline: none;
+}
+.capability[data-active="true"] {
+  border-bottom-color: #8e482b;
+}
+.capability[data-active="true"] .capability-control {
+  color: var(--orange-bright);
+}
+.capability[data-active="true"] .capability-index {
+  color: var(--text);
+}
+.observer-orbit,
+.orbit-center,
+.orbit-crosshair {
+  transition:
+    border-color 700ms var(--ease),
+    opacity 700ms var(--ease),
+    box-shadow 700ms var(--ease);
+}
+.orbit-signal-depth {
+  position: absolute;
+  inset: 0;
+  transform: scale(1);
+  transition:
+    transform 1100ms var(--ease),
+    opacity 700ms var(--ease);
+}
+[data-capability="observe"] .orbit-outer {
+  opacity: 1;
+  border-color: #8d6645;
+}
+[data-capability="observe"] .orbit-crosshair {
+  opacity: 1;
+  box-shadow: 0 0 15px #ff642d12;
+}
+[data-capability="verify"] .orbit-signal-depth {
+  transform: scale(0.66);
+}
+[data-capability="verify"] .orbit-inner {
+  border-color: var(--orange);
+  box-shadow: 0 0 22px #ff642d12;
+}
+[data-capability="verify"] .orbit-middle {
+  border-color: #a46d4d;
+}
+[data-capability="persist"] .orbit-signal-depth {
+  transform: scale(0.12);
+  opacity: 0.2;
+}
+[data-capability="persist"] .orbit-center {
+  border-color: var(--orange-bright);
+  box-shadow: 0 0 28px #ff642d25;
+}
+[data-capability="persist"] .orbit-center .brand-mark {
+  color: var(--orange-bright);
+}
+[data-capability="persist"] .orbit-inner {
+  border-color: #97603a;
+}
+
+.step-selected .rail-segment {
+  background: var(--orange-bright);
+  box-shadow: 0 0 10px #ff642d30;
+}
+.flow-explanation {
+  display: block;
+}
+.flow-inspector {
+  display: grid;
+}
+.flow-detail {
+  grid-area: 1 / 1;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(5px);
+  transition:
+    opacity 350ms var(--ease),
+    transform 450ms var(--ease);
+}
+.flow-detail[data-active="true"] {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+.flow-detail .inspector-stage {
+  color: var(--text);
+  font-size: 10px;
+  margin: 0 0 14px;
+}
+.inspector-stage > span {
+  color: var(--dim);
+  margin-right: 15px;
+}
+.inspector-context {
+  display: flex;
+  gap: 30px;
+  margin: 0 0 15px;
+  font-size: 9px;
+  letter-spacing: 0.055em;
+}
+.inspector-context > div {
+  display: flex;
+  gap: 10px;
+}
+.inspector-context dt {
+  color: var(--dim);
+}
+.inspector-context dd {
+  color: #d4b499;
+  margin: 0;
+}
+.flow-detail > p:last-child {
+  max-width: 850px;
+}
+
+.architecture-stage {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  column-gap: 20px;
+  row-gap: 5px;
+  width: 100%;
+  padding: 0;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  text-align: left;
+  transition:
+    color 450ms var(--ease),
+    opacity 450ms var(--ease);
+}
+.architecture-stage > span,
+.architecture-stage > small {
+  grid-column: 2;
+}
+.architecture-path li::after {
+  transition:
+    background 450ms var(--ease),
+    box-shadow 450ms var(--ease);
+}
+.architecture-path [data-connected="true"]::after {
+  background: var(--orange);
+  box-shadow: 0 0 8px #ff642d33;
+}
+[data-inspecting="true"]
+  .architecture-path
+  li:not([data-active="true"])
+  .architecture-stage {
+  opacity: 0.94;
+}
+.architecture-path [data-active="true"] .architecture-stage {
+  color: var(--orange-bright);
+}
+.architecture-path [data-active="true"] small {
+  color: #c5c4be;
+}
+.architecture-next {
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  width: 100%;
+  text-align: left;
+  padding-inline: 0;
+}
+.architecture-next[data-active="true"] {
+  color: var(--orange-bright);
+  border-top-color: #9d4928;
+}
+.capability-checks li {
+  transition: color 450ms var(--ease);
+}
+.capability-checks [data-relevant="true"] {
+  color: var(--text);
+}
+.capability-checks [data-relevant="true"] .icon {
+  filter: drop-shadow(0 0 3px #ff642d55);
+}
+
+.audience {
+  transition: border-color 500ms var(--ease);
+}
+.audience-line {
+  transform-origin: left;
+  transition: transform 650ms var(--ease);
+}
+.audience:hover,
+.audience:focus-visible {
+  border-color: #706154;
+}
+.audience:hover .audience-line,
+.audience:focus-visible .audience-line {
+  transform: scaleX(2.4);
+}
+.audience-label > span {
+  transition: color 500ms var(--ease);
+}
+.audience:hover .audience-label > span,
+.audience:focus-visible .audience-label > span {
+  color: var(--text);
+}
+
+.ribbon-identity {
+  display: grid;
+  gap: 7px;
+}
+.ribbon-identity small {
+  color: var(--dim);
+  font-size: 8px;
+  font-weight: 400;
+  letter-spacing: 0.075em;
+}
+
+/* Global pause includes narrative transitions and all newly added CSS motion. */
+html:has(.site[data-paused="true"]) {
+  scroll-behavior: auto;
+}
+.site[data-paused="true"] *,
+.site[data-paused="true"] *::before,
+.site[data-paused="true"] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+.site[data-paused="true"] .reveal-pending {
+  opacity: 1;
+  transform: none;
+}
+@media (max-width: 1100px) {
+  .inspector-context {
+    flex-wrap: wrap;
+    gap: 8px 24px;
+  }
+}
+/* The negative desktop art margin let the first SVG label overlap the H1
+   just above the stacked layout breakpoint. Keep a real gap at this width. */
+@media (min-width: 761px) and (max-width: 900px) {
+  .hero-art {
+    margin-left: 14px;
+  }
+}
+@media (max-width: 760px) {
+  .inspector-context {
+    display: grid;
+    gap: 7px;
+    font-size: 9px;
+  }
+  .inspector-context > div {
+    display: grid;
+    grid-template-columns: 66px 1fr;
+    gap: 8px;
+  }
+  .flow-detail .inspector-stage {
+    margin-top: 0;
+  }
+  .ribbon-identity small {
+    font-size: 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-detail {
+    transform: none;
+  }
+  .orbit-signal-depth {
+    transition: none;
+  }
+  .audience:hover .audience-line,
+  .audience:focus-visible .audience-line {
+    transform: none;
+    width: 84px;
+  }
+}

@@ -1,3 +1,7 @@
+import type { CSSProperties } from "react";
+import { useOrbitalCharge } from "./orbital";
+import "./graphics-motion.css";
+
 export type IconName =
   | "arrow"
   | "play"
@@ -80,10 +84,17 @@ export function Icon({
   );
 }
 
-export function BrandMark() {
+export function BrandMark({ orbital = false }: { orbital?: boolean }) {
+  const ref = useOrbitalCharge(orbital);
   return (
-    <svg className="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+    <svg
+      ref={ref}
+      className={`brand-mark${orbital ? " orbital-brand" : ""}`}
+      viewBox="0 0 40 40"
+      aria-hidden="true"
+    >
       <circle
+        className="brand-ring"
         cx="20"
         cy="20"
         r="13"
@@ -93,7 +104,31 @@ export function BrandMark() {
         strokeDasharray="69 13"
         transform="rotate(-30 20 20)"
       />
-      <circle cx="31.3" cy="13.5" r="3.4" fill="var(--text)" />
+      {orbital ? (
+        <>
+          <circle
+            className="orbital-ring-pulse ambient"
+            cx="20"
+            cy="20"
+            r="13"
+            fill="none"
+            strokeWidth="4"
+          />
+          <g className="orbital-signal">
+            <path
+              className="orbital-trail trail-far"
+              d="M8.74 26.5A13 13 0 0 1 13.5 8.74"
+            />
+            <path
+              className="orbital-trail trail-near"
+              d="M13.5 8.74A13 13 0 0 1 31.3 13.5"
+            />
+            <circle cx="31.3" cy="13.5" r="3.4" fill="var(--orange)" />
+          </g>
+        </>
+      ) : (
+        <circle cx="31.3" cy="13.5" r="3.4" fill="var(--text)" />
+      )}
     </svg>
   );
 }
@@ -152,12 +187,11 @@ export function StateStack() {
         <path d="M393 28v460" stroke="url(#axis)" strokeWidth="1" />
         {states.map((state, i) => {
           const y = 106 + i * 66;
+          const lead = `M${i === 0 ? 153 : 187} ${y} H222 C273 ${y} 269 ${y + 43} 312 ${y + 43} H393`;
+          const timing = { "--signal-delay": `${i * 0.56}s` } as CSSProperties;
           return (
             <g key={state}>
-              <path
-                className="stack-lead"
-                d={`M${i === 0 ? 153 : 187} ${y} H222 C273 ${y} 269 ${y + 43} 312 ${y + 43} H393`}
-              />
+              <path className="stack-lead" d={lead} />
               <text x="4" y={y - 11} className="stack-label">
                 {state}
               </text>
@@ -175,6 +209,27 @@ export function StateStack() {
               />
               <circle cx="393" cy={y + 25} r="28" fill="url(#event-halo)" />
               <path d={`m386 ${y + 25} 7-4 7 4-7 4Z`} fill="#fff2da" />
+              <path
+                className="stack-input-signal ambient"
+                d={lead}
+                pathLength="100"
+                style={timing}
+              />
+              <circle
+                className="stack-emission ambient"
+                cx={i === 0 ? 153 : 187}
+                cy={y}
+                r="7"
+                style={timing}
+              />
+              <circle
+                className="stack-convergence ambient"
+                cx="393"
+                cy={y + 43}
+                r="16"
+                fill="url(#event-halo)"
+                style={timing}
+              />
             </g>
           );
         })}

@@ -1,0 +1,163 @@
+/* The replay and restart narrative keep every stage in the layout. */
+.replay-shell[data-replay-running="true"] .replay-state-body {
+  animation: replay-state-reveal 420ms var(--ease) both;
+}
+.replay-state-body > .icon {
+  color: var(--orange);
+  margin-block: 17px;
+  width: 23px;
+  height: 23px;
+}
+.terminal-result {
+  transition: border-color 450ms var(--ease);
+}
+.replay-shell[data-replay-state="verified"] .terminal-result,
+.replay-shell[data-replay-state="persisted"] .terminal-result,
+.replay-shell[data-replay-state="ready"] .terminal-result {
+  border-color: #94502d;
+}
+.replay-buttons .text-control {
+  min-height: 44px;
+}
+.replay-buttons .text-control:disabled {
+  color: var(--muted);
+}
+.narrative-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.restart-story .restart-node,
+.restart-story .restart-node::before,
+.restart-story .persistent-bridge,
+.restart-story .restart-timeline li::after {
+  transition:
+    color 500ms var(--ease),
+    border-color 500ms var(--ease),
+    background-color 500ms var(--ease),
+    box-shadow 500ms var(--ease),
+    opacity 500ms var(--ease);
+}
+.restart-story[data-story-started="true"]
+  [data-stage-state="current"]
+  .restart-node {
+  color: var(--orange-bright);
+}
+.restart-story[data-story-started="true"]
+  [data-stage-state="current"]
+  .restart-node:empty::before {
+  background: var(--orange);
+  border-color: var(--orange-bright);
+  box-shadow: 0 0 11px #ff642d60;
+}
+.restart-story[data-story-started="true"]
+  [data-stage-state="past"]
+  .restart-node:empty::before {
+  border-color: #cc794a;
+  background: #563020;
+}
+.restart-story[data-story-started="true"] [data-stage-state="future"]::after {
+  opacity: 0.35;
+}
+.restart-story[data-story-started="true"]
+  [data-stage-state="current"]:not(.restart-stop)::after,
+.restart-story[data-story-started="true"]
+  [data-stage-state="past"]:not(.restart-stop)::after {
+  background-color: #b56637;
+}
+.restart-signal {
+  position: absolute;
+  left: 6px;
+  top: 38px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--orange-bright);
+  box-shadow: 0 0 9px #ff642d66;
+  opacity: 0;
+  pointer-events: none;
+}
+.restart-story[data-story-started="true"]
+  [data-stage-state="current"]
+  > .restart-signal {
+  animation: restart-progress 1050ms var(--ease) both;
+}
+.restart-story[data-story-running="false"] .restart-signal {
+  animation-play-state: paused;
+}
+.restart-story[data-story-phase="offline"] .restart-timeline li::after,
+.restart-story[data-story-phase="offline"] .restart-node::before {
+  opacity: 0.3;
+  box-shadow: none;
+}
+.restart-story[data-story-phase="offline"] .restart-stop .restart-node {
+  color: var(--text);
+}
+.restart-story[data-story-started="true"]:not([data-story-phase="expecting"])
+  .persistent-bridge {
+  color: #d6ae82;
+  border-color: var(--orange);
+}
+.restart-story[data-story-phase="restored"] .persistent-bridge {
+  box-shadow: 3px 0 14px -7px #ff642d90;
+}
+.restart-story[data-story-phase="matched"] .restart-detected .restart-node {
+  color: var(--orange-bright);
+}
+[data-paused="true"] .replay-state-body {
+  animation: none;
+}
+[data-paused="true"] .replay-shell .event,
+[data-paused="true"] .replay-progress > span,
+[data-paused="true"] .restart-story *,
+[data-paused="true"] .restart-story *::before,
+[data-paused="true"] .restart-story *::after {
+  transition: none;
+}
+@keyframes replay-state-reveal {
+  from {
+    opacity: 0.5;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes restart-progress {
+  0% {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  20%,
+  65% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .replay-state-body,
+  .restart-story .restart-signal {
+    animation: none;
+  }
+  .replay-shell .event,
+  .replay-progress > span,
+  .terminal-result,
+  .restart-story *,
+  .restart-story *::before,
+  .restart-story *::after {
+    transition: none;
+  }
+  .replay-shell .event {
+    opacity: 1;
+    transform: none;
+  }
+}

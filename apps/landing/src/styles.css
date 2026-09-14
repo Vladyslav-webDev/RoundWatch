@@ -491,7 +491,7 @@ h1 > span {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  min-height: 36px;
+  min-height: 44px;
   padding: 6px 0 6px 12px;
   background: transparent;
   border: 0;
@@ -847,10 +847,7 @@ h1 > span {
   margin-top: 31px;
 }
 .architecture-path li {
-  display: grid;
-  grid-template-columns: 32px 1fr;
-  column-gap: 20px;
-  row-gap: 5px;
+  display: block;
   padding: 0 0 29px;
   position: relative;
 }
@@ -874,10 +871,10 @@ h1 > span {
   margin-top: 3px;
   color: #b4b3ad;
 }
-.architecture-path li > span {
+.architecture-stage > span {
   font-size: 17px;
 }
-.architecture-path li > small {
+.architecture-stage > small {
   font-size: 12px;
   line-height: 1.5;
   color: var(--dim);
@@ -888,8 +885,8 @@ h1 > span {
   margin-left: -3px;
   color: var(--orange);
 }
-.architecture-watch > span,
-.architecture-evidence > .icon {
+.architecture-watch .architecture-stage > span,
+.architecture-evidence .icon {
   color: var(--orange);
 }
 .architecture-next {
@@ -1113,7 +1110,7 @@ h1 > span {
   align-items: center;
   gap: 8px;
   padding: 8px 0;
-  min-height: 40px;
+  min-height: 44px;
   border: 0;
   background: transparent;
   color: var(--text);
@@ -2135,7 +2132,7 @@ h1 > span {
   .architecture-path li::after {
     bottom: 7px;
   }
-  .architecture-path li > span {
+  .architecture-stage > span {
     font-size: 16px;
   }
   .technology-copy > h3 {
@@ -2408,7 +2405,7 @@ h1 > span {
   *::before,
   *::after {
     animation: none !important;
-    transition-duration: 0.01ms !important;
+    transition: none !important;
   }
   .reveal-pending {
     opacity: 1;

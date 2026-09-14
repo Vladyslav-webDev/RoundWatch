@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { BrandMark, Icon, StateStack } from "./graphics";
 import type { IconName } from "./graphics";
 import WorkflowReplay from "./WorkflowReplay";
+import Resilience from "./Resilience";
+import { MotionProvider, useMotion } from "./motion";
 
 const navigation = [
   { label: "Product", id: "product" },
@@ -17,6 +19,9 @@ const flow = [
     icon: "work",
     detail:
       "Useful work is complete. Payment settlement is still a separate event.",
+    status: "Work complete",
+    boundary: "Payment not established",
+    next: "Initiate payment",
   },
   {
     title: "x402 payment initiated",
@@ -24,6 +29,9 @@ const flow = [
     icon: "code",
     detail:
       "Initiating a payment is not proof of settlement. The workflow waits for evidence.",
+    status: "Initiated",
+    boundary: "Awaiting settlement",
+    next: "Observe evidence",
   },
   {
     title: "RoundWatch observes",
@@ -31,6 +39,9 @@ const flow = [
     icon: "database",
     detail:
       "Successful settlement evidence is the condition for advancing durable state.",
+    status: "Observing",
+    boundary: "Successful settlement required",
+    next: "Persist state",
   },
   {
     title: "Verified & continue",
@@ -38,8 +49,19 @@ const flow = [
     icon: "check",
     detail:
       "Verified, persisted evidence gives the next action a trustworthy starting point.",
+    status: "Evidence persisted",
+    boundary: "Next action may proceed",
+    next: "Workflow continuation",
   },
-] satisfies { title: string; text: string; icon: IconName; detail: string }[];
+] satisfies {
+  title: string;
+  text: string;
+  icon: IconName;
+  detail: string;
+  status: string;
+  boundary: string;
+  next: string;
+}[];
 
 function ButtonLink({
   href,
@@ -64,7 +86,7 @@ function ButtonLink({
 function Brand() {
   return (
     <a className="brand" href="#top" aria-label="RoundWatch home">
-      <BrandMark />
+      <BrandMark orbital />
       <span>RoundWatch</span>
     </a>
   );
@@ -167,6 +189,7 @@ function Header() {
 }
 
 function Product() {
+  const [active, setActive] = useState("Observe");
   return (
     <section
       id="product"
@@ -189,13 +212,15 @@ function Product() {
           Trust needs a foundation.
         </p>
       </div>
-      <div className="product-layout">
+      <div className="product-layout" data-capability={active.toLowerCase()}>
         <div className="observation-visual" aria-hidden="true">
           <div className="observer-orbit orbit-outer" />
           <div className="observer-orbit orbit-middle" />
           <div className="observer-orbit orbit-inner" />
-          <div className="orbit-rotator ambient">
-            <i />
+          <div className="orbit-signal-depth">
+            <div className="orbit-rotator ambient">
+              <i />
+            </div>
           </div>
           <div className="orbit-center">
             <BrandMark />
@@ -227,11 +252,28 @@ function Product() {
               "database",
             ],
           ].map(([title, text, number, icon]) => (
-            <div className="capability" key={title}>
+            <div
+              className="capability"
+              key={title}
+              data-active={active === title}
+              onPointerEnter={(event) => {
+                if (event.pointerType !== "touch") setActive(title);
+              }}
+            >
               <span className="mono capability-index">{number}</span>
               <div>
-                <h3>{title}</h3>
-                <p>{text}</p>
+                <h3>
+                  <button
+                    className="capability-control"
+                    aria-pressed={active === title}
+                    aria-describedby={`capability-${number}`}
+                    onFocus={() => setActive(title)}
+                    onClick={() => setActive(title)}
+                  >
+                    {title}
+                  </button>
+                </h3>
+                <p id={`capability-${number}`}>{text}</p>
               </div>
               <Icon name={icon as IconName} />
             </div>
@@ -251,6 +293,7 @@ function Product() {
 
 function Flow() {
   const [selected, setSelected] = useState(2);
+  const [inspected, setInspected] = useState(false);
   return (
     <section
       id="how-it-works"
@@ -283,7 +326,10 @@ function Flow() {
             <div className="node-row">
               <button
                 className="flow-node"
-                onClick={() => setSelected(index)}
+                onClick={() => {
+                  setSelected(index);
+                  setInspected(true);
+                }}
                 aria-label={`Explore stage ${index + 1}: ${item.title}`}
                 aria-pressed={selected === index}
                 aria-controls="flow-explanation"
@@ -305,16 +351,90 @@ function Flow() {
         ))}
       </ol>
       <div className="flow-explanation" id="flow-explanation">
-        <span className="mono">
-          The boundary <span>0{selected + 1}</span>
-        </span>
-        <p aria-live="polite">{flow[selected].detail}</p>
+        <div className="flow-inspector">
+          {flow.map((item, index) => (
+            <div
+              className="flow-detail"
+              key={item.title}
+              data-active={selected === index}
+              aria-hidden={selected !== index}
+            >
+              <p className="inspector-stage mono">
+                <span>Stage</span> 0{index + 1} / {item.title}
+              </p>
+              <dl className="inspector-context mono">
+                <div>
+                  <dt>Status</dt>
+                  <dd>{item.status}</dd>
+                </div>
+                <div>
+                  <dt>Boundary</dt>
+                  <dd>{item.boundary}</dd>
+                </div>
+                <div>
+                  <dt>Next</dt>
+                  <dd>{item.next}</dd>
+                </div>
+              </dl>
+              <p>{item.detail}</p>
+            </div>
+          ))}
+        </div>
+        <p role="status" className="sr-only">
+          {inspected
+            ? `Stage ${selected + 1}. ${flow[selected].title}. ${flow[selected].detail}`
+            : ""}
+        </p>
       </div>
     </section>
   );
 }
 
 function Technology() {
+  const [inspected, setInspected] = useState<number | null>(null);
+  const stages: {
+    title: string;
+    text: string;
+    icon: IconName | null;
+    className: string;
+    checks: number[];
+  }[] = [
+    {
+      title: "Agent",
+      text: "Completes the task",
+      icon: "work",
+      className: "",
+      checks: [],
+    },
+    {
+      title: "x402 payment",
+      text: "Initiates the payment",
+      icon: "code",
+      className: "",
+      checks: [1],
+    },
+    {
+      title: "Algorand settlement",
+      text: "Establishes the on-chain result",
+      icon: "link",
+      className: "",
+      checks: [0, 1],
+    },
+    {
+      title: "RoundWatch",
+      text: "Observes, verifies, persists",
+      icon: null,
+      className: "architecture-watch",
+      checks: [0, 2, 3, 4, 5],
+    },
+    {
+      title: "Verified durable evidence",
+      text: "The basis for workflow continuation",
+      icon: "shield",
+      className: "architecture-evidence",
+      checks: [1, 2, 4],
+    },
+  ];
   return (
     <section
       id="technology"
@@ -328,40 +448,50 @@ function Technology() {
         <br />
         <span className="muted-heading">Intelligent where it helps.</span>
       </h2>
-      <div className="technology-layout">
+      <div className="technology-layout" data-inspecting={inspected !== null}>
         <div className="architecture-core">
           <p className="mono diagram-label">The deterministic core</p>
           <ol className="architecture-path">
-            <li>
-              <Icon name="work" />
-              <span>Agent</span>
-              <small>Completes the task</small>
-            </li>
-            <li>
-              <Icon name="code" />
-              <span>x402 payment</span>
-              <small>Initiates the payment</small>
-            </li>
-            <li>
-              <Icon name="link" />
-              <span>Algorand settlement</span>
-              <small>Establishes the on-chain result</small>
-            </li>
-            <li className="architecture-watch">
-              <BrandMark />
-              <span>RoundWatch</span>
-              <small>Observes, verifies, persists</small>
-            </li>
-            <li className="architecture-evidence">
-              <Icon name="shield" />
-              <span>Verified durable evidence</span>
-              <small>The basis for workflow continuation</small>
-            </li>
+            {stages.map((stage, index) => (
+              <li
+                key={stage.title}
+                className={stage.className}
+                data-active={inspected === index}
+                data-connected={inspected === index || inspected === index + 1}
+              >
+                <button
+                  className="architecture-stage"
+                  aria-pressed={inspected === index}
+                  onPointerEnter={(event) => {
+                    if (event.pointerType !== "touch") setInspected(index);
+                  }}
+                  onFocus={() => setInspected(index)}
+                  onClick={() => setInspected(index)}
+                >
+                  {stage.icon ? (
+                    <Icon name={stage.icon} />
+                  ) : (
+                    <BrandMark orbital />
+                  )}
+                  <span>{stage.title}</span>
+                  <small>{stage.text}</small>
+                </button>
+              </li>
+            ))}
           </ol>
-          <p className="architecture-next mono">
+          <button
+            className="architecture-next mono"
+            aria-pressed={inspected === 5}
+            data-active={inspected !== null && inspected >= 4}
+            onPointerEnter={(event) => {
+              if (event.pointerType !== "touch") setInspected(5);
+            }}
+            onFocus={() => setInspected(5)}
+            onClick={() => setInspected(5)}
+          >
             <Icon name="arrow" />
             Workflow continuation
-          </p>
+          </button>
         </div>
         <div className="technology-copy">
           <h3>
@@ -381,8 +511,16 @@ function Technology() {
               "Persistent scan cursor",
               "Restart recovery",
               "Future-payment detection",
-            ].map((item) => (
-              <li key={item}>
+            ].map((item, index) => (
+              <li
+                key={item}
+                data-relevant={
+                  inspected === 5
+                    ? index === 2
+                    : inspected !== null &&
+                      stages[inspected].checks.includes(index)
+                }
+              >
                 <Icon name="check" />
                 {item}
               </li>
@@ -413,82 +551,15 @@ function Technology() {
   );
 }
 
-function Resilience() {
-  return (
-    <section
-      className="section resilience"
-      data-reveal
-      aria-labelledby="resilience-title"
-    >
-      <div className="resilience-copy">
-        <Eyebrow number="05">Resilience</Eyebrow>
-        <h2 id="resilience-title">
-          Restart the server.
-          <br />
-          <span className="orange-text">Keep the truth.</span>
-        </h2>
-        <p>A process can stop. Its evidence shouldn’t disappear with it.</p>
-        <p>
-          RoundWatch restores durable state and resumes from saved observation
-          progress. A future payment can still be detected after restart.
-        </p>
-        <span className="proof-note mono">
-          <Icon name="check" />
-          Verified with a real process restart
-          <br />
-          on Algorand TestNet
-        </span>
-      </div>
-      <div className="restart-diagram">
-        <p className="mono diagram-label">Process changes. Evidence remains.</p>
-        <ol className="restart-timeline">
-          {[
-            "Payment expected",
-            "Scan progress saved",
-            "Server stops",
-            "Server starts",
-            "State restored",
-            "Observation resumes",
-            "Future payment detected",
-          ].map((item, i) => (
-            <li
-              key={item}
-              className={
-                i === 2
-                  ? "restart-stop"
-                  : i === 3
-                    ? "restart-start"
-                    : i === 6
-                      ? "restart-detected"
-                      : ""
-              }
-            >
-              <span className="restart-node" aria-hidden="true">
-                {i === 2 ? "×" : i === 6 ? <Icon name="check" /> : ""}
-              </span>
-              <span>{item}</span>
-              <small className="mono">
-                {i === 1
-                  ? "Saved"
-                  : i === 2
-                    ? "Process offline"
-                    : i === 4
-                      ? "Recovered"
-                      : i === 6
-                        ? "Matched"
-                        : ""}
-              </small>
-            </li>
-          ))}
-        </ol>
-        <span className="persistent-bridge mono">Durable state</span>
-      </div>
-    </section>
-  );
-}
-
 function Ecosystem() {
   const words = ["PRODUCT HUNT", "OPENAI", "GPT-6 ASTRA", "ALGORAND", "x402"];
+  const relationships = [
+    "Launch platform",
+    "Model provider",
+    "Development tooling",
+    "TestNet settlement",
+    "Payment protocol",
+  ];
   return (
     <section className="ecosystem" aria-label="Technology and launch context">
       <div className="container ecosystem-caption">
@@ -505,12 +576,15 @@ function Ecosystem() {
               key={copy}
               aria-hidden={copy === 1 ? true : undefined}
             >
-              {words.map((word) => (
+              {words.map((word, index) => (
                 <span
                   className={`ribbon-word ${word === "x402" ? "word-x402" : ""}`}
                   key={word}
                 >
-                  {word}
+                  <span className="ribbon-identity">
+                    {word}
+                    <small className="mono">{relationships[index]}</small>
+                  </span>
                   <i aria-hidden="true">✳</i>
                 </span>
               ))}
@@ -523,19 +597,17 @@ function Ecosystem() {
 }
 
 export default function App() {
-  // Match the build-time HTML on the first render; CSS applies the user's
-  // motion preference immediately, before React hydrates the controls.
-  const [reducedMotion, setReducedMotion] = useState(false);
-  const [paused, setPaused] = useState(false);
+  return (
+    <MotionProvider>
+      <Landing />
+    </MotionProvider>
+  );
+}
+
+function Landing() {
+  const { reducedMotion, paused, hidden, togglePaused } = useMotion();
   useEffect(() => {
-    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setReducedMotion(preference.matches);
-    update();
-    preference.addEventListener("change", update);
-    return () => preference.removeEventListener("change", update);
-  }, []);
-  useEffect(() => {
-    if (reducedMotion || !("IntersectionObserver" in window)) return;
+    if (reducedMotion || paused || !("IntersectionObserver" in window)) return;
     const sections = [
       ...document.querySelectorAll<HTMLElement>("[data-reveal]"),
     ];
@@ -558,10 +630,14 @@ export default function App() {
       observer.disconnect();
       sections.forEach((section) => section.classList.remove("reveal-pending"));
     };
-  }, [reducedMotion]);
+  }, [reducedMotion, paused]);
 
   return (
-    <div id="top" className="site" data-paused={paused || reducedMotion}>
+    <div
+      id="top"
+      className="site"
+      data-paused={paused || reducedMotion || hidden}
+    >
       <a className="skip-link" href="#main">
         Skip to content
       </a>
@@ -607,7 +683,7 @@ export default function App() {
                 className="motion-toggle"
                 aria-pressed={paused || reducedMotion}
                 disabled={reducedMotion}
-                onClick={() => setPaused((value) => !value)}
+                onClick={togglePaused}
               >
                 <Icon name={paused || reducedMotion ? "play" : "pause"} />
                 {reducedMotion
@@ -657,7 +733,7 @@ export default function App() {
                 event at a time.
               </p>
             </div>
-            <WorkflowReplay reducedMotion={reducedMotion} />
+            <WorkflowReplay />
           </section>
           <Resilience />
           <section
@@ -692,12 +768,17 @@ export default function App() {
                   "03",
                 ],
               ].map(([label, title, copy, number]) => (
-                <article className="audience" key={label}>
+                <article
+                  className="audience"
+                  key={label}
+                  tabIndex={0}
+                  aria-labelledby={`audience-${number}`}
+                >
                   <span className="mono audience-label">
                     {label}
                     <span>{number}</span>
                   </span>
-                  <h3>{title}</h3>
+                  <h3 id={`audience-${number}`}>{title}</h3>
                   <p>{copy}</p>
                   <span className="audience-line" aria-hidden="true" />
                 </article>
