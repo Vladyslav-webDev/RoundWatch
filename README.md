@@ -33,7 +33,8 @@ The final product/use case is intentionally not implemented yet.
 x402-challenge/
 ├─ apps/
 │  ├─ server/
-│  └─ client/
+│  ├─ client/
+│  └─ landing/
 ├─ docs/
 │  ├─ ARCHITECTURE.md
 │  ├─ SECURITY.md
@@ -183,7 +184,36 @@ From the repository root:
 pnpm typecheck
 ```
 
-This checks both the resource server and payer client.
+This checks the resource server, payer client, and browser landing page.
+
+## RoundWatch landing
+
+`apps/landing` is the separate Vite/React/TypeScript public product site for
+`roundwatch.observer`. The existing `apps/client` remains a Node payment client.
+The page describes the verified Algorand TestNet observer prototype documented in
+[ROUNDWATCH_SPIKE.md](docs/ROUNDWATCH_SPIKE.md). Its interactive demo is an
+illustrative workflow replay and makes no payment or backend request.
+
+Use Node 24 and the repository-pinned pnpm 12.3.4:
+
+```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm run dev:landing
+corepack pnpm run typecheck:landing
+corepack pnpm run build:landing
+corepack pnpm -C apps/landing run preview
+```
+
+The `corepack` prefix selects the correct version if another pnpm shim is on PATH.
+Netlify settings are in `netlify.toml`: repository-root build command
+`corepack pnpm run build:landing`, publish directory `apps/landing/dist`.
+No environment variables are needed. Deployment and domain configuration remain
+separate from this implementation.
+
+See the [landing specification](docs/landing/LANDING_SPEC.md) and
+[validation report](docs/landing/VALIDATION.md) for design, factual boundaries,
+and review instructions. The baseline milestone inventory below refers to the
+original payment skeleton; it predates the observer spike and this static site.
 
 ## Run the server
 

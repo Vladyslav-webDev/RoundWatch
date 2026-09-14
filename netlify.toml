@@ -1,0 +1,7 @@
+[build]
+  command = "corepack pnpm run build:landing"
+  publish = "apps/landing/dist"
+
+[build.environment]
+  NODE_VERSION = "24"
+  PNPM_VERSION = "12.3.4"

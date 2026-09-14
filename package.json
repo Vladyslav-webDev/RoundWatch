@@ -4,7 +4,10 @@
   "private": true,
   "packageManager": "pnpm@12.3.4",
   "scripts": {
-    "typecheck": "pnpm -C apps/server run typecheck && pnpm -C apps/client run typecheck",
+    "typecheck": "pnpm -C apps/server run typecheck && pnpm -C apps/client run typecheck && pnpm run typecheck:landing",
+    "dev:landing": "pnpm -C apps/landing run dev",
+    "build:landing": "pnpm -C apps/landing run build",
+    "typecheck:landing": "pnpm -C apps/landing run typecheck",
     "dev:server": "pnpm -C apps/server run dev",
     "dev:client": "pnpm -C apps/client run dev"
   }
