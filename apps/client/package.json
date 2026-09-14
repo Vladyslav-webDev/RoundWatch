@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx index.ts",
+    "spike:roundwatch": "tsx roundwatch-spike.ts",
+    "spike:roundwatch:prepare": "tsx roundwatch-spike.ts prepare",
+    "spike:roundwatch:pay": "tsx roundwatch-spike.ts pay",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

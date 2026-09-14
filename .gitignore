@@ -6,6 +6,8 @@ node_modules/
 dist/
 build/
 coverage/
+apps/server/data/
+apps/client/data/
 
 *.log
 .DS_Store
