@@ -7,22 +7,24 @@ import type {
 } from '@x402/core/server';
 import type { ResourceServerExtension } from '@x402/core/types';
 import { ExactAvmScheme } from '@x402/avm/exact/server';
-import { USDC_TESTNET_ASA_ID } from '@x402/avm';
 import {
    bazaarResourceServerExtension,
    declareDiscoveryExtension,
 } from '@x402-avm/extensions';
 
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
+import {
+   TESTNET_NETWORK_CONFIG,
+   type RoundWatchNetworkConfig,
+} from './network-config.js';
 import type {
    RoundWatchStore,
    WatchRecord,
    WatchSpec,
 } from './roundwatch-store.js';
 
-export const ALGORAND_TESTNET =
-   'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=' as const;
-export const TESTNET_USDC_ASSET_ID = Number(USDC_TESTNET_ASA_ID);
+export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
+export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
 
 const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
 const ALGORAND_ADDRESS_PATTERN = /^[A-Z2-7]{58}$/;
@@ -33,6 +35,7 @@ export interface AppDependencies {
    facilitatorClient: FacilitatorClient;
    store: RoundWatchStore;
    indexer: RoundWatchIndexer;
+   networkConfig?: RoundWatchNetworkConfig;
    syncFacilitatorOnStart?: boolean;
 }
 
@@ -52,12 +55,13 @@ export function createApp(dependencies: AppDependencies): Hono {
       facilitatorClient,
       store,
       indexer,
+      networkConfig = TESTNET_NETWORK_CONFIG,
       syncFacilitatorOnStart = true,
    } = dependencies;
 
    const resourceServer = new x402ResourceServer(facilitatorClient);
 
-   resourceServer.register(ALGORAND_TESTNET, new ExactAvmScheme());
+   resourceServer.register(networkConfig.network, new ExactAvmScheme());
    resourceServer.registerExtension(
       bazaarResourceServerExtension as unknown as ResourceServerExtension,
    );
@@ -125,7 +129,10 @@ export function createApp(dependencies: AppDependencies): Hono {
    const app = new Hono();
 
    app.get('/health', c => {
-      return c.json({ status: 'ok' });
+      return c.json({
+         status: 'ok',
+         network: networkConfig.name,
+      });
    });
 
    // This resumes only after @x402/hono has finished settlement.
@@ -161,16 +168,16 @@ export function createApp(dependencies: AppDependencies): Hono {
                   {
                      scheme: 'exact',
                      price: '$0.005',
-                     network: ALGORAND_TESTNET,
+                     network: networkConfig.network,
                      payTo: avmAddress,
                      extra: {
-                        asset: USDC_TESTNET_ASA_ID,
+                        asset: networkConfig.usdcAssetId,
                         tag: 'x402-global-challenge',
                      },
                   },
                ],
                description:
-                  'Test x402 endpoint returning proof of successful Algorand USDC payment',
+                  'x402 endpoint returning proof of successful Algorand USDC payment',
                mimeType: 'application/json',
                extensions: demoDiscovery,
             },
@@ -179,16 +186,15 @@ export function createApp(dependencies: AppDependencies): Hono {
                   {
                      scheme: 'exact',
                      price: '$0.001',
-                     network: ALGORAND_TESTNET,
+                     network: networkConfig.network,
                      payTo: avmAddress,
                      extra: {
-                        asset: USDC_TESTNET_ASA_ID,
-                        tag: 'roundwatch-spike-0',
+                        asset: networkConfig.usdcAssetId,
+                        tag: networkConfig.challengeTag,
                      },
                   },
                ],
-               description:
-                  'Create one durable RoundWatch Spike 0 TestNet watch',
+               description: `Create one durable RoundWatch ${networkConfig.name} watch`,
                mimeType: 'application/json',
             },
          },
@@ -199,7 +205,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       ),
    );
 
-   // Known-good regression baseline.
+   // Known-good regression baseline when ROUNDWATCH_NETWORK is omitted/testnet.
    app.get('/demo', c => {
       return c.json({
          ok: true,
@@ -217,7 +223,7 @@ export function createApp(dependencies: AppDependencies): Hono {
          return c.json({ error: 'Expected a JSON request body' }, 400);
       }
 
-      const parsed = parseWatchSpec(body);
+      const parsed = parseWatchSpec(body, networkConfig.usdcAssetIdNumber);
 
       if ('error' in parsed) {
          return c.json({ error: parsed.error }, 400);
@@ -257,9 +263,10 @@ export function createApp(dependencies: AppDependencies): Hono {
    return app;
 }
 
-function parseWatchSpec(body: unknown):
-   | { spec: WatchSpec }
-   | { error: string } {
+function parseWatchSpec(
+   body: unknown,
+   usdcAssetId: number,
+): { spec: WatchSpec } | { error: string } {
    if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return { error: 'Request body must be an object' };
    }
@@ -315,7 +322,7 @@ function parseWatchSpec(body: unknown):
          idempotencyKey,
          expectedSender,
          expectedReceiver,
-         assetId: TESTNET_USDC_ASSET_ID,
+         assetId: usdcAssetId,
          atomicAmount,
          ...(typeof invoiceNote === 'string' ? { invoiceNote } : {}),
       },
