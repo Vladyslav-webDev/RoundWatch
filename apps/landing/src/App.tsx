@@ -223,7 +223,7 @@ function Product() {
             </div>
           </div>
           <div className="orbit-center">
-            <BrandMark />
+            <BrandMark orbital charge={false} />
           </div>
           <span className="orbit-label label-top mono">Expected payment</span>
           <span className="orbit-label label-bottom mono">
