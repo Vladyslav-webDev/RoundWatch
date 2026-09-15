@@ -1,3 +1,4 @@
+import type { IndexedAssetTransfer } from './roundwatch-reconciler.js';
 import type { WatchRecord } from './roundwatch-store.js';
 
 export interface WatchMatch {
@@ -37,6 +38,10 @@ interface IndexerTransactionsResponse {
    'next-token'?: string;
 }
 
+interface IndexerTransactionResponse {
+   transaction?: IndexerTransaction;
+}
+
 export class AlgorandIndexerClient implements RoundWatchIndexer {
    constructor(
       private readonly baseUrl: string,
@@ -61,6 +66,47 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       }
 
       return health.round!;
+   }
+
+   async lookupAssetTransfer(
+      transactionId: string,
+   ): Promise<IndexedAssetTransfer | undefined> {
+      const response = await this.fetchImplementation(
+         new URL(`/v2/transactions/${encodeURIComponent(transactionId)}`, this.baseUrl),
+         { signal: AbortSignal.timeout(this.timeoutMilliseconds) },
+      );
+
+      if (response.status === 404) {
+         return undefined;
+      }
+
+      if (!response.ok) {
+         throw new Error(`Indexer transaction lookup failed with HTTP ${response.status}`);
+      }
+
+      const body = await response.json() as IndexerTransactionResponse;
+      const transaction = body.transaction;
+      const transfer = transaction?.['asset-transfer-transaction'];
+
+      if (
+         !transaction?.id ||
+         !transaction.sender ||
+         !Number.isSafeInteger(transaction['confirmed-round']) ||
+         !transfer?.receiver ||
+         !Number.isSafeInteger(transfer['asset-id']) ||
+         !Number.isSafeInteger(transfer.amount)
+      ) {
+         return undefined;
+      }
+
+      return {
+         transaction: transaction.id,
+         sender: transaction.sender,
+         receiver: transfer.receiver,
+         assetId: transfer['asset-id']!,
+         atomicAmount: String(transfer.amount),
+         round: transaction['confirmed-round']!,
+      };
    }
 
    async findMatch(
