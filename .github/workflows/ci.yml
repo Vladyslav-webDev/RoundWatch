@@ -14,6 +14,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Reject tracked environment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad_files=$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.example$' || true)
+          if [ -n "$bad_files" ]; then
+            echo "Tracked environment files are forbidden:"
+            echo "$bad_files"
+            exit 1
+          fi
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -34,3 +45,6 @@ jobs:
 
       - name: RoundWatch focused tests
         run: pnpm -C apps/server test
+
+      - name: Build production container
+        run: docker build -t roundwatch-ci .
