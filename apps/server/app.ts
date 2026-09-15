@@ -6,7 +6,15 @@ import type {
    HTTPTransportContext,
 } from '@x402/core/server';
 import type { ResourceServerExtension } from '@x402/core/types';
+import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { ExactAvmScheme } from '@x402/avm/exact/server';
+import {
+   USDC_DECIMALS,
+   convertToTokenAmount,
+   getSenderFromTransaction,
+   getTransactionId,
+   isValidAlgorandAddress,
+} from '@x402/avm';
 import {
    bazaarResourceServerExtension,
    declareDiscoveryExtension,
@@ -19,15 +27,20 @@ import {
 } from './network-config.js';
 import type {
    RoundWatchStore,
+   SettlementIntent,
    WatchRecord,
    WatchSpec,
 } from './roundwatch-store.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
+export const ROUNDWATCH_SERVICE_PRICE_USD = '0.001';
+export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
+   ROUNDWATCH_SERVICE_PRICE_USD,
+   USDC_DECIMALS,
+);
 
 const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
-const ALGORAND_ADDRESS_PATTERN = /^[A-Z2-7]{58}$/;
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
 
 export interface AppDependencies {
@@ -37,6 +50,7 @@ export interface AppDependencies {
    indexer: RoundWatchIndexer;
    networkConfig?: RoundWatchNetworkConfig;
    syncFacilitatorOnStart?: boolean;
+   requireSettlementIntent?: boolean;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -49,6 +63,15 @@ const demoDiscovery = declareDiscoveryExtension({
    },
 });
 
+const watchDiscovery = declareDiscoveryExtension({
+   output: {
+      example: {
+         watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
+         message: 'Durable watch activated after confirmed x402 settlement',
+      },
+   },
+});
+
 export function createApp(dependencies: AppDependencies): Hono {
    const {
       avmAddress,
@@ -57,8 +80,11 @@ export function createApp(dependencies: AppDependencies): Hono {
       indexer,
       networkConfig = TESTNET_NETWORK_CONFIG,
       syncFacilitatorOnStart = true,
+      requireSettlementIntent = networkConfig.name === 'mainnet',
    } = dependencies;
 
+   const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
+   const watchRouteKey = `POST ${watchPath}`;
    const resourceServer = new x402ResourceServer(facilitatorClient);
 
    resourceServer.register(networkConfig.network, new ExactAvmScheme());
@@ -73,7 +99,7 @@ export function createApp(dependencies: AppDependencies): Hono {
 
       if (
          context.phase !== 'after-handler' ||
-         transport?.request.path !== '/spike/watch' ||
+         transport?.request.path !== watchPath ||
          transport.request.method !== 'POST'
       ) {
          return;
@@ -113,7 +139,7 @@ export function createApp(dependencies: AppDependencies): Hono {
          | undefined;
 
       if (
-         transport?.request.path !== '/spike/watch' ||
+         transport?.request.path !== watchPath ||
          transport.request.method !== 'POST'
       ) {
          return;
@@ -136,7 +162,7 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    // This resumes only after @x402/hono has finished settlement.
-   app.use('/spike/watch', async (c, next) => {
+   app.use(watchPath, async (c, next) => {
       await next();
 
       if (c.req.method !== 'POST' || c.res.status >= 400) {
@@ -181,11 +207,11 @@ export function createApp(dependencies: AppDependencies): Hono {
                mimeType: 'application/json',
                extensions: demoDiscovery,
             },
-            'POST /spike/watch': {
+            [watchRouteKey]: {
                accepts: [
                   {
                      scheme: 'exact',
-                     price: '$0.001',
+                     price: `$${ROUNDWATCH_SERVICE_PRICE_USD}`,
                      network: networkConfig.network,
                      payTo: avmAddress,
                      extra: {
@@ -196,6 +222,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                ],
                description: `Create one durable RoundWatch ${networkConfig.name} watch`,
                mimeType: 'application/json',
+               extensions: watchDiscovery,
             },
          },
          resourceServer,
@@ -214,7 +241,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       });
    });
 
-   app.post('/spike/watch', async c => {
+   app.post(watchPath, async c => {
       let body: unknown;
 
       try {
@@ -229,7 +256,37 @@ export function createApp(dependencies: AppDependencies): Hono {
          return c.json({ error: parsed.error }, 400);
       }
 
-      const prepared = store.prepareWatch(parsed.spec);
+      let settlementIntent: SettlementIntent | undefined;
+      const paymentHeader = c.req.header('payment-signature');
+
+      if (paymentHeader) {
+         try {
+            settlementIntent = extractSettlementIntent(
+               paymentHeader,
+               networkConfig.network,
+            );
+         } catch (error) {
+            if (requireSettlementIntent) {
+               console.error(
+                  'RoundWatch could not persist deterministic settlement identity:',
+                  safeErrorMessage(error),
+               );
+               return c.json(
+                  { error: 'Unable to prepare durable settlement reconciliation' },
+                  500,
+               );
+            }
+         }
+      }
+
+      if (requireSettlementIntent && !settlementIntent) {
+         return c.json(
+            { error: 'Durable settlement identity is required on MainNet' },
+            500,
+         );
+      }
+
+      const prepared = store.prepareWatch(parsed.spec, settlementIntent);
 
       if (!prepared.created) {
          return c.json(
@@ -250,7 +307,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       });
    });
 
-   app.get('/spike/watch/:id', c => {
+   app.get(`${watchPath}/:id`, c => {
       const watch = store.getWatch(c.req.param('id'));
 
       if (!watch) {
@@ -261,6 +318,57 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    return app;
+}
+
+function extractSettlementIntent(
+   paymentHeader: string,
+   expectedNetwork: string,
+): SettlementIntent {
+   const decoded = decodePaymentSignatureHeader(paymentHeader) as unknown as {
+      accepted?: { network?: unknown };
+      payload?: unknown;
+   };
+
+   if (
+      decoded.accepted?.network !== undefined &&
+      decoded.accepted.network !== expectedNetwork
+   ) {
+      throw new Error('Payment payload network does not match the configured network');
+   }
+
+   if (!decoded.payload || typeof decoded.payload !== 'object') {
+      throw new Error('Payment payload is missing AVM transaction data');
+   }
+
+   const payload = decoded.payload as Record<string, unknown>;
+   const paymentGroup = payload.paymentGroup;
+   const paymentIndex = payload.paymentIndex;
+
+   if (
+      !Array.isArray(paymentGroup) ||
+      !paymentGroup.every(item => typeof item === 'string') ||
+      !Number.isSafeInteger(paymentIndex) ||
+      (paymentIndex as number) < 0 ||
+      (paymentIndex as number) >= paymentGroup.length
+   ) {
+      throw new Error('Payment payload has an invalid AVM payment group');
+   }
+
+   const encodedTransaction = paymentGroup[paymentIndex as number] as string;
+   const transactionBytes = Buffer.from(encodedTransaction, 'base64');
+
+   if (transactionBytes.length === 0) {
+      throw new Error('Payment transaction is empty');
+   }
+
+   const expectedTransaction = getTransactionId(transactionBytes);
+   const payer = getSenderFromTransaction(transactionBytes, true);
+
+   return {
+      expectedTransaction,
+      network: expectedNetwork,
+      payer,
+   };
 }
 
 function parseWatchSpec(
@@ -288,16 +396,16 @@ function parseWatchSpec(
 
    if (
       typeof expectedSender !== 'string' ||
-      !ALGORAND_ADDRESS_PATTERN.test(expectedSender)
+      !isValidAlgorandAddress(expectedSender)
    ) {
-      return { error: 'expectedSender must be an Algorand address' };
+      return { error: 'expectedSender must be a valid Algorand address' };
    }
 
    if (
       typeof expectedReceiver !== 'string' ||
-      !ALGORAND_ADDRESS_PATTERN.test(expectedReceiver)
+      !isValidAlgorandAddress(expectedReceiver)
    ) {
-      return { error: 'expectedReceiver must be an Algorand address' };
+      return { error: 'expectedReceiver must be a valid Algorand address' };
    }
 
    if (typeof atomicAmount !== 'string' || !/^[1-9]\d*$/.test(atomicAmount)) {
