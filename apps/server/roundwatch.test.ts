@@ -35,7 +35,8 @@ import {
 } from './roundwatch-store.js';
 
 const SENDER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
-const RECEIVER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAR7CWY';
+const RECEIVER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+const WRONG_RECEIVER = 'NOT_THE_EXPECTED_RECEIVER';
 const SPEC: WatchSpec = {
    idempotencyKey: 'invoice-0001',
    expectedSender: SENDER,
@@ -194,7 +195,7 @@ test('Algorand Indexer matching checks sender, receiver, ASA, amount, and note',
          transactions: [
             assetTransferTransaction({
                id: 'WRONG_RECEIVER',
-               receiver: SENDER,
+               receiver: WRONG_RECEIVER,
                note: correctNote,
             }),
             assetTransferTransaction({
