@@ -1,13 +1,14 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import RootApp from "./RootApp";
 import "./styles.css";
 import "./interaction.css";
+import "./legal.css";
 
 const root = document.getElementById("root")!;
 const app = (
   <React.StrictMode>
-    <App />
+    <RootApp path={window.location.pathname} />
   </React.StrictMode>
 );
 
