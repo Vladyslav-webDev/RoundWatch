@@ -13,6 +13,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Full-history secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.29.1 \
+            git --redact --no-banner /repo
 
       - name: Reject tracked environment secrets
         shell: bash
