@@ -16,9 +16,10 @@ let frame = 0;
 let previousTime = 0;
 
 const idleVelocity = 1; // One revolution every ten seconds.
-const maximumVelocity = 56; // 5.6 revolutions per second at full charge.
-const acceleration = 19.65; // ~2.8 seconds from idle to maximum.
-const deceleration = 13.75; // ~4 seconds to coast back to idle.
+const maximumVelocity = 72; // 7.2 revolutions per second at full charge.
+const acceleration = 25.36; // ~2.8 seconds from idle to maximum.
+const deceleration = 17.75; // ~4 seconds to coast back to idle.
+const touchChargeDuration = 3600; // One tap charges, then releases automatically.
 
 function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
@@ -136,6 +137,8 @@ export function useOrbitalCharge(enabled: boolean, chargeEnabled = true) {
 
     let visible = !("IntersectionObserver" in window);
     let pointer = false;
+    let touchCharging = false;
+    let touchTimer: number | null = null;
     let motionState = currentMotion.current;
     let finePointer = window.matchMedia(
       "(hover: hover) and (pointer: fine)",
@@ -146,7 +149,8 @@ export function useOrbitalCharge(enabled: boolean, chargeEnabled = true) {
     const trigger = mark.closest("a, button, [data-orbital-trigger]") ?? mark;
 
     function synchronize() {
-      const charging = chargeEnabled && finePointer && pointer;
+      const charging =
+        chargeEnabled && ((finePointer && pointer) || touchCharging);
       orbit.target = charging ? maximumVelocity : idleVelocity;
 
       const stopped =
@@ -172,6 +176,17 @@ export function useOrbitalCharge(enabled: boolean, chargeEnabled = true) {
       }
     }
 
+    function clearTouchCharge() {
+      if (touchTimer !== null) {
+        window.clearTimeout(touchTimer);
+        touchTimer = null;
+      }
+      if (touchCharging) {
+        touchCharging = false;
+        synchronize();
+      }
+    }
+
     const enter = (event: Event) => {
       const pointerEvent = event as PointerEvent;
       if (!finePointer || pointerEvent.pointerType === "touch") return;
@@ -182,15 +197,42 @@ export function useOrbitalCharge(enabled: boolean, chargeEnabled = true) {
       pointer = false;
       synchronize();
     };
+    const tapCharge = (event: Event) => {
+      if (
+        !chargeEnabled ||
+        finePointer ||
+        motionState.paused ||
+        motionState.reducedMotion ||
+        motionState.hidden
+      )
+        return;
+
+      // On touch devices the mark itself is the interaction target. Prevent the
+      // surrounding brand link from navigating for this tap; tapping the brand
+      // text still behaves like the normal link.
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (touchTimer !== null) window.clearTimeout(touchTimer);
+      touchCharging = true;
+      synchronize();
+      touchTimer = window.setTimeout(() => {
+        touchTimer = null;
+        touchCharging = false;
+        synchronize();
+      }, touchChargeDuration);
+    };
     const pointerModeChanged = (event: MediaQueryListEvent) => {
       finePointer = event.matches;
       if (!finePointer) pointer = false;
+      if (finePointer) clearTouchCharge();
       synchronize();
     };
 
     if (chargeEnabled) {
       trigger.addEventListener("pointerenter", enter);
       trigger.addEventListener("pointerleave", leave);
+      mark.addEventListener("click", tapCharge);
       pointerQuery.addEventListener("change", pointerModeChanged);
     }
 
@@ -205,6 +247,7 @@ export function useOrbitalCharge(enabled: boolean, chargeEnabled = true) {
 
     updateMotion.current = (next) => {
       motionState = next;
+      if (next.paused || next.reducedMotion || next.hidden) clearTouchCharge();
       synchronize();
     };
 
@@ -212,12 +255,14 @@ export function useOrbitalCharge(enabled: boolean, chargeEnabled = true) {
     synchronize();
 
     return () => {
+      clearTouchCharge();
       rest(orbit);
       animation.cancel();
       observer?.disconnect();
       if (chargeEnabled) {
         trigger.removeEventListener("pointerenter", enter);
         trigger.removeEventListener("pointerleave", leave);
+        mark.removeEventListener("click", tapCharge);
         pointerQuery.removeEventListener("change", pointerModeChanged);
       }
       updateMotion.current = null;
