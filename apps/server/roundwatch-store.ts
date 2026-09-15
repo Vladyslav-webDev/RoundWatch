@@ -18,9 +18,18 @@ export interface WatchSpec {
    invoiceNote?: string;
 }
 
+export interface SettlementIntent {
+   expectedTransaction: string;
+   network: string;
+   payer?: string;
+}
+
 export interface WatchRecord extends WatchSpec {
    id: string;
    state: WatchState;
+   expectedServiceTransaction?: string;
+   expectedServiceNetwork?: string;
+   expectedServicePayer?: string;
    serviceTransaction?: string;
    serviceNetwork?: string;
    servicePayer?: string;
@@ -47,6 +56,9 @@ interface WatchRow {
    asset_id: number;
    atomic_amount: string;
    invoice_note: string | null;
+   expected_service_transaction: string | null;
+   expected_service_network: string | null;
+   expected_service_payer: string | null;
    service_transaction: string | null;
    service_network: string | null;
    service_payer: string | null;
@@ -86,6 +98,9 @@ export class RoundWatchStore {
             asset_id INTEGER NOT NULL,
             atomic_amount TEXT NOT NULL,
             invoice_note TEXT,
+            expected_service_transaction TEXT,
+            expected_service_network TEXT,
+            expected_service_payer TEXT,
             service_transaction TEXT UNIQUE,
             service_network TEXT,
             service_payer TEXT,
@@ -97,9 +112,25 @@ export class RoundWatchStore {
             matched_round INTEGER
          );
       `);
+
+      this.ensureColumn(
+         'expected_service_transaction',
+         'expected_service_transaction TEXT',
+      );
+      this.ensureColumn('expected_service_network', 'expected_service_network TEXT');
+      this.ensureColumn('expected_service_payer', 'expected_service_payer TEXT');
+
+      this.database.exec(`
+         CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_expected_service_tx_unique
+         ON roundwatch_watches(expected_service_transaction)
+         WHERE expected_service_transaction IS NOT NULL;
+      `);
    }
 
-   prepareWatch(spec: WatchSpec): {
+   prepareWatch(
+      spec: WatchSpec,
+      settlementIntent?: SettlementIntent,
+   ): {
       watch: WatchRecord;
       created: boolean;
    } {
@@ -122,8 +153,11 @@ export class RoundWatchStore {
             asset_id,
             atomic_amount,
             invoice_note,
+            expected_service_transaction,
+            expected_service_network,
+            expected_service_payer,
             created_at
-         ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
          id,
          spec.idempotencyKey,
@@ -132,6 +166,9 @@ export class RoundWatchStore {
          spec.assetId,
          spec.atomicAmount,
          spec.invoiceNote ?? null,
+         settlementIntent?.expectedTransaction ?? null,
+         settlementIntent?.network ?? null,
+         settlementIntent?.payer ?? null,
          createdAt,
       );
 
@@ -150,6 +187,34 @@ export class RoundWatchStore {
 
       if (!existing) {
          throw new Error(`Cannot activate missing watch ${id}`);
+      }
+
+      if (
+         existing.expectedServiceTransaction &&
+         existing.expectedServiceTransaction !== evidence.transaction
+      ) {
+         throw new Error(
+            `Watch ${id} settlement transaction does not match the prepared payment`,
+         );
+      }
+
+      if (
+         existing.expectedServiceNetwork &&
+         existing.expectedServiceNetwork !== evidence.network
+      ) {
+         throw new Error(
+            `Watch ${id} settlement network does not match the prepared payment`,
+         );
+      }
+
+      if (
+         existing.expectedServicePayer &&
+         evidence.payer &&
+         existing.expectedServicePayer !== evidence.payer
+      ) {
+         throw new Error(
+            `Watch ${id} settlement payer does not match the prepared payment`,
+         );
       }
 
       if (existing.state === 'active' || existing.state === 'matched') {
@@ -253,8 +318,31 @@ export class RoundWatchStore {
       return rows.map(mapRow);
    }
 
+   listSettlementPendingWatches(): WatchRecord[] {
+      const rows = this.database.prepare(`
+         SELECT * FROM roundwatch_watches
+         WHERE state = 'settlement_pending'
+           AND expected_service_transaction IS NOT NULL
+         ORDER BY created_at ASC
+      `).all() as unknown as WatchRow[];
+
+      return rows.map(mapRow);
+   }
+
    close(): void {
       this.database.close();
+   }
+
+   private ensureColumn(name: string, definition: string): void {
+      const columns = this.database.prepare(
+         'PRAGMA table_info(roundwatch_watches)',
+      ).all() as unknown as Array<{ name: string }>;
+
+      if (!columns.some(column => column.name === name)) {
+         this.database.exec(
+            `ALTER TABLE roundwatch_watches ADD COLUMN ${definition};`,
+         );
+      }
    }
 }
 
@@ -268,6 +356,15 @@ function mapRow(row: WatchRow): WatchRecord {
       assetId: row.asset_id,
       atomicAmount: row.atomic_amount,
       ...(row.invoice_note === null ? {} : { invoiceNote: row.invoice_note }),
+      ...(row.expected_service_transaction === null
+         ? {}
+         : { expectedServiceTransaction: row.expected_service_transaction }),
+      ...(row.expected_service_network === null
+         ? {}
+         : { expectedServiceNetwork: row.expected_service_network }),
+      ...(row.expected_service_payer === null
+         ? {}
+         : { expectedServicePayer: row.expected_service_payer }),
       ...(row.service_transaction === null
          ? {}
          : { serviceTransaction: row.service_transaction }),
