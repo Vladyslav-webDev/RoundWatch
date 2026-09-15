@@ -64,6 +64,29 @@ const demoDiscovery = declareDiscoveryExtension({
 });
 
 const watchDiscovery = declareDiscoveryExtension({
+   bodyType: 'json',
+   input: {
+      idempotencyKey: 'invoice-2026-09-15-001',
+      expectedSender: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
+      expectedReceiver: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAR7CWY',
+      atomicAmount: '1000',
+      invoiceNote: 'roundwatch:invoice-2026-09-15-001',
+   },
+   inputSchema: {
+      properties: {
+         idempotencyKey: { type: 'string', minLength: 8, maxLength: 128 },
+         expectedSender: { type: 'string', minLength: 58, maxLength: 58 },
+         expectedReceiver: { type: 'string', minLength: 58, maxLength: 58 },
+         atomicAmount: { type: 'string', pattern: '^[1-9]\\d*$' },
+         invoiceNote: { type: 'string', minLength: 1, maxLength: 128 },
+      },
+      required: [
+         'idempotencyKey',
+         'expectedSender',
+         'expectedReceiver',
+         'atomicAmount',
+      ],
+   },
    output: {
       example: {
          watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
