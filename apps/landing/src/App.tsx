@@ -552,14 +552,13 @@ function Technology() {
 }
 
 function Ecosystem() {
-  const words = ["PRODUCT HUNT", "OPENAI", "GPT-6 ASTRA", "ALGORAND", "x402"];
-  const relationships = [
-    "Launch platform",
-    "Model provider",
-    "Development tooling",
-    "TestNet settlement",
-    "Payment protocol",
-  ];
+  const identities = [
+    { key: "product-hunt", name: "Product Hunt", relationship: "Launch platform" },
+    { key: "openai", name: "OpenAI", relationship: "Model provider" },
+    { key: "astra", name: "GPT-6 Astra", relationship: "Development tooling" },
+    { key: "algorand", name: "Algorand", relationship: "TestNet settlement" },
+    { key: "x402", name: "x402", relationship: "Payment protocol" },
+  ] as const;
   return (
     <section className="ecosystem" aria-label="Technology and launch context">
       <div className="container ecosystem-caption">
@@ -576,14 +575,15 @@ function Ecosystem() {
               key={copy}
               aria-hidden={copy === 1 ? true : undefined}
             >
-              {words.map((word, index) => (
+              {identities.map((identity) => (
                 <span
-                  className={`ribbon-word ${word === "x402" ? "word-x402" : ""}`}
-                  key={word}
+                  className={`ribbon-word ${identity.key === "x402" ? "word-x402" : ""}`}
+                  data-brand={identity.key}
+                  key={identity.key}
                 >
                   <span className="ribbon-identity">
-                    {word}
-                    <small className="mono">{relationships[index]}</small>
+                    {identity.name}
+                    <small className="mono">{identity.relationship}</small>
                   </span>
                   <i aria-hidden="true">✳</i>
                 </span>
