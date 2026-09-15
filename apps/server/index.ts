@@ -13,7 +13,11 @@ import { resolveRoundWatchNetwork } from './network-config.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
-import { RoundWatchStore } from './roundwatch-store.js';
+import {
+   RoundWatchStore,
+   type SettlementEvidence,
+   type WatchRecord,
+} from './roundwatch-store.js';
 
 config();
 
@@ -38,6 +42,16 @@ try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
+   process.exit(1);
+}
+
+const faultExitAfterSettle =
+   process.env.ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE?.trim() === '1';
+
+if (faultExitAfterSettle && networkConfig.name !== 'testnet') {
+   console.error(
+      'ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE is a TestNet-only fault-injection switch and is forbidden on MainNet',
+   );
    process.exit(1);
 }
 
@@ -92,7 +106,9 @@ try {
 const facilitatorClient = new HTTPFacilitatorClient({
    url: facilitatorUrl,
 });
-const store = new RoundWatchStore(databasePath);
+const store = faultExitAfterSettle
+   ? new TestnetExitAfterSettleStore(databasePath)
+   : new RoundWatchStore(databasePath);
 const indexer = new AlgorandIndexerClient(indexerUrl);
 const poller = new RoundWatchPoller(
    store,
@@ -131,6 +147,12 @@ server.on('listening', () => {
    console.log(`USDC ASA: ${networkConfig.usdcAssetId}`);
    console.log(`Indexer: ${indexerUrl}`);
    console.log(`SQLite: ${databasePath}`);
+
+   if (faultExitAfterSettle) {
+      console.warn(
+         'TESTNET FAULT INJECTION ARMED: the process will exit after confirmed settlement and before SQLite activation',
+      );
+   }
 });
 
 server.on('close', () => {
@@ -148,6 +170,19 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
    process.once(signal, () => {
       server.close();
    });
+}
+
+class TestnetExitAfterSettleStore extends RoundWatchStore {
+   override activateWatch(
+      _id: string,
+      evidence: SettlementEvidence,
+      _activationRound?: number,
+   ): WatchRecord {
+      console.error(
+         `INTENTIONAL TESTNET FAULT: settlement ${evidence.transaction} succeeded; exiting before SQLite activation commit`,
+      );
+      process.exit(86);
+   }
 }
 
 function assertUrlSafety(

@@ -16,6 +16,7 @@ This document tracks production hardening required before any real MainNet payme
 - Production startup requires an absolute persistent SQLite path and HTTPS facilitator/Indexer URLs.
 - A settlement reconciliation worker is implemented for the known settlement → SQLite activation crash window.
 - A production Dockerfile, `.dockerignore`, deployment runbook, current-tree env-secret guard, and GitHub Actions verification are present.
+- CI now performs a full-history Gitleaks scan from a full-depth checkout in addition to the current-tree `.env` guard.
 - The operator has confirmed that both dedicated MainNet Pera accounts hold ALGO and are opted into verified USDC; the Payer also has enough USDC for the first minimal E2E.
 
 ## Settlement → activation reconciliation
@@ -62,10 +63,10 @@ This closes the design gap in code and focused tests. It is **not yet live proof
 | Production SQLite guard | Implemented | MainNet requires explicit absolute DB path intended for a persistent volume |
 | URL / address startup validation | Implemented | Checksum-valid receiver and HTTPS production URLs required |
 | Current-tree env-secret guard | Implemented | CI rejects tracked `.env` / `.env.*` other than `.env.example` |
-| History-aware secret scan | Pending | Run a local/full-history scanner before final public release |
+| History-aware secret scan | Passed | CI full-depth checkout + Gitleaks v8.29.1 scanned complete git history successfully on 2026-09-15 |
 | Production container | Implemented | Root Dockerfile + `.dockerignore`; CI builds the image |
 | MainNet wallet funding / USDC opt-in | Ready | Human operator confirmed dedicated Payer and Receiver are funded and opted in |
-| Live TestNet reconciliation fault injection | Pending | Must kill process in the settlement→activation window and prove restart reconciliation |
+| Live TestNet reconciliation fault injection | Pending | Run the prepared TestNet-only crash switch and prove restart reconciliation |
 | Public HTTPS API + persistent disk | Pending | Requires hosting/DNS setup outside GitHub connector |
 | Real MainNet x402 paid E2E | Pending | Human wallet signing required only after deployment preflight passes |
 | MainNet transaction verification | Pending | Verify both service settlement and later watched payment on-chain |
@@ -79,6 +80,7 @@ This closes the design gap in code and focused tests. It is **not yet live proof
 - TestNet remains the default for local development until MainNet is explicitly enabled.
 - Do not merge this hardening branch solely because unit tests pass. Live TestNet fault injection and deployment preflight are still required.
 - The first real MainNet payment must remain minimal and must be explicitly authorized by the human wallet owner.
+- `ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=1` is a TestNet-only fault switch; startup must reject it on MainNet.
 
 ## Manual wallet status
 
@@ -94,7 +96,7 @@ Do not move additional funds unless the first MainNet E2E needs them.
 
 Code preparation is not evidence that MainNet works. The production gate passes only after:
 
-- CI is green, including typecheck, focused tests, secret guard, and container build;
+- CI is green, including full-history secret scan, typecheck, focused tests, current-tree secret guard, and container build;
 - live TestNet fault injection proves settlement reconciliation after a real process death;
 - the public HTTPS deployment is healthy and uses persistent storage;
 - an unpaid public MainNet watch request advertises the intended MainNet network, USDC ASA, price, and receiver;

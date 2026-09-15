@@ -33,39 +33,57 @@ async function main(): Promise<void> {
 
    if (process.argv[2] === 'prepare') {
       const state = await prepareWatch(account, sender);
-      mkdirSync(dirname(statePath), { recursive: true });
-      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, {
-         encoding: 'utf8',
-         mode: 0o600,
-      });
+      writeState(state);
       console.log(`Restart checkpoint written to ${statePath}.`);
       return;
    }
 
+   if (process.argv[2] === 'recover') {
+      const state = readState();
+      const recovered = await recoverWatch(account, state);
+      writeState(recovered);
+      console.log(`Recovered watch checkpoint written to ${statePath}.`);
+      return;
+   }
+
    if (process.argv[2] === 'pay') {
-      const state = JSON.parse(readFileSync(statePath, 'utf8')) as LiveState;
-      await payInvoice(account, state);
+      const state = readState();
+
+      if (!state.watchId) {
+         throw new Error(
+            'Checkpoint has no watchId. Run spike:roundwatch:recover after restarting the fault-injected server.',
+         );
+      }
+
+      await payInvoice(account, state as ReadyLiveState);
       return;
    }
 
    const state = await prepareWatch(account, sender);
+   writeState(state);
    await payInvoice(account, state);
 }
 
 async function prepareWatch(
    account: algosdk.Account,
    sender: string,
-): Promise<LiveState> {
+): Promise<ReadyLiveState> {
    const nonce = randomUUID();
-   const requestBody = {
+   const requestBody: LiveState = {
       idempotencyKey: `roundwatch-${nonce}`,
       expectedSender: sender,
       expectedReceiver: receiver!,
       atomicAmount: '1',
       invoiceNote: `roundwatch:${nonce}`,
    };
-   const watchUrl = `${serverUrl}/spike/watch`;
 
+   // Persist the exact request before the paid retry. During deliberate fault
+   // injection the server is expected to die after settlement, so the client
+   // may never receive the watch ID even though the service payment settled.
+   writeState(requestBody);
+   console.log(`Pre-settlement checkpoint written to ${statePath}.`);
+
+   const watchUrl = `${serverUrl}/spike/watch`;
    const unpaid = await fetch(watchUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -78,11 +96,8 @@ async function prepareWatch(
 
    console.log('Unpaid spike request returned HTTP 402.');
 
-   const signer = toClientAvmSigner(Buffer.from(account.sk).toString('base64'));
-   const client = new x402Client();
-   client.register(ALGORAND_TESTNET, new ExactAvmScheme(signer));
+   const client = createPaymentClient(account);
    const fetchWithPayment = wrapFetchWithPayment(fetch, client);
-
    const paid = await fetchWithPayment(watchUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -119,9 +134,68 @@ async function prepareWatch(
    };
 }
 
-async function payInvoice(
+async function recoverWatch(
    account: algosdk.Account,
    state: LiveState,
+): Promise<ReadyLiveState> {
+   if (state.watchId) {
+      const watch = await readWatch(state.watchId);
+
+      if (watch.state !== 'active' && watch.state !== 'matched') {
+         throw new Error(`Existing checkpoint watch is ${watch.state}, not recovered`);
+      }
+
+      return state as ReadyLiveState;
+   }
+
+   const client = createPaymentClient(account);
+   const fetchWithPayment = wrapFetchWithPayment(fetch, client);
+   const response = await fetchWithPayment(`${serverUrl}/spike/watch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+         idempotencyKey: state.idempotencyKey,
+         expectedSender: state.expectedSender,
+         expectedReceiver: state.expectedReceiver,
+         atomicAmount: state.atomicAmount,
+         invoiceNote: state.invoiceNote,
+      }),
+   });
+
+   if (response.status !== 409) {
+      throw new Error(
+         `Expected duplicate recovery request to return HTTP 409 without a second settlement; received ${response.status}`,
+      );
+   }
+
+   const body = await response.json() as {
+      watch?: PublicWatch & { id?: string };
+   };
+   const recovered = body.watch;
+
+   if (!recovered?.id) {
+      throw new Error('Duplicate recovery response did not expose the existing watch ID');
+   }
+
+   if (recovered.state !== 'active' && recovered.state !== 'matched') {
+      throw new Error(
+         `Reconciliation has not recovered the watch yet; current state=${recovered.state}`,
+      );
+   }
+
+   console.log(
+      `Recovered watch ${recovered.id} is ${recovered.state}; duplicate request was not settled again.`,
+   );
+
+   return {
+      ...state,
+      watchId: recovered.id,
+   };
+}
+
+async function payInvoice(
+   account: algosdk.Account,
+   state: ReadyLiveState,
 ): Promise<void> {
    const active = await readWatch(state.watchId);
 
@@ -171,7 +245,30 @@ interface LiveState {
    expectedReceiver: string;
    atomicAmount: string;
    invoiceNote: string;
+   watchId?: string;
+}
+
+interface ReadyLiveState extends LiveState {
    watchId: string;
+}
+
+function createPaymentClient(account: algosdk.Account): x402Client {
+   const signer = toClientAvmSigner(Buffer.from(account.sk).toString('base64'));
+   const client = new x402Client();
+   client.register(ALGORAND_TESTNET, new ExactAvmScheme(signer));
+   return client;
+}
+
+function writeState(state: LiveState): void {
+   mkdirSync(dirname(statePath), { recursive: true });
+   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+   });
+}
+
+function readState(): LiveState {
+   return JSON.parse(readFileSync(statePath, 'utf8')) as LiveState;
 }
 
 async function readWatch(watchId: string): Promise<PublicWatch> {
