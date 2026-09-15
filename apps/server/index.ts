@@ -21,6 +21,19 @@ import {
 
 config();
 
+class TestnetExitAfterSettleStore extends RoundWatchStore {
+   override activateWatch(
+      _id: string,
+      evidence: SettlementEvidence,
+      _activationRound?: number,
+   ): WatchRecord {
+      console.error(
+         `INTENTIONAL TESTNET FAULT: settlement ${evidence.transaction} succeeded; exiting before SQLite activation commit`,
+      );
+      process.exit(86);
+   }
+}
+
 const avmAddress = process.env.AVM_ADDRESS?.trim();
 const facilitatorUrl = process.env.FACILITATOR_URL?.trim();
 
@@ -170,19 +183,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
    process.once(signal, () => {
       server.close();
    });
-}
-
-class TestnetExitAfterSettleStore extends RoundWatchStore {
-   override activateWatch(
-      _id: string,
-      evidence: SettlementEvidence,
-      _activationRound?: number,
-   ): WatchRecord {
-      console.error(
-         `INTENTIONAL TESTNET FAULT: settlement ${evidence.transaction} succeeded; exiting before SQLite activation commit`,
-      );
-      process.exit(86);
-   }
 }
 
 function assertUrlSafety(
