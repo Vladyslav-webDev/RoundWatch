@@ -1,24 +1,34 @@
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
 import { config } from 'dotenv';
 import { serve } from '@hono/node-server';
 import { HTTPFacilitatorClient } from '@x402/core/server';
+import { isValidAlgorandAddress } from '@x402/avm';
 
-import { createApp } from './app.js';
+import {
+   createApp,
+   ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+} from './app.js';
 import { resolveRoundWatchNetwork } from './network-config.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
+import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { RoundWatchStore } from './roundwatch-store.js';
 
 config();
 
-const avmAddress = process.env.AVM_ADDRESS;
-const facilitatorUrl = process.env.FACILITATOR_URL;
+const avmAddress = process.env.AVM_ADDRESS?.trim();
+const facilitatorUrl = process.env.FACILITATOR_URL?.trim();
 
 if (!avmAddress || !facilitatorUrl) {
    console.error(
       'Missing environment variables: AVM_ADDRESS or FACILITATOR_URL',
    );
+   process.exit(1);
+}
+
+if (!isValidAlgorandAddress(avmAddress)) {
+   console.error('AVM_ADDRESS is not a valid Algorand address');
    process.exit(1);
 }
 
@@ -40,6 +50,17 @@ if (networkConfig.name === 'mainnet' && !configuredDatabasePath) {
    process.exit(1);
 }
 
+if (
+   networkConfig.name === 'mainnet' &&
+   configuredDatabasePath &&
+   !isAbsolute(configuredDatabasePath)
+) {
+   console.error(
+      'ROUNDWATCH_DB_PATH must be an absolute path on MainNet and should point at a mounted persistent volume',
+   );
+   process.exit(1);
+}
+
 const databasePath = resolve(
    configuredDatabasePath || 'data/roundwatch.sqlite',
 );
@@ -49,6 +70,24 @@ const pollIntervalMilliseconds = parsePositiveInteger(
    process.env.ROUNDWATCH_POLL_INTERVAL_MS,
    5_000,
 );
+const reconciliationIntervalMilliseconds = parsePositiveInteger(
+   process.env.ROUNDWATCH_RECONCILE_INTERVAL_MS,
+   5_000,
+);
+
+try {
+   assertUrlSafety(facilitatorUrl, 'FACILITATOR_URL', networkConfig.name);
+   assertUrlSafety(indexerUrl, 'ALGORAND_INDEXER_URL', networkConfig.name);
+
+   if (networkConfig.name === 'mainnet' && /testnet/i.test(indexerUrl)) {
+      throw new Error(
+         'ALGORAND_INDEXER_URL looks like a TestNet endpoint while ROUNDWATCH_NETWORK=mainnet',
+      );
+   }
+} catch (error) {
+   console.error(error instanceof Error ? error.message : error);
+   process.exit(1);
+}
 
 const facilitatorClient = new HTTPFacilitatorClient({
    url: facilitatorUrl,
@@ -60,6 +99,13 @@ const poller = new RoundWatchPoller(
    indexer,
    pollIntervalMilliseconds,
 );
+const reconciler = new SettlementReconciler(store, indexer, {
+   network: networkConfig.network,
+   receiver: avmAddress,
+   assetId: networkConfig.usdcAssetIdNumber,
+   atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+   intervalMilliseconds: reconciliationIntervalMilliseconds,
+});
 const app = createApp({
    avmAddress,
    facilitatorClient,
@@ -76,6 +122,7 @@ const server = serve({
 });
 
 server.on('listening', () => {
+   reconciler.start();
    poller.start();
    console.log(
       `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
@@ -87,6 +134,7 @@ server.on('listening', () => {
 });
 
 server.on('close', () => {
+   reconciler.stop();
    poller.stop();
    store.close();
    console.log('x402 Resource Server CLOSED');
@@ -100,6 +148,24 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
    process.once(signal, () => {
       server.close();
    });
+}
+
+function assertUrlSafety(
+   value: string,
+   variableName: string,
+   networkName: 'testnet' | 'mainnet',
+): void {
+   let url: URL;
+
+   try {
+      url = new URL(value);
+   } catch {
+      throw new Error(`${variableName} must be a valid absolute URL`);
+   }
+
+   if (networkName === 'mainnet' && url.protocol !== 'https:') {
+      throw new Error(`${variableName} must use HTTPS on MainNet`);
+   }
 }
 
 function parsePositiveInteger(
