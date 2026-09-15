@@ -16,9 +16,9 @@ let frame = 0;
 let previousTime = 0;
 
 const idleVelocity = 1; // One revolution every ten seconds.
-const maximumVelocity = 8; // 0.8 revolutions per second at full charge.
-const acceleration = 2.5; // ~2.8 seconds from idle to maximum.
-const deceleration = 1.75; // ~4 seconds to coast back to idle.
+const maximumVelocity = 56; // 5.6 revolutions per second at full charge.
+const acceleration = 19.65; // ~2.8 seconds from idle to maximum.
+const deceleration = 13.75; // ~4 seconds to coast back to idle.
 
 function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
