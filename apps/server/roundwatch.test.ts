@@ -34,8 +34,8 @@ import {
    type WatchSpec,
 } from './roundwatch-store.js';
 
-const SENDER = 'A'.repeat(58);
-const RECEIVER = 'B'.repeat(58);
+const SENDER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+const RECEIVER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAR7CWY';
 const SPEC: WatchSpec = {
    idempotencyKey: 'invoice-0001',
    expectedSender: SENDER,
