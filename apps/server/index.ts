@@ -5,6 +5,7 @@ import { serve } from '@hono/node-server';
 import { HTTPFacilitatorClient } from '@x402/core/server';
 
 import { createApp } from './app.js';
+import { resolveRoundWatchNetwork } from './network-config.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { RoundWatchStore } from './roundwatch-store.js';
@@ -21,11 +22,29 @@ if (!avmAddress || !facilitatorUrl) {
    process.exit(1);
 }
 
+let networkConfig;
+
+try {
+   networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
+} catch (error) {
+   console.error(error instanceof Error ? error.message : error);
+   process.exit(1);
+}
+
+const configuredDatabasePath = process.env.ROUNDWATCH_DB_PATH?.trim();
+
+if (networkConfig.name === 'mainnet' && !configuredDatabasePath) {
+   console.error(
+      'ROUNDWATCH_DB_PATH must be explicitly configured for MainNet so durable state is not written to an accidental ephemeral path',
+   );
+   process.exit(1);
+}
+
 const databasePath = resolve(
-   process.env.ROUNDWATCH_DB_PATH ?? 'data/roundwatch.sqlite',
+   configuredDatabasePath || 'data/roundwatch.sqlite',
 );
 const indexerUrl =
-   process.env.ALGORAND_INDEXER_URL ?? 'https://testnet-idx.algonode.cloud';
+   process.env.ALGORAND_INDEXER_URL?.trim() || networkConfig.indexerUrl;
 const pollIntervalMilliseconds = parsePositiveInteger(
    process.env.ROUNDWATCH_POLL_INTERVAL_MS,
    5_000,
@@ -46,9 +65,10 @@ const app = createApp({
    facilitatorClient,
    store,
    indexer,
+   networkConfig,
 });
 
-const port = 4021;
+const port = parsePositiveInteger(process.env.PORT, 4021);
 
 const server = serve({
    fetch: app.fetch,
@@ -58,8 +78,12 @@ const server = serve({
 server.on('listening', () => {
    poller.start();
    console.log(
-      `x402 Resource Server listening at http://localhost:${port}`,
+      `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
    );
+   console.log(`Network: ${networkConfig.name}`);
+   console.log(`USDC ASA: ${networkConfig.usdcAssetId}`);
+   console.log(`Indexer: ${indexerUrl}`);
+   console.log(`SQLite: ${databasePath}`);
 });
 
 server.on('close', () => {
