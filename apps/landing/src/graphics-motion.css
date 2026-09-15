@@ -7,17 +7,21 @@
   transform-box: view-box;
   transform-origin: 20px 20px;
 }
-.orbital-trail {
-  fill: none;
-  stroke: #ffe9cb;
-  stroke-width: 3.2;
-  stroke-linecap: round;
-  opacity: var(--orbital-trail, 0);
+.orbital-dot {
+  filter: drop-shadow(0 0 var(--orbital-dot-glow, 0px) #fff3df);
 }
-.orbital-trail.trail-far {
-  stroke: #ff642d;
-  stroke-width: 2.2;
-  opacity: calc(var(--orbital-trail, 0) * 0.3);
+.orbital-ghost {
+  fill: var(--text);
+  opacity: 0;
+}
+.orbital-ghost.ghost-near {
+  opacity: calc(var(--orbital-ghost, 0) * 0.52);
+}
+.orbital-ghost.ghost-mid {
+  opacity: calc(var(--orbital-ghost, 0) * 0.28);
+}
+.orbital-ghost.ghost-far {
+  opacity: calc(var(--orbital-ghost, 0) * 0.12);
 }
 .orbital-ring-pulse {
   stroke: #f5f3ee;
@@ -26,6 +30,11 @@
 }
 .orbital-brand[data-orbital-stopped="true"] .orbital-ring-pulse {
   animation-play-state: paused;
+}
+.brand:focus-visible .orbital-brand .brand-ring,
+.architecture-stage:focus-visible .orbital-brand .brand-ring {
+  stroke: var(--text);
+  filter: drop-shadow(0 0 2px #fff3df66);
 }
 @keyframes orbital-charge-pulse {
   0%,
@@ -128,16 +137,20 @@
     filter: none;
     transition: stroke 180ms ease;
   }
-  .orbital-brand[data-orbital-active="true"] .brand-ring {
+  .brand:focus-visible .orbital-brand .brand-ring,
+  .architecture-stage:focus-visible .orbital-brand .brand-ring {
     stroke: #f5f3ee;
   }
-  .orbital-brand .orbital-trail,
+  .orbital-brand .orbital-ghost,
   .orbital-brand .orbital-ring-pulse,
   .state-stack .stack-input-signal,
   .state-stack .stack-emission,
   .state-stack .stack-convergence {
     display: none;
     animation: none;
+  }
+  .orbital-brand .orbital-dot {
+    filter: none;
   }
   .state-stack .stack-traveler {
     animation: none;

@@ -84,8 +84,14 @@ export function Icon({
   );
 }
 
-export function BrandMark({ orbital = false }: { orbital?: boolean }) {
-  const ref = useOrbitalCharge(orbital);
+export function BrandMark({
+  orbital = false,
+  charge = true,
+}: {
+  orbital?: boolean;
+  charge?: boolean;
+}) {
+  const ref = useOrbitalCharge(orbital, charge);
   return (
     <svg
       ref={ref}
@@ -115,15 +121,31 @@ export function BrandMark({ orbital = false }: { orbital?: boolean }) {
             strokeWidth="4"
           />
           <g className="orbital-signal">
-            <path
-              className="orbital-trail trail-far"
-              d="M8.74 26.5A13 13 0 0 1 13.5 8.74"
+            <circle
+              className="orbital-ghost ghost-far"
+              cx="22.7"
+              cy="7.28"
+              r="1.3"
             />
-            <path
-              className="orbital-trail trail-near"
-              d="M13.5 8.74A13 13 0 0 1 31.3 13.5"
+            <circle
+              className="orbital-ghost ghost-mid"
+              cx="26.1"
+              cy="8.52"
+              r="1.8"
             />
-            <circle cx="31.3" cy="13.5" r="3.4" fill="var(--orange)" />
+            <circle
+              className="orbital-ghost ghost-near"
+              cx="29.02"
+              cy="10.65"
+              r="2.3"
+            />
+            <circle
+              className="orbital-dot"
+              cx="31.3"
+              cy="13.5"
+              r="3.4"
+              fill="var(--text)"
+            />
           </g>
         </>
       ) : (
