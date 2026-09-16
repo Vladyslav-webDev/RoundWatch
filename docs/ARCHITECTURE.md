@@ -145,10 +145,11 @@ An ambiguous absence remains retryable. A found transaction with a definitive fi
 
 Each poll tick loads all `active` watches and obtains a current confirmed Indexer round. For each watch:
 
-1. refuse to scan if `scanAfterRound` is missing;
-2. query the configured USDC asset from `scanAfterRound + 1` through the current round, filtered by expected sender;
-3. compare the receiver, ASA, integer amount, and optional decoded UTF-8 note exactly;
-4. store `matchedTransaction`, `matchedRound`, and state `matched` on the first exact match; otherwise advance `scanAfterRound` to the current round.
+1. atomically expire unfinished rows whose persisted `expiresAt` deadline has passed and load only remaining `active` watches;
+2. refuse to scan if `scanAfterRound` is missing;
+3. query the configured USDC asset from `scanAfterRound + 1` through the current round, filtered by expected sender;
+4. compare the receiver, ASA, integer amount, and optional decoded UTF-8 note exactly;
+5. store `matchedTransaction`, `matchedRound`, and state `matched` on the first exact match; otherwise advance `scanAfterRound` to the current round.
 
 Failures are caught per watch. A failed lookup neither advances that watch's cursor nor prevents later watches in the same tick from being processed. This isolation is correctness hardening, not a claim of unlimited throughput.
 
@@ -157,11 +158,12 @@ Failures are caught per watch. A failed lookup neither advances that watch's cur
 SQLite uses WAL mode and a single `roundwatch_watches` table. The durable record contains:
 
 - UUID watch ID and unique idempotency key;
-- public state: `settlement_pending`, `active`, `matched`, or `settlement_unknown`;
+- public state: `settlement_pending`, `active`, `matched`, `settlement_unknown`, or `expired`;
 - expected invoice sender, receiver, server-selected asset ID, atomic amount, and optional note;
 - expected service transaction, network, and payer derived before settlement;
 - confirmed service transaction, network, payer, activation round, and activation time;
 - scan cursor and creation time;
+- persisted server-controlled expiry time for bounded watches;
 - matched invoice transaction and confirmed round; and
 - an internal terminal-reconciliation flag used to distinguish a definitive mismatch from a retryable unknown outcome.
 
@@ -170,6 +172,14 @@ The public API omits the idempotency key but otherwise exposes the mapped watch 
 ## Idempotency
 
 `idempotency_key` is unique. The handler checks it before inserting a watch. A repeated key returns HTTP `409` with the existing public watch record, causing x402 settlement not to proceed for that handler response. Callers must generate a distinct key per intended obligation and treat the returned existing record as authoritative; the service does not merge or replace the specification attached to an existing key.
+
+## Expiry and admission capacity
+
+The challenge-release policy gives each new watch a server-controlled deadline of `createdAt + 30 minutes`. The deadline is persisted in SQLite and is not supplied by the caller. Store reads used by status, polling, reconciliation, activation, cursor advancement, and capacity admission first transition elapsed unfinished obligations to terminal state `expired`. An expired watch remains readable but cannot be polled, reconciled, matched, or reactivated. `matched` and definitive terminal `settlement_unknown` rows are never overwritten by expiry.
+
+An open obligation is `settlement_pending`, `active`, or non-terminal `settlement_unknown`. Admission is capped at 50 open obligations globally and 5 for the deterministic service payer derived from the verified AVM payment payload. The store expires elapsed rows, opens an immediate SQLite transaction, checks the idempotency key and both caps, and inserts the pending row without an asynchronous gap. Capacity failure returns HTTP `429` from the handler; because that is an error response before after-handler settlement, x402 cancels the payment rather than charging for a rejected obligation.
+
+Legacy databases are rebuilt transactionally to extend the state constraint with `expired`. Existing unfinished rows that have no persisted deadline receive one full configured TTL from the first migrated startup. Historical matched and definitive terminal rows remain unchanged and may omit `expiresAt`.
 
 ## Deployment assumptions
 
@@ -180,7 +190,7 @@ The current production shape is one Render application instance with:
 - SQLite, WAL, and shared-memory files on the same `/data` persistent disk; and
 - HTTPS terminated by the hosting platform.
 
-The implementation has no leader election, distributed lock, shared queue, or multi-instance coordination. Horizontal replicas sharing or copying this state are outside the current design. Watch lifetime, active-watch capacity, quotas, and SLA are not yet defined.
+The implementation has no leader election, distributed lock, shared queue, or multi-instance coordination. Horizontal replicas sharing or copying this state are outside the current design. The 30-minute lifetime and 50-global/5-per-payer caps are challenge-release safety bounds, not an SLA or a long-term commercial capacity commitment.
 
 ## TestNet and MainNet separation
 

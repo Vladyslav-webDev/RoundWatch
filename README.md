@@ -37,6 +37,8 @@ See [Architecture](docs/ARCHITECTURE.md) for the normal, recovery, and matching 
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
 | Facilitator | `https://facilitator.goplausible.xyz` |
 | Hosting | Render, with persistent SQLite storage mounted at `/data` |
+| Watch lifetime | 30 minutes from durable creation |
+| Open-obligation capacity | 50 globally; 5 per verified service payer |
 
 The production server does not contain or need a wallet mnemonic or private key.
 
@@ -97,6 +99,8 @@ Request fields:
 
 The watched asset is not a request field. The server selects the USDC ASA from its explicit network configuration: MainNet ASA `31566704` or TestNet ASA `10458941`.
 
+The server also controls the lifetime and admission policy. New watches expire 30 minutes after `createdAt`; callers cannot override that deadline. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` with a machine-readable error before the handler succeeds, so x402 does not settle that rejected service payment.
+
 ### Read a watch
 
 ```http
@@ -116,6 +120,7 @@ The response is `{ "watch": ... }`. This abridged matched example shows the stab
     "atomicAmount": "1",
     "invoiceNote": "roundwatch:invoice-2026-09-16-001",
     "createdAt": "2026-09-16T12:00:00.000Z",
+    "expiresAt": "2026-09-16T12:30:00.000Z",
     "matchedTransaction": "VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA",
     "matchedRound": 65096073
   }
@@ -132,6 +137,7 @@ Unknown IDs return HTTP `404`.
 | `active` | The service payment is established and a safe initial scan round is stored. The poller is looking for the future invoice payment. |
 | `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
 | `settlement_unknown` | Settlement did not produce an immediately usable activation. An ambiguous outcome remains eligible for exact reconciliation; a definitive on-chain mismatch is terminal and remains fail-closed in this public state. |
+| `expired` | The persisted deadline passed before a successful match. The terminal record remains readable but is never polled, reconciled, or reactivated. |
 
 ### Exact matching
 
@@ -174,6 +180,9 @@ FACILITATOR_URL=https://facilitator.goplausible.xyz
 ROUNDWATCH_DB_PATH=data/roundwatch.sqlite
 ROUNDWATCH_POLL_INTERVAL_MS=5000
 ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
+ROUNDWATCH_WATCH_TTL_MS=1800000
+ROUNDWATCH_MAX_OPEN_WATCHES=50
+ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER=5
 PORT=4021
 ```
 
@@ -230,6 +239,7 @@ GitHub Actions performs a full-depth checkout, scans complete Git history with G
 - Service settlement is reconciled against exact on-chain fields before recovery activation.
 - Future invoice matching is exact, and activation never starts without a safe round cursor.
 - SQLite uniqueness on the idempotency key prevents duplicate watch creation.
+- Persisted expiry and transactional global/per-payer admission bound unfinished polling obligations; capacity rejection happens before settlement.
 - `.env` files and wallet material must never be committed; CI enforces tracked-env and full-history secret checks.
 
 The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. See [Security](docs/SECURITY.md) for trust boundaries and operational assumptions.
@@ -253,7 +263,8 @@ Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 
 ## Current limitations
 
-- There is no defined watch TTL, cancellation operation, active-watch quota, capacity policy, SLA, or long-term pricing policy.
+- The current challenge-release policy is a 30-minute lifetime, 50 global open obligations, and 5 open obligations per verified service payer. These are operational safety bounds, not a commercial SLA or final pricing/capacity policy.
+- There is no cancellation operation, SLA, or long-term pricing policy.
 - The current deployment is a single application instance with an in-process poller/reconciler and local persistent SQLite. It is not a horizontally coordinated worker system.
 - Per-watch poll failures are isolated so one failing watch does not starve later watches, but that does not establish arbitrary production-scale capacity.
 - Results are retrieved by polling; there is no webhook or push-notification API.

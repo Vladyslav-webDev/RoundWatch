@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import type { FacilitatorClient } from '@x402/core/server';
@@ -37,6 +38,7 @@ import {
 } from './roundwatch-reconciler.js';
 import {
    RoundWatchStore,
+   WatchCapacityError,
    type WatchRecord,
    type WatchSpec,
 } from './roundwatch-store.js';
@@ -404,6 +406,421 @@ test('Algorand Indexer matching checks sender, receiver, ASA, amount, and note',
 
    assert.deepEqual(match, { transaction: 'MATCHING_TX', round: 805 });
 });
+
+test('an active watch expires, remains readable, stops polling, and cannot reactivate', async () => {
+   let now = new Date('2026-09-16T12:00:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      watchTtlMilliseconds: 1_000,
+      now: () => now,
+   });
+   const indexer = new FakeIndexer(900);
+
+   try {
+      const prepared = store.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'expiry-active-watch',
+      });
+      store.activateWatch(
+         prepared.watch.id,
+         { transaction: 'EXPIRY_SERVICE_TX', network: ALGORAND_TESTNET },
+         800,
+      );
+
+      assert.equal(
+         store.getWatch(prepared.watch.id)?.expiresAt,
+         '2026-09-16T12:00:01.000Z',
+      );
+
+      now = new Date('2026-09-16T12:00:01.001Z');
+      await new RoundWatchPoller(store, indexer).runOnce();
+
+      assert.equal(indexer.findMatchCalls, 0);
+      assert.equal(store.getWatch(prepared.watch.id)?.state, 'expired');
+      assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+      assert.throws(
+         () =>
+            store.activateWatch(
+               prepared.watch.id,
+               { transaction: 'EXPIRY_SERVICE_TX', network: ALGORAND_TESTNET },
+               901,
+            ),
+         /expired/,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('a matched watch remains matched after its expiry time', () => {
+   let now = new Date('2026-09-16T12:10:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      watchTtlMilliseconds: 1_000,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'expiry-matched-watch',
+      });
+      store.activateWatch(
+         prepared.watch.id,
+         { transaction: 'MATCHED_SERVICE_TX', network: ALGORAND_TESTNET },
+         900,
+      );
+      store.markMatched(prepared.watch.id, 'MATCHED_INVOICE_TX', 901);
+
+      now = new Date('2026-09-16T12:10:01.001Z');
+      store.expireOpenWatches();
+
+      const matched = store.getWatch(prepared.watch.id);
+      assert.equal(matched?.state, 'matched');
+      assert.equal(matched?.matchedTransaction, 'MATCHED_INVOICE_TX');
+   } finally {
+      store.close();
+   }
+});
+
+test('persisted expiry survives a SQLite restart', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-expiry-'));
+   const databasePath = join(directory, 'roundwatch.sqlite');
+   let now = new Date('2026-09-16T12:20:00.000Z');
+   let watchId: string;
+
+   try {
+      const first = new RoundWatchStore(databasePath, {
+         watchTtlMilliseconds: 1_000,
+         now: () => now,
+      });
+      const prepared = first.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'restart-expiry-watch',
+      });
+      watchId = prepared.watch.id;
+      first.activateWatch(
+         watchId,
+         { transaction: 'RESTART_EXPIRY_TX', network: ALGORAND_TESTNET },
+         950,
+      );
+      first.close();
+
+      now = new Date('2026-09-16T12:20:01.001Z');
+      const restarted = new RoundWatchStore(databasePath, {
+         watchTtlMilliseconds: 1_000,
+         now: () => now,
+      });
+
+      try {
+         assert.equal(restarted.getWatch(watchId)?.state, 'expired');
+         assert.equal(restarted.listActiveWatches().length, 0);
+      } finally {
+         restarted.close();
+      }
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
+
+test('global capacity rejects before settlement and does not insert an obligation', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+   });
+   store.prepareWatch({ ...SPEC, idempotencyKey: 'capacity-existing' });
+   const facilitator = new FakeFacilitator(store, 'capacity-rejected');
+   const app = createApp({
+      avmAddress: RECEIVER,
+      facilitatorClient: facilitator,
+      store,
+      indexer: new FakeIndexer(1_000),
+   });
+
+   try {
+      const response = await sendSyntheticPaidWatch(app, {
+         ...SPEC,
+         idempotencyKey: 'capacity-rejected',
+      });
+      const body = await response.json() as { code?: string };
+
+      assert.equal(response.status, 429);
+      assert.equal(body.code, 'global_watch_capacity_exhausted');
+      assert.equal(facilitator.settleCalls, 0);
+      assert.equal(store.getByIdempotencyKey('capacity-rejected'), undefined);
+   } finally {
+      store.close();
+   }
+});
+
+test('per-payer capacity is enforced from persisted settlement identity', () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 10,
+      maxOpenWatchesPerPayer: 1,
+   });
+
+   try {
+      store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'payer-capacity-a' },
+         {
+            expectedTransaction: 'PAYER_CAPACITY_TX_A',
+            network: ALGORAND_TESTNET,
+            payer: SENDER,
+         },
+      );
+
+      assert.throws(
+         () =>
+            store.prepareWatch(
+               { ...SPEC, idempotencyKey: 'payer-capacity-b' },
+               {
+                  expectedTransaction: 'PAYER_CAPACITY_TX_B',
+                  network: ALGORAND_TESTNET,
+                  payer: SENDER,
+               },
+            ),
+         (error: unknown) =>
+            error instanceof WatchCapacityError && error.scope === 'payer',
+      );
+
+      assert.equal(store.getByIdempotencyKey('payer-capacity-b'), undefined);
+   } finally {
+      store.close();
+   }
+});
+
+test('per-payer capacity response prevents x402 settlement', async () => {
+   const store = new PayerCapacityRejectingStore(':memory:');
+   const facilitator = new FakeFacilitator(store, 'payer-route-rejected');
+   const app = createApp({
+      avmAddress: RECEIVER,
+      facilitatorClient: facilitator,
+      store,
+      indexer: new FakeIndexer(1_100),
+   });
+
+   try {
+      const response = await sendSyntheticPaidWatch(app, {
+         ...SPEC,
+         idempotencyKey: 'payer-route-rejected',
+      });
+      const body = await response.json() as { code?: string };
+
+      assert.equal(response.status, 429);
+      assert.equal(body.code, 'payer_watch_capacity_exhausted');
+      assert.equal(facilitator.settleCalls, 0);
+   } finally {
+      store.close();
+   }
+});
+
+test('expired obligations release global and per-payer capacity', () => {
+   let now = new Date('2026-09-16T12:30:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      watchTtlMilliseconds: 1_000,
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+      now: () => now,
+   });
+
+   try {
+      const first = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'capacity-expiry-a' },
+         {
+            expectedTransaction: 'CAPACITY_EXPIRY_TX_A',
+            network: ALGORAND_TESTNET,
+            payer: SENDER,
+         },
+      );
+
+      now = new Date('2026-09-16T12:30:01.001Z');
+      const second = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'capacity-expiry-b' },
+         {
+            expectedTransaction: 'CAPACITY_EXPIRY_TX_B',
+            network: ALGORAND_TESTNET,
+            payer: SENDER,
+         },
+      );
+
+      assert.equal(store.getWatch(first.watch.id)?.state, 'expired');
+      assert.equal(second.created, true);
+      assert.equal(second.watch.state, 'settlement_pending');
+   } finally {
+      store.close();
+   }
+});
+
+test('only non-terminal settlement_unknown obligations count against capacity', () => {
+   const retryableStore = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+   });
+
+   try {
+      const retryable = retryableStore.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'unknown-retryable',
+      });
+      retryableStore.markSettlementUnknown(retryable.watch.id);
+      assert.throws(
+         () =>
+            retryableStore.prepareWatch({
+               ...SPEC,
+               idempotencyKey: 'unknown-blocked',
+            }),
+         (error: unknown) =>
+            error instanceof WatchCapacityError && error.scope === 'global',
+      );
+   } finally {
+      retryableStore.close();
+   }
+
+   const terminalStore = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+   });
+
+   try {
+      const terminal = terminalStore.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'unknown-terminal',
+      });
+      terminalStore.markSettlementInvalid(terminal.watch.id);
+      const next = terminalStore.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'unknown-terminal-released',
+      });
+
+      assert.equal(next.created, true);
+   } finally {
+      terminalStore.close();
+   }
+});
+
+test('legacy SQLite schema migrates with a full TTL grace for unfinished rows', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-legacy-'));
+   const databasePath = join(directory, 'roundwatch.sqlite');
+   const legacy = new DatabaseSync(databasePath);
+   const now = new Date('2026-09-16T13:00:00.000Z');
+
+   try {
+      legacy.exec(`
+         CREATE TABLE roundwatch_watches (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL CHECK (
+               state IN (
+                  'settlement_pending',
+                  'active',
+                  'matched',
+                  'settlement_unknown'
+               )
+            ),
+            expected_sender TEXT NOT NULL,
+            expected_receiver TEXT NOT NULL,
+            asset_id INTEGER NOT NULL,
+            atomic_amount TEXT NOT NULL,
+            invoice_note TEXT,
+            service_transaction TEXT UNIQUE,
+            service_network TEXT,
+            service_payer TEXT,
+            activation_round INTEGER,
+            activated_at TEXT,
+            scan_after_round INTEGER,
+            created_at TEXT NOT NULL,
+            matched_transaction TEXT,
+            matched_round INTEGER
+         );
+
+         INSERT INTO roundwatch_watches (
+            id, idempotency_key, state, expected_sender, expected_receiver,
+            asset_id, atomic_amount, service_transaction, service_network,
+            activation_round, activated_at, scan_after_round, created_at
+         ) VALUES (
+            'legacy-active', 'legacy-active-key', 'active',
+            '${SENDER}', '${RECEIVER}', ${TESTNET_USDC_ASSET_ID}, '1',
+            'LEGACY_SERVICE_TX', '${ALGORAND_TESTNET}', 100,
+            '2026-09-15T00:00:00.000Z', 100, '2026-09-15T00:00:00.000Z'
+         );
+
+         INSERT INTO roundwatch_watches (
+            id, idempotency_key, state, expected_sender, expected_receiver,
+            asset_id, atomic_amount, service_transaction, service_network,
+            activation_round, activated_at, scan_after_round, created_at,
+            matched_transaction, matched_round
+         ) VALUES (
+            'legacy-matched', 'legacy-matched-key', 'matched',
+            '${SENDER}', '${RECEIVER}', ${TESTNET_USDC_ASSET_ID}, '1',
+            'LEGACY_MATCHED_SERVICE_TX', '${ALGORAND_TESTNET}', 100,
+            '2026-09-15T00:00:00.000Z', 101, '2026-09-15T00:00:00.000Z',
+            'LEGACY_INVOICE_TX', 101
+         );
+      `);
+   } finally {
+      legacy.close();
+   }
+
+   try {
+      const store = new RoundWatchStore(databasePath, {
+         watchTtlMilliseconds: 1_800_000,
+         now: () => now,
+      });
+
+      try {
+         const active = store.getWatch('legacy-active');
+         const matched = store.getWatch('legacy-matched');
+
+         assert.equal(active?.state, 'active');
+         assert.equal(active?.expiresAt, '2026-09-16T13:30:00.000Z');
+         assert.equal(matched?.state, 'matched');
+         assert.equal(matched?.expiresAt, undefined);
+         assert.equal(matched?.matchedTransaction, 'LEGACY_INVOICE_TX');
+      } finally {
+         store.close();
+      }
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
+
+async function sendSyntheticPaidWatch(
+   app: ReturnType<typeof createApp>,
+   spec: WatchSpec,
+): Promise<Response> {
+   const requestBody = JSON.stringify({
+      idempotencyKey: spec.idempotencyKey,
+      expectedSender: spec.expectedSender,
+      expectedReceiver: spec.expectedReceiver,
+      atomicAmount: spec.atomicAmount,
+      invoiceNote: spec.invoiceNote,
+   });
+   const unpaid = await app.request('/spike/watch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: requestBody,
+   });
+   const requiredHeader = unpaid.headers.get('payment-required');
+   assert.equal(unpaid.status, 402);
+   assert.ok(requiredHeader);
+   const required = decodePaymentRequiredHeader(requiredHeader);
+   const paymentHeader = encodePaymentSignatureHeader({
+      x402Version: 2,
+      accepted: required.accepts[0]!,
+      payload: { testAuthorization: true },
+   });
+
+   return app.request('/spike/watch', {
+      method: 'POST',
+      headers: {
+         'content-type': 'application/json',
+         'payment-signature': paymentHeader,
+      },
+      body: requestBody,
+   });
+}
+
+class PayerCapacityRejectingStore extends RoundWatchStore {
+   override prepareWatch(): { watch: WatchRecord; created: boolean } {
+      throw new WatchCapacityError('payer');
+   }
+}
 
 class FakeFacilitator implements FacilitatorClient {
    settleCalls = 0;

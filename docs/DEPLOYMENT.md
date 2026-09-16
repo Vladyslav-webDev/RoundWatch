@@ -35,11 +35,14 @@ ALGORAND_INDEXER_URL=https://mainnet-idx.algonode.cloud
 ROUNDWATCH_DB_PATH=/data/roundwatch.sqlite
 ROUNDWATCH_POLL_INTERVAL_MS=5000
 ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
+ROUNDWATCH_WATCH_TTL_MS=1800000
+ROUNDWATCH_MAX_OPEN_WATCHES=50
+ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER=5
 ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=0
 PORT=<platform-provided port or 4021>
 ```
 
-`ALGORAND_INDEXER_URL`, poll interval, reconciliation interval, fault switch, and port have code defaults, but production should keep the intended values explicit and reviewable. `AVM_ADDRESS`, `FACILITATOR_URL`, `ROUNDWATCH_PUBLIC_BASE_URL`, and an absolute `ROUNDWATCH_DB_PATH` are operationally required for this MainNet deployment.
+`ALGORAND_INDEXER_URL`, poll interval, reconciliation interval, watch TTL, capacity limits, fault switch, and port have code defaults, but production should keep the intended values explicit and reviewable. `AVM_ADDRESS`, `FACILITATOR_URL`, `ROUNDWATCH_PUBLIC_BASE_URL`, and an absolute `ROUNDWATCH_DB_PATH` are operationally required for this MainNet deployment.
 
 Never set `AVM_MNEMONIC`, a private key, a recovery phrase, or a wallet export on the server. The resource server receives the signed x402 payload and needs only its public receiver address.
 
@@ -53,6 +56,7 @@ MainNet startup fails closed when:
 - the facilitator or Indexer URL is not absolute HTTPS;
 - `ROUNDWATCH_PUBLIC_BASE_URL` is absent, non-HTTPS, loopback, or contains credentials, a query, or a fragment;
 - the configured MainNet Indexer URL visibly names TestNet; or
+- the watch TTL or either capacity limit is not a finite positive integer; or
 - the TestNet-only exit-after-settlement fault switch is enabled.
 
 The default network is TestNet. Production must set MainNet explicitly; hostnames do not select a network.
@@ -88,6 +92,8 @@ GET  /demo
 
 `/v1/watch` costs `0.001 USDC` (`1000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`.
 
+The challenge-release policy gives each accepted watch 30 minutes from durable creation, with at most 50 unfinished obligations globally and 5 per verified service payer. Capacity exhaustion returns HTTP `429` before x402 settlement. Expired watches remain available through the status route but no longer poll or reconcile. These values are operational safeguards, not a commercial SLA.
+
 TestNet is a separate configuration and uses `/spike/watch`. Do not use a TestNet route or asset as a production smoke-test substitute.
 
 ## Deploying a new version safely
@@ -114,6 +120,7 @@ Before deployment, verify:
 
 - the network is explicitly `mainnet`;
 - the receiver, facilitator, public base URL, Indexer, ASA implied by network config, and service price match the approved production values;
+- the watch TTL is `1800000`, global capacity is `50`, and per-payer capacity is `5`;
 - `/data` is still mounted and the database path has not changed;
 - the deployment remains single-instance; and
 - no mnemonic/private key has been added to the service environment.
@@ -125,6 +132,8 @@ If the release changes persisted fields or storage behavior, take a consistent b
 Deploy the reviewed image or commit through Render's normal deployment path. Preserve the existing service, region, persistent disk mount, environment variables, and single-instance topology unless a separately reviewed infrastructure change requires otherwise.
 
 Observe startup logs for the selected network, USDC ASA, Indexer URL, and SQLite path. Investigate startup failures; do not bypass the guards.
+
+The first startup with this patch transactionally rebuilds the legacy table constraint to admit the `expired` state. Existing unfinished rows without an expiry receive a full 30-minute grace window from that startup; historical matched and definitive terminal rows remain unchanged. Preserve a consistent database backup before this schema deployment and verify the known matched watch afterward.
 
 ### 4. Run free post-deploy smoke checks
 
