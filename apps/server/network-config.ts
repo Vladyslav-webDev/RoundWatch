@@ -1,11 +1,17 @@
 import {
-   ALGORAND_MAINNET_CAIP2,
-   ALGORAND_TESTNET_CAIP2,
    USDC_MAINNET_ASA_ID,
    USDC_TESTNET_ASA_ID,
 } from '@x402/avm';
 
 export type RoundWatchNetworkName = 'testnet' | 'mainnet';
+
+// GoPlausible currently advertises the full Algorand genesis-hash CAIP-2 IDs.
+// Keep these explicit instead of relying on SDK constants whose shortened values
+// are not accepted by the hosted facilitator during /supported synchronization.
+export const ALGORAND_TESTNET_CAIP2 =
+   'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=' as const;
+export const ALGORAND_MAINNET_CAIP2 =
+   'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=' as const;
 
 export interface RoundWatchNetworkConfig {
    name: RoundWatchNetworkName;
