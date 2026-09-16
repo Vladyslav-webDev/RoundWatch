@@ -60,6 +60,7 @@ The recovery path was proven live on TestNet on 2026-09-16: a real facilitator s
 On 2026-09-16 the public Render deployment completed the first explicitly authorized MainNet RoundWatch purchase and later matched a separate MainNet USDC invoice transfer.
 
 - Service settlement transaction: `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA`
+- Service settlement confirmed round: `65095955`
 - Activated watch: `7c606f02-0257-4dfd-b59c-a13b61f480f0`
 - Later watched invoice transaction: `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA`
 - Invoice confirmed round: `65096073`
@@ -67,6 +68,8 @@ On 2026-09-16 the public Render deployment completed the first explicitly author
 - RoundWatch matched round: `65096073`
 
 The local MainNet runner performed a read-only unpaid preflight before spending and refused mismatched network, asset, receiver, amount, challenge tag, or resource URL. The service purchase spent `0.001 USDC`; the later watched invoice transfer used `1` atomic unit of MainNet USDC (`0.000001 USDC`) plus Algorand network fees.
+
+Independent public MainNet Indexer verification confirmed both transactions as Algorand asset transfers (`axfer`) using Circle USDC ASA `31566704`, with sender `3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ` and receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`. The service settlement amount is `1000` atomic units at round `65095955`; the watched invoice amount is `1` atomic unit at round `65096073`.
 
 ## Production gates
 
@@ -87,7 +90,7 @@ The local MainNet runner performed a read-only unpaid preflight before spending 
 | Public unpaid MainNet preflight | Passed | HTTPS resource, MainNet CAIP-2, USDC ASA `31566704`, receiver, `$0.001`, challenge tag all confirmed |
 | Real MainNet x402 paid E2E | Passed | Service settlement `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA`; watch activated |
 | Later MainNet invoice match | Passed | `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA` matched at round `65096073` |
-| Independent MainNet transaction verification | Pending | Query a public explorer / Indexer for both transaction IDs and record fields |
+| Independent MainNet transaction verification | Passed | Public Indexer confirmed both txids, sender/receiver, ASA `31566704`, amounts `1000` and `1`, rounds `65095955` and `65096073` |
 | Bazaar / challenge discovery visibility | Pending | Verify catalog / challenge surfaces after MainNet settlement |
 
 ## Rules
@@ -115,7 +118,6 @@ Do not move additional funds unless a later explicitly reviewed test requires th
 
 Core payment and observation behavior is now live-proven. Remaining launch work is operational and discovery-oriented:
 
-- independently query the public MainNet transaction records for both recorded transaction IDs;
 - verify the x402 Bazaar / GoPlausible challenge discovery surfaces contain the public RoundWatch resource;
 - complete repository-publication and challenge-submission requirements only after the final secret/history review;
 - merge the hardening PR only after the remaining launch checks are recorded.
