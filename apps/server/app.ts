@@ -49,6 +49,7 @@ export interface AppDependencies {
    store: RoundWatchStore;
    indexer: RoundWatchIndexer;
    networkConfig?: RoundWatchNetworkConfig;
+   publicBaseUrl?: string;
    syncFacilitatorOnStart?: boolean;
    requireSettlementIntent?: boolean;
 }
@@ -102,13 +103,13 @@ export function createApp(dependencies: AppDependencies): Hono {
       store,
       indexer,
       networkConfig = TESTNET_NETWORK_CONFIG,
+      publicBaseUrl,
       syncFacilitatorOnStart = true,
       requireSettlementIntent = networkConfig.name === 'mainnet',
    } = dependencies;
 
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
    const watchRouteKey = `POST ${watchPath}`;
-   const publicBaseUrl = process.env.ROUNDWATCH_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
    const publicDemoResource = publicBaseUrl ? `${publicBaseUrl}/demo` : undefined;
    const publicWatchResource = publicBaseUrl ? `${publicBaseUrl}${watchPath}` : undefined;
    const resourceServer = new x402ResourceServer(facilitatorClient);
@@ -138,6 +139,13 @@ export function createApp(dependencies: AppDependencies): Hono {
       }
 
       let activationRound: number | undefined;
+      const settlementEvidence = {
+         transaction: context.result.transaction,
+         network: context.result.network,
+         ...(context.result.payer ? { payer: context.result.payer } : {}),
+      };
+
+      store.recordSettlementCandidate(watchId, settlementEvidence);
 
       try {
          activationRound = await indexer.getCurrentRound();
@@ -146,15 +154,12 @@ export function createApp(dependencies: AppDependencies): Hono {
             'RoundWatch could not capture an activation round:',
             safeErrorMessage(error),
          );
+         return;
       }
 
       store.activateWatch(
          watchId,
-         {
-            transaction: context.result.transaction,
-            network: context.result.network,
-            ...(context.result.payer ? { payer: context.result.payer } : {}),
-         },
+         settlementEvidence,
          activationRound,
       );
    });

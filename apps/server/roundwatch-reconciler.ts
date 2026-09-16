@@ -62,7 +62,7 @@ export class SettlementReconciler {
       this.running = true;
 
       try {
-         for (const watch of this.store.listSettlementPendingWatches()) {
+         for (const watch of this.store.listSettlementReconciliationCandidates()) {
             await this.reconcileWatch(watch);
          }
       } finally {
@@ -85,13 +85,15 @@ export class SettlementReconciler {
 
       const matches =
          transfer.transaction === expectedTransaction &&
+         (!watch.expectedServiceNetwork ||
+            watch.expectedServiceNetwork === this.config.network) &&
          transfer.receiver === this.config.receiver &&
          transfer.assetId === this.config.assetId &&
          transfer.atomicAmount === this.config.atomicAmount &&
          (!watch.expectedServicePayer || transfer.sender === watch.expectedServicePayer);
 
       if (!matches) {
-         this.store.markSettlementUnknown(watch.id);
+         this.store.markSettlementInvalid(watch.id);
          console.error(
             `RoundWatch settlement candidate ${expectedTransaction} was found on-chain but did not match the expected service payment`,
          );

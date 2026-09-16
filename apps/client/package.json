@@ -9,6 +9,7 @@
     "spike:roundwatch:prepare": "tsx roundwatch-spike.ts prepare",
     "spike:roundwatch:recover": "tsx roundwatch-spike.ts recover",
     "spike:roundwatch:pay": "tsx roundwatch-spike.ts pay",
+    "test": "tsx --test mainnet-safety.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

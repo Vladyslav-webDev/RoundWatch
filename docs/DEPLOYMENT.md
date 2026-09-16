@@ -14,6 +14,7 @@ The hosting platform must provide HTTPS in front of the container and a persiste
 ROUNDWATCH_NETWORK=mainnet
 AVM_ADDRESS=<public MainNet receiver address>
 FACILITATOR_URL=https://facilitator.goplausible.xyz
+ROUNDWATCH_PUBLIC_BASE_URL=https://roundwatch-api.onrender.com
 ALGORAND_INDEXER_URL=https://mainnet-idx.algonode.cloud
 ROUNDWATCH_DB_PATH=/data/roundwatch.sqlite
 ROUNDWATCH_POLL_INTERVAL_MS=5000
@@ -30,6 +31,7 @@ MainNet startup fails closed when:
 - `AVM_ADDRESS` is not a checksum-valid Algorand address;
 - `ROUNDWATCH_DB_PATH` is missing or relative;
 - the facilitator or Indexer URL is not HTTPS;
+- `ROUNDWATCH_PUBLIC_BASE_URL` is missing, is not HTTPS, or points at localhost/loopback;
 - the configured MainNet Indexer URL visibly points at TestNet;
 - `ROUNDWATCH_NETWORK` is not explicitly `mainnet` or `testnet`.
 

@@ -9,7 +9,10 @@ import {
    createApp,
    ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
 } from './app.js';
-import { resolveRoundWatchNetwork } from './network-config.js';
+import {
+   resolveRoundWatchNetwork,
+   resolveRoundWatchPublicBaseUrl,
+} from './network-config.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
@@ -50,9 +53,14 @@ if (!isValidAlgorandAddress(avmAddress)) {
 }
 
 let networkConfig;
+let publicBaseUrl;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
+   publicBaseUrl = resolveRoundWatchPublicBaseUrl(
+      process.env.ROUNDWATCH_PUBLIC_BASE_URL,
+      networkConfig.name,
+   );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
    process.exit(1);
@@ -141,6 +149,7 @@ const app = createApp({
    store,
    indexer,
    networkConfig,
+   publicBaseUrl,
 });
 
 const port = parsePositiveInteger(process.env.PORT, 4021);

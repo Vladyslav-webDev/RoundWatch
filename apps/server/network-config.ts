@@ -57,3 +57,60 @@ export function resolveRoundWatchNetwork(
       `ROUNDWATCH_NETWORK must be "testnet" or "mainnet", received ${JSON.stringify(value)}`,
    );
 }
+
+export function resolveRoundWatchPublicBaseUrl(
+   value: string | undefined,
+   networkName: RoundWatchNetworkName,
+): string | undefined {
+   const configured = value?.trim();
+
+   if (!configured) {
+      if (networkName === 'mainnet') {
+         throw new Error('ROUNDWATCH_PUBLIC_BASE_URL is required on MainNet');
+      }
+
+      return undefined;
+   }
+
+   let url: URL;
+
+   try {
+      url = new URL(configured);
+   } catch {
+      throw new Error('ROUNDWATCH_PUBLIC_BASE_URL must be a valid absolute URL');
+   }
+
+   if (url.username || url.password || url.search || url.hash) {
+      throw new Error(
+         'ROUNDWATCH_PUBLIC_BASE_URL must not contain credentials, a query, or a fragment',
+      );
+   }
+
+   if (networkName === 'mainnet') {
+      if (url.protocol !== 'https:') {
+         throw new Error('ROUNDWATCH_PUBLIC_BASE_URL must use HTTPS on MainNet');
+      }
+
+      if (isLoopbackHostname(url.hostname)) {
+         throw new Error(
+            'ROUNDWATCH_PUBLIC_BASE_URL must not use localhost or a loopback address on MainNet',
+         );
+      }
+   }
+
+   return url.toString().replace(/\/+$/, '');
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+   const normalized = hostname.toLowerCase().replace(/\.$/, '');
+
+   return (
+      normalized === 'localhost' ||
+      normalized.endsWith('.localhost') ||
+      normalized === '0.0.0.0' ||
+      normalized === '::1' ||
+      normalized === '[::1]' ||
+      normalized.startsWith('[::ffff:127.') ||
+      normalized.startsWith('127.')
+   );
+}

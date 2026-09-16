@@ -10,46 +10,36 @@ import {
 } from '@x402/fetch';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { ExactAvmScheme, toClientAvmSigner } from '@x402/avm';
+import {
+   ALGORAND_MAINNET,
+   assertMainnetRuntimeSafety,
+   CHALLENGE_TAG,
+   DEFAULT_ALGOD_URL,
+   DEFAULT_SERVER_URL,
+   EXPECTED_RECEIVER,
+   INVOICE_ATOMIC_AMOUNT,
+   SERVICE_ATOMIC_AMOUNT,
+   USDC_MAINNET_ASA_ID,
+   validateMainnetCheckpoint,
+   type MainnetCheckpoint,
+   type MainnetWatchSnapshot,
+} from './mainnet-safety.js';
 
 process.loadEnvFile(resolve('../server/.env'));
 process.loadEnvFile(resolve('.env'));
 
-const ALGORAND_MAINNET =
-   'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=' as const;
-const USDC_MAINNET_ASA_ID = 31_566_704;
-const SERVICE_ATOMIC_AMOUNT = '1000'; // 0.001 USDC
-const INVOICE_ATOMIC_AMOUNT = '1'; // 0.000001 USDC
-const EXPECTED_RECEIVER =
-   'EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY';
-const CHALLENGE_TAG = 'x402-global-challenge';
-const DEFAULT_SERVER_URL = 'https://roundwatch-api.onrender.com';
-const DEFAULT_ALGOD_URL = 'https://mainnet-api.algonode.cloud';
 const CONFIRM_FLAG = '--confirm-mainnet';
 
-const serverUrl = (process.env.ROUNDWATCH_SERVER_URL ?? DEFAULT_SERVER_URL).replace(/\/$/, '');
+const serverUrl = (process.env.ROUNDWATCH_SERVER_URL ?? DEFAULT_SERVER_URL).replace(
+   /\/+$/,
+   '',
+);
 const algodUrl = process.env.ALGORAND_ALGOD_URL ?? DEFAULT_ALGOD_URL;
 const mnemonic = process.env.AVM_MNEMONIC;
 const configuredReceiver = process.env.AVM_ADDRESS;
 const statePath = resolve('data/roundwatch-mainnet-live.json');
 
-interface PublicWatch {
-   id?: string;
-   state: string;
-   matchedTransaction?: string;
-   matchedRound?: number;
-}
-
-interface MainnetState {
-   idempotencyKey: string;
-   expectedSender: string;
-   expectedReceiver: string;
-   atomicAmount: string;
-   invoiceNote: string;
-   watchId?: string;
-   serviceSettlementTransaction?: string;
-}
-
-interface ReadyMainnetState extends MainnetState {
+interface ReadyMainnetState extends MainnetCheckpoint {
    watchId: string;
 }
 
@@ -64,13 +54,20 @@ async function main(): Promise<void> {
    assertStaticSafety();
 
    if (mode === 'status') {
-      const state = readState();
+      const state = validateMainnetCheckpoint(readState(), {
+         runtimeServerUrl: serverUrl,
+      });
       if (!state.watchId) {
          console.log('MainNet checkpoint exists but has no watchId yet.');
          return;
       }
 
       const watch = await readWatch(state.watchId);
+      validateMainnetCheckpoint(state, {
+         runtimeServerUrl: serverUrl,
+         requireWatchId: true,
+         watch,
+      });
       console.log(JSON.stringify({ checkpoint: state, watch }, null, 2));
       return;
    }
@@ -92,7 +89,11 @@ async function main(): Promise<void> {
       return;
    }
 
-   const state = readState();
+   const state = validateMainnetCheckpoint(readState(), {
+      runtimeServerUrl: serverUrl,
+      payerAddress: sender,
+      requireWatchId: mode === 'pay',
+   });
 
    if (mode === 'recover') {
       const recovered = await recoverWatch(account, state);
@@ -109,9 +110,7 @@ async function main(): Promise<void> {
 }
 
 function assertStaticSafety(): void {
-   if (!serverUrl.startsWith('https://')) {
-      throw new Error(`MainNet server URL must use HTTPS: ${serverUrl}`);
-   }
+   assertMainnetRuntimeSafety(serverUrl, algodUrl);
 
    if (configuredReceiver && configuredReceiver !== EXPECTED_RECEIVER) {
       throw new Error(
@@ -150,7 +149,10 @@ async function startWatch(
    }
 
    const nonce = randomUUID();
-   const requestBody: MainnetState = {
+   const requestBody: MainnetCheckpoint = {
+      network: ALGORAND_MAINNET,
+      assetId: USDC_MAINNET_ASA_ID,
+      serverUrl: DEFAULT_SERVER_URL,
       idempotencyKey: `mainnet-${nonce}`,
       expectedSender: sender,
       expectedReceiver: EXPECTED_RECEIVER,
@@ -166,7 +168,7 @@ async function startWatch(
    const unpaid = await fetch(watchUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(watchRequestBody(requestBody)),
    });
 
    if (unpaid.status !== 402) {
@@ -186,7 +188,7 @@ async function startWatch(
    const paid = await fetchWithPayment(watchUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(watchRequestBody(requestBody)),
    });
    const settlement = new x402HTTPClient(client).getPaymentSettleResponse(
       name => paid.headers.get(name),
@@ -214,14 +216,22 @@ async function startWatch(
       throw new Error(`Expected active MainNet watch, received ${active.state}`);
    }
 
-   console.log(`MAINNET SERVICE SETTLEMENT: ${settlement.transaction}`);
-   console.log(`MAINNET WATCH ACTIVE: ${created.watchId}`);
-
-   return {
+   const completedCheckpoint = {
       ...requestBody,
       watchId: created.watchId,
       serviceSettlementTransaction: settlement.transaction,
    };
+   validateMainnetCheckpoint(completedCheckpoint, {
+      runtimeServerUrl: serverUrl,
+      payerAddress: sender,
+      requireWatchId: true,
+      watch: active,
+   });
+
+   console.log(`MAINNET SERVICE SETTLEMENT: ${settlement.transaction}`);
+   console.log(`MAINNET WATCH ACTIVE: ${created.watchId}`);
+
+   return completedCheckpoint;
 }
 
 function assertPaymentRequirements(header: string, watchUrl: string): void {
@@ -271,10 +281,16 @@ function assertPaymentRequirements(header: string, watchUrl: string): void {
 
 async function recoverWatch(
    account: algosdk.Account,
-   state: MainnetState,
+   state: MainnetCheckpoint,
 ): Promise<ReadyMainnetState> {
    if (state.watchId) {
       const existing = await readWatch(state.watchId);
+      validateMainnetCheckpoint(state, {
+         runtimeServerUrl: serverUrl,
+         payerAddress: account.addr.toString(),
+         requireWatchId: true,
+         watch: existing,
+      });
       if (existing.state !== 'active' && existing.state !== 'matched') {
          throw new Error(`Existing MainNet watch is ${existing.state}, not recovered`);
       }
@@ -313,7 +329,7 @@ async function recoverWatch(
       );
    }
 
-   const body = await response.json() as { watch?: PublicWatch };
+   const body = await response.json() as { watch?: MainnetWatchSnapshot };
    if (!body.watch?.id) {
       throw new Error('Recovery response did not expose the existing watchId');
    }
@@ -326,10 +342,19 @@ async function recoverWatch(
       `MAINNET WATCH RECOVERED: ${body.watch.id}; duplicate request did not settle again.`,
    );
 
-   return {
+   const recovered = {
       ...state,
       watchId: body.watch.id,
    };
+
+   validateMainnetCheckpoint(recovered, {
+      runtimeServerUrl: serverUrl,
+      payerAddress: account.addr.toString(),
+      requireWatchId: true,
+      watch: body.watch,
+   });
+
+   return recovered as ReadyMainnetState;
 }
 
 async function payInvoice(
@@ -337,6 +362,12 @@ async function payInvoice(
    state: ReadyMainnetState,
 ): Promise<void> {
    const active = await readWatch(state.watchId);
+   validateMainnetCheckpoint(state, {
+      runtimeServerUrl: serverUrl,
+      payerAddress: account.addr.toString(),
+      requireWatchId: true,
+      watch: active,
+   });
    if (active.state === 'matched') {
       console.log(
          `MainNet watch is already matched by ${active.matchedTransaction ?? 'unknown transaction'} at round ${active.matchedRound ?? 'unknown'}.`,
@@ -385,7 +416,7 @@ function createPaymentClient(account: algosdk.Account): x402Client {
    return client;
 }
 
-function writeState(state: MainnetState): void {
+function writeState(state: MainnetCheckpoint): void {
    mkdirSync(dirname(statePath), { recursive: true });
    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, {
       encoding: 'utf8',
@@ -393,28 +424,28 @@ function writeState(state: MainnetState): void {
    });
 }
 
-function readState(): MainnetState {
+function readState(): unknown {
    if (!existsSync(statePath)) {
       throw new Error(`MainNet checkpoint does not exist: ${statePath}`);
    }
 
-   return JSON.parse(readFileSync(statePath, 'utf8')) as MainnetState;
+   return JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
 }
 
-async function readWatch(watchId: string): Promise<PublicWatch> {
+async function readWatch(watchId: string): Promise<MainnetWatchSnapshot> {
    const response = await fetch(`${serverUrl}/v1/watch/${watchId}`);
    if (!response.ok) {
       throw new Error(`MainNet watch status failed with HTTP ${response.status}`);
    }
 
-   const body = await response.json() as { watch: PublicWatch };
+   const body = await response.json() as { watch: MainnetWatchSnapshot };
    return body.watch;
 }
 
 async function waitForMatched(
    watchId: string,
    timeoutMilliseconds: number,
-): Promise<PublicWatch> {
+): Promise<MainnetWatchSnapshot> {
    const deadline = Date.now() + timeoutMilliseconds;
 
    while (Date.now() < deadline) {
@@ -427,6 +458,16 @@ async function waitForMatched(
    }
 
    throw new Error('MainNet watch did not transition to matched before timeout');
+}
+
+function watchRequestBody(state: MainnetCheckpoint): Record<string, string> {
+   return {
+      idempotencyKey: state.idempotencyKey,
+      expectedSender: state.expectedSender,
+      expectedReceiver: state.expectedReceiver,
+      atomicAmount: state.atomicAmount,
+      invoiceNote: state.invoiceNote,
+   };
 }
 
 function printUsage(): void {
