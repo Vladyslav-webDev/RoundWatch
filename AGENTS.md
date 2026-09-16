@@ -2,22 +2,37 @@
 
 ## Project status
 
-This repository contains a verified Algorand TestNet x402 v2 payment skeleton.
+This repository contains RoundWatch, a live x402-paid durable Algorand
+payment-observation service.
 
-The following flow has been proven end-to-end:
+The production MainNet flow has been proven end-to-end:
 
+```text
 HTTP 402
-→ signed TestNet USDC payment
-→ GoPlausible verification
-→ on-chain settlement
-→ HTTP 200
+→ locally signed MainNet USDC service payment
+→ GoPlausible verification and on-chain settlement
+→ durable SQLite watch activation
+→ later exact MainNet USDC invoice match
+→ persisted result available through the status API
+```
 
-Treat this working payment path as a known-good baseline.
+The production API runs on Render at `https://roundwatch-api.onrender.com`.
+MainNet uses Circle USDC ASA `31566704`; TestNet remains the safe default for
+local development, regression testing, and fault injection.
+
+Treat the live-proven MainNet path and the known-good TestNet payment path as
+baselines. Preserve their behavior unless the current task explicitly requires
+a change. `README.md` and the current operational documents under `docs/` define
+the implemented product; historical research and spike documents do not define
+the current API contract.
 
 ## Core principles
 
 - Preserve working behavior unless the current task explicitly requires changing it.
 - Do not expose, print, commit, or otherwise leak mnemonics, private keys, or secrets.
+- Do not make a MainNet payment without explicit human authorization for that exact spend.
+- Keep wallet signing in the client boundary; the server must not receive a mnemonic or private key.
+- Preserve persistent production watch state and fail-closed settlement behavior.
 - Prefer minimal, reversible changes.
 - Avoid speculative abstractions that are not required by the current task.
 - Distinguish verified facts from inference and hypotheses.
@@ -50,8 +65,12 @@ Current baseline:
 - GoPlausible hosted facilitator
 - Bazaar discovery
 - challenge attribution
-- Algorand TestNet
-- TestNet USDC
+- Algorand MainNet production with Circle USDC ASA `31566704`
+- Algorand TestNet development and regression environment
+- durable SQLite state in WAL mode
+- Algorand Indexer-backed exact future-payment matching
+- in-process watch poller and settlement reconciler
+- single-instance Render deployment with a persistent disk mounted at `/data`
 
 Changes to this baseline are allowed only when:
 1. the current task explicitly requests them, or
@@ -59,6 +78,10 @@ Changes to this baseline are allowed only when:
 
 If a baseline change appears necessary, explain the reason before making a broad
 architectural change.
+
+Do not infer that the current single-instance design provides arbitrary scale,
+an SLA, a watch TTL, a quota, or a final pricing policy. Those remain product and
+operational decisions.
 
 ## Scope discipline
 
@@ -90,3 +113,7 @@ For research tasks:
 Do not optimize for novelty alone.
 Prefer ideas that combine real demand, x402-native value, feasible execution,
 and strong challenge differentiation.
+
+Treat dated research, competitor observations, leaderboard positions, pricing
+hypotheses, callbacks, and proposed TTLs as historical analysis unless current
+implementation or operational documentation independently confirms them.
