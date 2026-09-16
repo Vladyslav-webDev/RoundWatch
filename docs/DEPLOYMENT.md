@@ -1,103 +1,191 @@
-# RoundWatch deployment runbook
+# RoundWatch production deployment runbook
 
-This runbook is for the first controlled Algorand MainNet deployment. It does not authorize a real payment by itself.
+RoundWatch is currently deployed on Render at `https://roundwatch-api.onrender.com`. This runbook separates the already-proven production baseline from the procedure for deploying a new version. It does not authorize a paid MainNet action.
 
-## Container
+## Proven production baseline
 
-The repository root contains a `Dockerfile` for the RoundWatch API server. The container runs Node 24 and the server workspace directly through `tsx`.
+As of **2026-09-16**:
 
-The hosting platform must provide HTTPS in front of the container and a persistent volume mounted at an absolute path such as `/data`.
+- Render serves the API over HTTPS;
+- `ROUNDWATCH_NETWORK=mainnet` selects Algorand MainNet and Circle USDC ASA `31566704`;
+- SQLite is stored at `/data/roundwatch.sqlite` on a persistent disk;
+- `GET /health` returns `{ "status": "ok", "network": "mainnet" }`;
+- unpaid `POST /v1/watch` advertises the correct MainNet x402 requirements;
+- one explicitly authorized `0.001 USDC` service purchase settled on MainNet;
+- its durable watch later matched a separate exact MainNet invoice transfer;
+- Bazaar and challenge attribution were observed; and
+- correctness-hardening merge commit `69afd9dc070a7f9c12206b038f117cc1f2b3fdb3` auto-deployed successfully, with the pre-existing matched watch unchanged afterward.
+
+No second paid E2E was run after the correctness patch. Routine deployment verification should remain free.
+
+## Container and process model
+
+The root `Dockerfile` uses Node 24.14.0 and pnpm 12.3.4, installs the frozen workspace lockfile, and starts `apps/server` through `tsx`. The container exposes port 4021 and has an internal `/health` health check.
+
+The hosting platform terminates HTTPS and supplies `PORT`. One application process runs the API, settlement reconciler, watch poller, and local SQLite connection. Do not scale this image horizontally without first designing shared durable state and worker coordination.
 
 ## Required MainNet environment
 
-```text
+```env
 ROUNDWATCH_NETWORK=mainnet
-AVM_ADDRESS=<public MainNet receiver address>
+AVM_ADDRESS=EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY
 FACILITATOR_URL=https://facilitator.goplausible.xyz
 ROUNDWATCH_PUBLIC_BASE_URL=https://roundwatch-api.onrender.com
 ALGORAND_INDEXER_URL=https://mainnet-idx.algonode.cloud
 ROUNDWATCH_DB_PATH=/data/roundwatch.sqlite
 ROUNDWATCH_POLL_INTERVAL_MS=5000
 ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
-PORT=<platform port or 4021>
+ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=0
+PORT=<platform-provided port or 4021>
 ```
 
-Never configure a mnemonic, recovery phrase, wallet export, or private key on the RoundWatch resource server. The server receives payments; it does not sign as the user wallet.
+`ALGORAND_INDEXER_URL`, poll interval, reconciliation interval, fault switch, and port have code defaults, but production should keep the intended values explicit and reviewable. `AVM_ADDRESS`, `FACILITATOR_URL`, `ROUNDWATCH_PUBLIC_BASE_URL`, and an absolute `ROUNDWATCH_DB_PATH` are operationally required for this MainNet deployment.
+
+Never set `AVM_MNEMONIC`, a private key, a recovery phrase, or a wallet export on the server. The resource server receives the signed x402 payload and needs only its public receiver address.
 
 ## Startup guards
 
 MainNet startup fails closed when:
 
-- `AVM_ADDRESS` is not a checksum-valid Algorand address;
-- `ROUNDWATCH_DB_PATH` is missing or relative;
-- the facilitator or Indexer URL is not HTTPS;
-- `ROUNDWATCH_PUBLIC_BASE_URL` is missing, is not HTTPS, or points at localhost/loopback;
-- the configured MainNet Indexer URL visibly points at TestNet;
-- `ROUNDWATCH_NETWORK` is not explicitly `mainnet` or `testnet`.
+- `AVM_ADDRESS` is absent or not a checksum-valid Algorand address;
+- `ROUNDWATCH_NETWORK` is neither `mainnet` nor `testnet`;
+- `ROUNDWATCH_DB_PATH` is absent or relative;
+- the facilitator or Indexer URL is not absolute HTTPS;
+- `ROUNDWATCH_PUBLIC_BASE_URL` is absent, non-HTTPS, loopback, or contains credentials, a query, or a fragment;
+- the configured MainNet Indexer URL visibly names TestNet; or
+- the TestNet-only exit-after-settlement fault switch is enabled.
 
-## Persistent state
+The default network is TestNet. Production must set MainNet explicitly; hostnames do not select a network.
 
-Mount persistent storage at `/data` (or another platform-specific persistent path) and set:
+## Persistent disk
+
+Mount a persistent disk at `/data` and set:
 
 ```text
 ROUNDWATCH_DB_PATH=/data/roundwatch.sqlite
 ```
 
-SQLite WAL mode is enabled. The `.sqlite`, `.sqlite-wal`, and `.sqlite-shm` files belong on the same persistent filesystem. Do not place the database on an ephemeral container filesystem for MainNet.
+SQLite WAL mode is enabled. Keep `roundwatch.sqlite`, `roundwatch.sqlite-wal`, and `roundwatch.sqlite-shm` on the same filesystem. Replacing, detaching, rolling back, or mounting an empty disk can lose paid obligations or scan progress.
+
+Before a storage change:
+
+1. identify the exact production database and disk;
+2. stop writes or otherwise obtain a consistent SQLite backup;
+3. retain a recoverable copy;
+4. restore into the intended persistent path; and
+5. verify existing watch IDs before resuming normal operation.
 
 ## Routes
 
-MainNet exposes the production watch route:
+Production exposes:
 
 ```text
+GET  /health
 POST /v1/watch
 GET  /v1/watch/:id
-GET  /health
 GET  /demo
 ```
 
-The TestNet regression route remains `/spike/watch` so the known-good spike behavior can be exercised without changing its public contract.
+`/v1/watch` costs `0.001 USDC` (`1000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`.
 
-The MainNet watch price is currently `$0.001` USDC and uses Circle USDC ASA `31566704`. The route carries the `x402-global-challenge` tag and Bazaar discovery metadata.
+TestNet is a separate configuration and uses `/spike/watch`. Do not use a TestNet route or asset as a production smoke-test substitute.
 
-## Settlement crash reconciliation
+## Deploying a new version safely
 
-Before settlement, the handler persists the deterministic Algorand payment transaction ID derived from the already verified AVM `paymentGroup[paymentIndex]` transaction.
+### 1. Verify the candidate locally or in CI
 
-If the process dies after the facilitator settles but before SQLite activation commits, the reconciliation worker repeatedly looks up that exact transaction ID in the selected Algorand Indexer. A pending watch is activated only when the on-chain transfer exactly matches:
+Confirm the exact commit and run:
 
-- the prepared transaction ID;
-- the configured RoundWatch receiver;
-- the configured USDC ASA;
-- the exact service payment amount;
-- the prepared payer when available.
-
-Mismatched on-chain evidence fails closed to `settlement_unknown`.
-
-This removes the known "settled externally, not activated locally" blind spot in the design, but it still requires a deliberate TestNet crash/fault-injection run before MainNet launch.
-
-## Pre-payment deployment checks
-
-After deployment and before any real payment:
-
-1. `GET /health` returns HTTP 200 with `network: "mainnet"`.
-2. An unpaid `POST /v1/watch` returns HTTP 402.
-3. The `PAYMENT-REQUIRED` response advertises Algorand MainNet, USDC ASA `31566704`, the intended public receiver, and the expected price.
-4. Restart the service and confirm the health endpoint returns normally with the same persistent volume mounted.
-5. Confirm the receiver account is opted in to ASA `31566704`.
-
-Only after these checks should the human operator authorize the first minimal MainNet x402 payment.
-
-## First real E2E
-
-Use a dedicated funded Payer account with a very small USDC balance. The intended sequence is:
-
-```text
-unpaid POST /v1/watch -> 402
-signed x402 retry -> MainNet settlement
-SQLite watch -> active
-server restart -> active watch recovered
-later exact invoice payment -> matched
+```bash
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm -C apps/server test
+pnpm -C apps/client test
+docker build -t roundwatch-candidate .
 ```
 
-Record both MainNet transaction IDs and independently verify them on-chain. Then verify Bazaar / challenge discovery visibility.
+Also require the repository CI checks: full-history Gitleaks, tracked `.env` rejection, typechecks, server tests, client safety tests, and container build.
+
+None of these commands needs a wallet or makes a payment.
+
+### 2. Review production configuration
+
+Before deployment, verify:
+
+- the network is explicitly `mainnet`;
+- the receiver, facilitator, public base URL, Indexer, ASA implied by network config, and service price match the approved production values;
+- `/data` is still mounted and the database path has not changed;
+- the deployment remains single-instance; and
+- no mnemonic/private key has been added to the service environment.
+
+If the release changes persisted fields or storage behavior, take a consistent backup and document the migration/rollback plan before rollout.
+
+### 3. Deploy without replacing the disk
+
+Deploy the reviewed image or commit through Render's normal deployment path. Preserve the existing service, region, persistent disk mount, environment variables, and single-instance topology unless a separately reviewed infrastructure change requires otherwise.
+
+Observe startup logs for the selected network, USDC ASA, Indexer URL, and SQLite path. Investigate startup failures; do not bypass the guards.
+
+### 4. Run free post-deploy smoke checks
+
+Health:
+
+```bash
+curl -i https://roundwatch-api.onrender.com/health
+```
+
+Expected body:
+
+```json
+{
+  "status": "ok",
+  "network": "mainnet"
+}
+```
+
+Unpaid x402 preflight:
+
+```bash
+curl -i -X POST https://roundwatch-api.onrender.com/v1/watch \
+  -H "content-type: application/json" \
+  --data '{"idempotencyKey":"smoke-readonly-20260916","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
+```
+
+Do not attach a payment signature. Expected result: HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, ASA `31566704`, amount `1000`, approved service receiver, and `x402-global-challenge` tag.
+
+Persistence check:
+
+```bash
+curl -i https://roundwatch-api.onrender.com/v1/watch/7c606f02-0257-4dfd-b59c-a13b61f480f0
+```
+
+Confirm the known watch remains `matched` with transaction `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA` at round `65096073`. This is a free read and verifies the expected persistent database is mounted.
+
+Finally, inspect logs for reconciliation mismatches, missing scan baselines, repeated Indexer failures, or database errors.
+
+## Paid MainNet verification policy
+
+Do not make a payment for routine deployment verification. The production path already has dated paid evidence, while health, unpaid 402 inspection, and existing-watch retrieval cover normal smoke testing without spending funds.
+
+A new paid MainNet run requires explicit human authorization for that exact run. Before authorizing it, record why existing evidence and free checks are insufficient, review the maximum spend and network fees, and use the dedicated minimum-funded payer.
+
+The repository runner enforces `--confirm-mainnet` for `start`, `recover`, and `pay`, restricts the production URL and expected receiver, validates payment requirements before signing, and validates its durable checkpoint. The flag is a final acknowledgement, not a replacement for human review.
+
+If an authorized run occurs, record the service transaction, watch ID, later invoice transaction, confirmed rounds, and independent Indexer verification. Never paste or log the mnemonic.
+
+## Settlement recovery operations
+
+The reconciler automatically handles a process stop between on-chain settlement and SQLite activation. It looks up the deterministic prepared transaction ID and activates only when receiver, ASA, amount, network, and payer checks pass. It uses the confirmed settlement round as the safe scan baseline.
+
+Operational response:
+
+- if a transaction is not found, allow normal reconciliation retries and check Indexer health;
+- if a definitive mismatch is logged, preserve the database and logs for investigation; do not force the row active;
+- if a watch lacks a scan baseline, the poller intentionally refuses to scan it; and
+- do not delete an idempotency row to retry a purchase without first determining whether settlement occurred.
+
+## Rollback
+
+Application rollback must preserve the current persistent disk. Verify that the target version can read the existing schema and retains the settlement-reconciliation fields before deploying it. After rollback, repeat all free smoke checks, including retrieval of the known matched watch.
+
+Do not restore an older database snapshot merely to match older code without accounting for every watch and scan cursor created since that snapshot.

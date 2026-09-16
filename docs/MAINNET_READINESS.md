@@ -1,142 +1,153 @@
-# RoundWatch MainNet Readiness
+# RoundWatch MainNet readiness
 
-Status: public MainNet deployment, paid E2E, Bazaar discovery and challenge attribution proven; publication / submission gates remain
+Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, and correctness hardening are proven. Repository publication, the hardening-to-`main` merge, and challenge submission remain human-controlled steps.
 
-This document tracks production hardening and live evidence for RoundWatch MainNet readiness.
+This is a dated evidence record, not an availability or performance guarantee.
 
-## Current baseline
+## Current production baseline
 
-- RoundWatch Spike 0 lifecycle is merged into `main`.
-- TestNet USDC flow is proven against GoPlausible and Algorand TestNet.
-- Durable SQLite state survives a real process restart.
-- Future exact USDC invoice matching is proven on TestNet.
-- Explicit TestNet/MainNet configuration is implemented on `hardening/mainnet-readiness`.
-- MainNet uses the facilitator-compatible full Algorand CAIP-2 network ID and Circle USDC ASA `31566704`.
-- MainNet watch route is `/v1/watch`; the TestNet regression route remains `/spike/watch`.
-- Production startup requires an absolute persistent SQLite path and HTTPS facilitator/Indexer URLs.
-- A settlement reconciliation worker is implemented for the known settlement → SQLite activation crash window.
-- A production Dockerfile, `.dockerignore`, deployment runbook, current-tree env-secret guard, and GitHub Actions verification are present.
-- CI performs a full-history Gitleaks scan from a full-depth checkout in addition to the current-tree `.env` guard.
-- Dedicated MainNet Payer and Receiver accounts hold ALGO and are opted into verified Circle USDC.
-- RoundWatch is publicly deployed on Render at `https://roundwatch-api.onrender.com` with a 1 GB persistent disk mounted at `/data`.
-- Public `/health` returns `{ "status": "ok", "network": "mainnet" }`.
-- Public unpaid `/v1/watch` preflight advertises HTTPS resource URL, Algorand MainNet, USDC ASA `31566704`, the intended receiver, `$0.001` service price, and challenge tag `x402-global-challenge`.
-- GoPlausible Bazaar discovery lists the public RoundWatch resource with `settleCount: 1`.
-- The MainNet merchant leaderboard lists the RoundWatch receiver with `bazaar: true`, `challenge: true`, `volume: 0.001`, `settles: 1`; observed rank was `145` on 2026-09-16.
+| Property | Verified value |
+| --- | --- |
+| API | `https://roundwatch-api.onrender.com` |
+| Network | Algorand MainNet |
+| CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
+| Circle USDC | ASA `31566704` |
+| Watch route | `POST /v1/watch` |
+| Status route | `GET /v1/watch/:id` |
+| Service price | `0.001 USDC` (`1000` atomic units) |
+| Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
+| Facilitator | `https://facilitator.goplausible.xyz` |
+| Hosting | Render with persistent SQLite disk mounted at `/data` |
+| Health response | `{ "status": "ok", "network": "mainnet" }` |
 
-## Settlement → activation reconciliation
+The production server has no mnemonic or private key. The dedicated payer signs locally.
 
-The installed x402/Hono lifecycle executes the application handler before final settlement. The MainNet route therefore never treats handler execution as settlement evidence.
+## Final audit and correctness hardening
 
-For MainNet, the handler derives and persists the deterministic Algorand payment transaction ID from the already verified AVM payment transaction before the facilitator settlement call. This creates durable reconciliation identity while the watch is still `settlement_pending`.
+A final read-only public-readiness audit was completed. It identified failure-path issues around activation baselines, ambiguous settlement recovery, definitive settlement mismatches, and per-watch poll isolation. The fixes were tested, merged into `hardening/mainnet-readiness`, and deployed.
+
+Production hardening merge commit:
+
+```text
+69afd9dc070a7f9c12206b038f117cc1f2b3fdb3
+```
+
+The deployed hardening includes:
+
+- no cursorless activation when activation-round acquisition fails;
+- exact on-chain settlement reconciliation establishing the safe initial scan baseline;
+- retryable recovery for ambiguous settlement outcomes;
+- terminal fail-closed handling for a definitive on-chain settlement mismatch;
+- per-watch poll failure isolation so one watch does not starve later watches;
+- mandatory valid HTTPS `ROUNDWATCH_PUBLIC_BASE_URL` on MainNet;
+- guarded MainNet checkpoint, runtime, receiver, asset, amount, note, and response validation;
+- full-history Gitleaks CI and tracked `.env` rejection;
+- server correctness/reconciliation tests and client MainNet safety tests; and
+- production Docker build validation.
+
+Correctness-hardening CI passed. The history-aware secret scan is part of that CI: checkout uses full depth and Gitleaks v8.29.1 scans complete Git history with redaction enabled.
+
+Render successfully auto-deployed the merge commit. A free post-deploy smoke check passed, `/health` continued to report MainNet, and the pre-existing matched watch `7c606f02-0257-4dfd-b59c-a13b61f480f0` survived the migration/redeploy unchanged.
+
+No second paid MainNet E2E was performed after this patch, and this document does not imply one. The free health and persisted-watch checks were sufficient to verify the deployed change without another spend.
+
+## Settlement and activation recovery
+
+The x402/Hono lifecycle runs the application handler before final settlement. MainNet therefore persists the deterministic service-payment transaction ID from the verified AVM payload while the watch is still `settlement_pending`.
 
 Normal path:
 
 ```text
 verified payment authorization
-→ persist pending watch + deterministic service payment txid
+→ persist pending watch and deterministic service-payment identity
 → facilitator settles
-→ onAfterSettle receives success evidence
-→ SQLite watch becomes active
+→ settlement hook records evidence
+→ acquire current Indexer round
+→ activate with that round as the initial scan cursor
 ```
 
-Crash-window recovery path:
+Recovery path:
 
 ```text
-verified payment authorization
-→ persist pending watch + deterministic service payment txid
-→ facilitator settles on-chain
-→ process dies before activation commit
-→ fresh process reloads pending watch
-→ reconciliation worker looks up that exact txid
-→ exact receiver / ASA / amount / payer checks pass
-→ watch becomes active
+persist pending watch and deterministic service-payment identity
+→ settlement succeeds or may have succeeded
+→ activation commit is absent
+→ reconciler looks up that exact transaction ID
+→ receiver / ASA / amount / payer checks pass
+→ activate using the transaction's confirmed round
 ```
 
-If an on-chain transaction exists for the prepared txid but its service-payment fields do not match, the row fails closed to `settlement_unknown`.
+If no transaction is found, the outcome stays recoverable. If the exact transaction is found but payment-critical fields do not match, reconciliation becomes terminal and the watch remains fail-closed as `settlement_unknown`. A watch is never activated without a scan baseline.
 
-The recovery path was proven live on TestNet on 2026-09-16: a real facilitator settlement completed, the process intentionally exited before SQLite activation, restart reconciliation recovered the exact transaction, duplicate recovery did not settle again, and a later separate TestNet invoice transfer was matched.
+The crash-window path was proven live on TestNet on **2026-09-16**: the facilitator settled, the process intentionally exited before the activation commit, restart reconciliation recovered the exact transaction without a duplicate settlement, and a later separate TestNet invoice transfer matched.
 
-## MainNet live E2E evidence
+## MainNet paid E2E evidence
 
-On 2026-09-16 the public Render deployment completed the first explicitly authorized MainNet RoundWatch purchase and later matched a separate MainNet USDC invoice transfer.
+On **2026-09-16**, the production deployment completed one explicitly authorized MainNet service purchase and matched a later, separate MainNet USDC invoice transfer.
 
-- Service settlement transaction: `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA`
-- Service settlement confirmed round: `65095955`
-- Activated watch: `7c606f02-0257-4dfd-b59c-a13b61f480f0`
-- Later watched invoice transaction: `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA`
-- Invoice confirmed round: `65096073`
-- RoundWatch matched transaction: `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA`
-- RoundWatch matched round: `65096073`
+| Evidence | Value |
+| --- | --- |
+| Service settlement transaction | `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA` |
+| Service settlement confirmed round | `65095955` |
+| Activated watch | `7c606f02-0257-4dfd-b59c-a13b61f480f0` |
+| Later invoice transaction | `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA` |
+| Invoice confirmed round | `65096073` |
+| RoundWatch matched transaction | `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA` |
+| RoundWatch matched round | `65096073` |
 
-The local MainNet runner performed a read-only unpaid preflight before spending and refused mismatched network, asset, receiver, amount, challenge tag, or resource URL. The service purchase spent `0.001 USDC`; the later watched invoice transfer used `1` atomic unit of MainNet USDC (`0.000001 USDC`) plus Algorand network fees.
+Before signing, the guarded runner performed a read-only unpaid preflight and rejected any mismatch in resource URL, network, asset, receiver, amount, or challenge tag. The service purchase spent `0.001 USDC`. The later invoice used `1` atomic unit (`0.000001 USDC`) plus Algorand network fees.
 
-Independent public MainNet Indexer verification confirmed both transactions as Algorand asset transfers (`axfer`) using Circle USDC ASA `31566704`, with sender `3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ` and receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`. The service settlement amount is `1000` atomic units at round `65095955`; the watched invoice amount is `1` atomic unit at round `65096073`.
+Independent MainNet Indexer verification confirmed both transactions were Algorand asset transfers using Circle USDC ASA `31566704`, with sender `3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ` and receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`. The service amount was `1000` atomic units at round `65095955`; the watched invoice amount was `1` atomic unit at round `65096073`.
 
-## Discovery evidence
+The matched watch persisted across multiple Render redeploys, including the correctness-hardening deployment.
 
-GoPlausible Bazaar discovery returned the RoundWatch resource with:
+## Bazaar and challenge evidence
 
-- resource URL `https://roundwatch-api.onrender.com/v1/watch`;
+On **2026-09-16**, GoPlausible Bazaar discovery returned:
+
+- HTTPS resource `https://roundwatch-api.onrender.com/v1/watch`;
 - method `POST`;
-- Algorand MainNet CAIP-2 network identifier;
+- Algorand MainNet CAIP-2 network;
 - Circle USDC ASA `31566704`;
 - amount `1000` atomic units (`0.001 USDC`);
-- intended receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
+- receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
 - challenge tag `x402-global-challenge`;
-- `settleCount: 1`;
-- machine-readable Bazaar input/output discovery metadata.
+- `settleCount: 1`; and
+- machine-readable request/response discovery metadata.
 
-The full MainNet merchant leaderboard dataset also contained the RoundWatch receiver. Observed entry on 2026-09-16: `rank: 145`, `sub: roundwatch-api.onrender.com`, `bazaar: true`, `challenge: true`, `volume: 0.001`, `settles: 1`. This closes the discovery and challenge-attribution gate for the first settlement.
+The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank was 145 among 147 merchant entries at the time queried. That rank is a dated observation and may change.
 
-## Production gates
+## Readiness gates
 
-| Gate | Status | Evidence / next action |
+| Gate | Status | Evidence |
 | --- | --- | --- |
-| Settlement → activation reconciliation design | Implemented | Deterministic payment txid is persisted before settlement and checked on-chain after restart |
-| Focused reconciliation tests | Passed | Pending→active recovery, mismatch fail-closed, and Indexer tx lookup tests |
-| Explicit TestNet/MainNet configuration | Passed | MainNet is never inferred implicitly; TestNet stays default |
-| MainNet USDC / Indexer config | Passed | MainNet USDC `31566704`; MainNet AlgoNode Indexer |
-| Production SQLite guard | Passed | MainNet requires explicit absolute DB path on persistent storage |
-| URL / address startup validation | Passed | Checksum-valid receiver and HTTPS production URLs required |
-| Current-tree env-secret guard | Passed | CI rejects tracked `.env` / `.env.*` other than `.env.example` |
-| History-aware secret scan | Passed | CI full-depth checkout + Gitleaks v8.29.1 scans complete git history |
-| Production container | Passed | Root Dockerfile + `.dockerignore`; CI builds the image |
-| MainNet wallet funding / USDC opt-in | Passed | Dedicated Payer and Receiver funded and opted in |
-| Live TestNet reconciliation fault injection | Passed | Real settlement → intentional crash → restart reconciliation → duplicate-safe recovery → later invoice match |
-| Public HTTPS API + persistent disk | Passed | Render Frankfurt; Docker; `/data/roundwatch.sqlite`; 1 GB persistent disk |
-| Public unpaid MainNet preflight | Passed | HTTPS resource, MainNet CAIP-2, USDC ASA `31566704`, receiver, `$0.001`, challenge tag all confirmed |
-| Real MainNet x402 paid E2E | Passed | Service settlement `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA`; watch activated |
-| Later MainNet invoice match | Passed | `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA` matched at round `65096073` |
-| Independent MainNet transaction verification | Passed | Public Indexer confirmed both txids, sender/receiver, ASA `31566704`, amounts `1000` and `1`, rounds `65095955` and `65096073` |
-| Bazaar discovery visibility | Passed | Public `/v1/watch` listed with `settleCount: 1` and full machine-readable discovery metadata |
-| Challenge attribution | Passed | Merchant leaderboard entry has `challenge: true`, `volume: 0.001`, `settles: 1`; observed rank `145` |
+| Explicit network configuration | Passed | TestNet is the safe default; MainNet requires explicit selection |
+| MainNet CAIP-2 and Circle USDC | Passed | Full MainNet identifier and ASA `31566704` are fixed in network config |
+| Persistent production state | Passed | MainNet requires an absolute path; Render uses `/data/roundwatch.sqlite` |
+| URL and address startup validation | Passed | Checksum-valid receiver and HTTPS production endpoints required |
+| Settlement crash reconciliation | Passed | Focused tests plus live TestNet fault injection |
+| Safe activation baseline | Passed | Normal and reconciliation activation store a confirmed Indexer round |
+| Ambiguous/invalid settlement handling | Passed | Ambiguous outcomes retry; definitive mismatch is terminal/fail-closed |
+| Poll failure isolation | Passed | One watch failure neither advances its cursor nor starves later watches |
+| Server test suite | Passed | Request, persistence, poller, and reconciliation coverage |
+| MainNet client safety suite | Passed | Runtime, checkpoint, payment-critical, and response guards |
+| History-aware secret scan | Passed | Full-depth checkout plus Gitleaks complete-history scan |
+| Tracked environment guard | Passed | CI rejects tracked `.env` files except examples |
+| Production container | Passed | CI builds the root Dockerfile |
+| Public HTTPS API | Passed | Render deployment and free health/preflight checks |
+| Paid MainNet service purchase | Passed | Settlement transaction and active watch recorded above |
+| Later exact invoice match | Passed | Same invoice txid and round recorded by Indexer and RoundWatch |
+| Persistence through redeploy | Passed | Existing matched watch unchanged after multiple redeploys |
+| Bazaar discovery | Passed | Correct resource metadata and `settleCount: 1` |
+| Challenge attribution | Passed | Merchant entry reported `challenge: true` |
 
-## Rules
+## Remaining human-controlled steps
 
-- Never commit a mnemonic, private key, recovery phrase, wallet export, or funded `.env`.
-- Never perform a MainNet payment during automated tests.
-- MainNet must require an explicit configuration choice; it must never be inferred from a production hostname.
-- TestNet remains the default for local development until MainNet is explicitly enabled.
-- `ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=1` is a TestNet-only fault switch; startup must reject it on MainNet.
-- MainNet paid runner requires the explicit `--confirm-mainnet` flag and validates payment requirements before signing.
-- Do not remove or replace the production persistent disk without deliberate database backup / migration planning.
+- The repository is still private. Do not describe it as publicly released until a human changes its visibility.
+- The final hardening-to-`main` merge has not been performed. Merge only after the documentation/publication review is accepted.
+- Complete the challenge-submission process and any required Electric Capital submission path after repository publication.
+- Do not move funds or repeat a paid MainNet test unless a separately reviewed need receives explicit human authorization.
 
-## Manual wallet status
+## Product and operational limitations
 
-The wallet-side preparation and first live E2E are complete:
-
-- dedicated MainNet Payer has ALGO and verified Circle USDC;
-- dedicated MainNet Receiver has ALGO and verified Circle USDC;
-- no mnemonic or private key is stored in this repository or required by the resource server;
-- the first production service settlement and later invoice transfer both completed on MainNet.
-
-Do not move additional funds unless a later explicitly reviewed test requires them.
-
-## Remaining proof / launch work
-
-Core payment, observation, discovery and challenge attribution are now live-proven. Remaining launch work is publication-oriented:
-
-- perform the final repository secret/history review before making the repository public;
-- complete repository-publication and challenge-submission requirements, including the Electric Capital submission path if still required by the challenge rules;
-- merge the hardening PR after the final publication/submission checks are recorded.
+RoundWatch does not yet define a watch TTL, cancellation operation, active-watch quota, capacity policy, SLA, or long-term pricing policy. The current single-instance SQLite deployment and sequential in-process poller are not a claim of horizontal or arbitrary-scale operation. Per-watch failure isolation protects progress for later watches, but does not resolve those product and scaling decisions.
