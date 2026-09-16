@@ -108,6 +108,9 @@ export function createApp(dependencies: AppDependencies): Hono {
 
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
    const watchRouteKey = `POST ${watchPath}`;
+   const publicBaseUrl = process.env.ROUNDWATCH_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+   const publicDemoResource = publicBaseUrl ? `${publicBaseUrl}/demo` : undefined;
+   const publicWatchResource = publicBaseUrl ? `${publicBaseUrl}${watchPath}` : undefined;
    const resourceServer = new x402ResourceServer(facilitatorClient);
 
    resourceServer.register(networkConfig.network, new ExactAvmScheme());
@@ -225,6 +228,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                      },
                   },
                ],
+               ...(publicDemoResource ? { resource: publicDemoResource } : {}),
                description:
                   'x402 endpoint returning proof of successful Algorand USDC payment',
                mimeType: 'application/json',
@@ -243,6 +247,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                      },
                   },
                ],
+               ...(publicWatchResource ? { resource: publicWatchResource } : {}),
                description: `Create one durable RoundWatch ${networkConfig.name} watch`,
                mimeType: 'application/json',
                extensions: watchDiscovery,
