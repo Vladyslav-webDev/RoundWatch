@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **Historical research snapshot — 2026-09-11.** This document predates the implemented and live-proven RoundWatch MainNet product. Proposed callbacks, bounded TTLs, pricing hypotheses, competitor observations, and challenge leaderboard snapshots below are research and development history, not the current RoundWatch API contract. Current behavior is defined by the [README](../README.md) and the current [architecture](ARCHITECTURE.md), [security](SECURITY.md), [MainNet readiness](MAINNET_READINESS.md), and [deployment](DEPLOYMENT.md) documents.
+
 # x402 Opportunity Map
 
 ## Decision
