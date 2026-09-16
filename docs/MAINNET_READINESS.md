@@ -1,6 +1,6 @@
 # RoundWatch MainNet Readiness
 
-Status: public MainNet deployment and paid E2E proven; final discovery / submission gates remain
+Status: public MainNet deployment, paid E2E, Bazaar discovery and challenge attribution proven; publication / submission gates remain
 
 This document tracks production hardening and live evidence for RoundWatch MainNet readiness.
 
@@ -21,6 +21,8 @@ This document tracks production hardening and live evidence for RoundWatch MainN
 - RoundWatch is publicly deployed on Render at `https://roundwatch-api.onrender.com` with a 1 GB persistent disk mounted at `/data`.
 - Public `/health` returns `{ "status": "ok", "network": "mainnet" }`.
 - Public unpaid `/v1/watch` preflight advertises HTTPS resource URL, Algorand MainNet, USDC ASA `31566704`, the intended receiver, `$0.001` service price, and challenge tag `x402-global-challenge`.
+- GoPlausible Bazaar discovery lists the public RoundWatch resource with `settleCount: 1`.
+- The MainNet merchant leaderboard lists the RoundWatch receiver with `bazaar: true`, `challenge: true`, `volume: 0.001`, `settles: 1`; observed rank was `145` on 2026-09-16.
 
 ## Settlement → activation reconciliation
 
@@ -71,6 +73,22 @@ The local MainNet runner performed a read-only unpaid preflight before spending 
 
 Independent public MainNet Indexer verification confirmed both transactions as Algorand asset transfers (`axfer`) using Circle USDC ASA `31566704`, with sender `3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ` and receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`. The service settlement amount is `1000` atomic units at round `65095955`; the watched invoice amount is `1` atomic unit at round `65096073`.
 
+## Discovery evidence
+
+GoPlausible Bazaar discovery returned the RoundWatch resource with:
+
+- resource URL `https://roundwatch-api.onrender.com/v1/watch`;
+- method `POST`;
+- Algorand MainNet CAIP-2 network identifier;
+- Circle USDC ASA `31566704`;
+- amount `1000` atomic units (`0.001 USDC`);
+- intended receiver `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
+- challenge tag `x402-global-challenge`;
+- `settleCount: 1`;
+- machine-readable Bazaar input/output discovery metadata.
+
+The full MainNet merchant leaderboard dataset also contained the RoundWatch receiver. Observed entry on 2026-09-16: `rank: 145`, `sub: roundwatch-api.onrender.com`, `bazaar: true`, `challenge: true`, `volume: 0.001`, `settles: 1`. This closes the discovery and challenge-attribution gate for the first settlement.
+
 ## Production gates
 
 | Gate | Status | Evidence / next action |
@@ -91,7 +109,8 @@ Independent public MainNet Indexer verification confirmed both transactions as A
 | Real MainNet x402 paid E2E | Passed | Service settlement `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA`; watch activated |
 | Later MainNet invoice match | Passed | `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA` matched at round `65096073` |
 | Independent MainNet transaction verification | Passed | Public Indexer confirmed both txids, sender/receiver, ASA `31566704`, amounts `1000` and `1`, rounds `65095955` and `65096073` |
-| Bazaar / challenge discovery visibility | Pending | Verify catalog / challenge surfaces after MainNet settlement |
+| Bazaar discovery visibility | Passed | Public `/v1/watch` listed with `settleCount: 1` and full machine-readable discovery metadata |
+| Challenge attribution | Passed | Merchant leaderboard entry has `challenge: true`, `volume: 0.001`, `settles: 1`; observed rank `145` |
 
 ## Rules
 
@@ -116,8 +135,8 @@ Do not move additional funds unless a later explicitly reviewed test requires th
 
 ## Remaining proof / launch work
 
-Core payment and observation behavior is now live-proven. Remaining launch work is operational and discovery-oriented:
+Core payment, observation, discovery and challenge attribution are now live-proven. Remaining launch work is publication-oriented:
 
-- verify the x402 Bazaar / GoPlausible challenge discovery surfaces contain the public RoundWatch resource;
-- complete repository-publication and challenge-submission requirements only after the final secret/history review;
-- merge the hardening PR only after the remaining launch checks are recorded.
+- perform the final repository secret/history review before making the repository public;
+- complete repository-publication and challenge-submission requirements, including the Electric Capital submission path if still required by the challenge rules;
+- merge the hardening PR after the final publication/submission checks are recorded.
