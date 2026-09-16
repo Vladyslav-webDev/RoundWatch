@@ -31,6 +31,7 @@ import type {
    WatchRecord,
    WatchSpec,
 } from './roundwatch-store.js';
+import { WatchCapacityError } from './roundwatch-store.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
@@ -319,7 +320,26 @@ export function createApp(dependencies: AppDependencies): Hono {
          );
       }
 
-      const prepared = store.prepareWatch(parsed.spec, settlementIntent);
+      let prepared;
+
+      try {
+         prepared = store.prepareWatch(parsed.spec, settlementIntent);
+      } catch (error) {
+         if (error instanceof WatchCapacityError) {
+            return c.json(
+               {
+                  error: 'RoundWatch capacity is currently exhausted',
+                  code:
+                     error.scope === 'payer'
+                        ? 'payer_watch_capacity_exhausted'
+                        : 'global_watch_capacity_exhausted',
+               },
+               429,
+            );
+         }
+
+         throw error;
+      }
 
       if (!prepared.created) {
          return c.json(

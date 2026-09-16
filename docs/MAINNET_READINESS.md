@@ -51,6 +51,12 @@ Render successfully auto-deployed the merge commit. A free post-deploy smoke che
 
 No second paid MainNet E2E was performed after this patch, and this document does not imply one. The free health and persisted-watch checks were sufficient to verify the deployed change without another spend.
 
+## Bounded-capacity release candidate
+
+The final publication candidate adds a server-controlled 30-minute expiry, a global cap of 50 open obligations, and a cap of 5 open obligations per deterministic verified service payer. Capacity rejection occurs in the application handler before x402 settlement and returns HTTP `429`. Persisted expiry removes elapsed unfinished watches from polling, reconciliation, and capacity while retaining their public `expired` record.
+
+The SQLite migration transactionally adds the new state constraint and expiry column. Legacy unfinished rows receive a full configured TTL from the first upgraded startup; the known historical matched watch remains matched and may have no `expiresAt` because it predates the field. This candidate is locally tested but is not described as deployed until the human-controlled merge and Render branch switch occur. No additional MainNet payment is required for deployment validation.
+
 ## Settlement and activation recovery
 
 The x402/Hono lifecycle runs the application handler before final settlement. MainNet therefore persists the deterministic service-payment transaction ID from the verified AVM payload while the watch is still `settlement_pending`.
@@ -129,6 +135,7 @@ The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: tru
 | Safe activation baseline | Passed | Normal and reconciliation activation store a confirmed Indexer round |
 | Ambiguous/invalid settlement handling | Passed | Ambiguous outcomes retry; definitive mismatch is terminal/fail-closed |
 | Poll failure isolation | Passed | One watch failure neither advances its cursor nor starves later watches |
+| Bounded open obligations | Candidate passed | Persisted 30-minute expiry, 50 global and 5 per-payer caps, pre-settlement rejection, restart and migration tests |
 | Server test suite | Passed | Request, persistence, poller, and reconciliation coverage |
 | MainNet client safety suite | Passed | Runtime, checkpoint, payment-critical, and response guards |
 | History-aware secret scan | Passed | Full-depth checkout plus Gitleaks complete-history scan |
@@ -150,4 +157,4 @@ The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: tru
 
 ## Product and operational limitations
 
-RoundWatch does not yet define a watch TTL, cancellation operation, active-watch quota, capacity policy, SLA, or long-term pricing policy. The current single-instance SQLite deployment and sequential in-process poller are not a claim of horizontal or arbitrary-scale operation. Per-watch failure isolation protects progress for later watches, but does not resolve those product and scaling decisions.
+RoundWatch now defines a challenge-release safety policy of a 30-minute watch lifetime, 50 global open obligations, and 5 open obligations per verified service payer. It still has no cancellation operation, SLA, long-term pricing policy, or horizontally coordinated worker design. The current single-instance SQLite deployment and sequential in-process poller are not a claim of arbitrary-scale operation, and the release limits are operational bounds rather than a commercial service commitment.

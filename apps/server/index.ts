@@ -17,6 +17,9 @@ import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import {
+   DEFAULT_MAX_OPEN_WATCHES,
+   DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
+   DEFAULT_WATCH_TTL_MILLISECONDS,
    RoundWatchStore,
    type SettlementEvidence,
    type WatchRecord,
@@ -54,12 +57,30 @@ if (!isValidAlgorandAddress(avmAddress)) {
 
 let networkConfig;
 let publicBaseUrl;
+let watchTtlMilliseconds;
+let maxOpenWatches;
+let maxOpenWatchesPerPayer;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
    publicBaseUrl = resolveRoundWatchPublicBaseUrl(
       process.env.ROUNDWATCH_PUBLIC_BASE_URL,
       networkConfig.name,
+   );
+   watchTtlMilliseconds = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_WATCH_TTL_MS,
+      DEFAULT_WATCH_TTL_MILLISECONDS,
+      'ROUNDWATCH_WATCH_TTL_MS',
+   );
+   maxOpenWatches = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_MAX_OPEN_WATCHES,
+      DEFAULT_MAX_OPEN_WATCHES,
+      'ROUNDWATCH_MAX_OPEN_WATCHES',
+   );
+   maxOpenWatchesPerPayer = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER,
+      DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
+      'ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER',
    );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
@@ -127,9 +148,14 @@ try {
 const facilitatorClient = new HTTPFacilitatorClient({
    url: facilitatorUrl,
 });
+const storeOptions = {
+   watchTtlMilliseconds,
+   maxOpenWatches,
+   maxOpenWatchesPerPayer,
+};
 const store = faultExitAfterSettle
-   ? new TestnetExitAfterSettleStore(databasePath)
-   : new RoundWatchStore(databasePath);
+   ? new TestnetExitAfterSettleStore(databasePath, storeOptions)
+   : new RoundWatchStore(databasePath, storeOptions);
 const indexer = new AlgorandIndexerClient(indexerUrl);
 const poller = new RoundWatchPoller(
    store,
@@ -169,6 +195,10 @@ server.on('listening', () => {
    console.log(`USDC ASA: ${networkConfig.usdcAssetId}`);
    console.log(`Indexer: ${indexerUrl}`);
    console.log(`SQLite: ${databasePath}`);
+   console.log(`Watch TTL: ${watchTtlMilliseconds} ms`);
+   console.log(
+      `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
+   );
 
    if (faultExitAfterSettle) {
       console.warn(
@@ -223,4 +253,20 @@ function parsePositiveInteger(
    const parsed = Number(value);
 
    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseRequiredPositiveInteger(
+   value: string | undefined,
+   fallback: number,
+   variableName: string,
+): number {
+   const parsed = value === undefined || value.trim() === ''
+      ? fallback
+      : Number(value);
+
+   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new Error(`${variableName} must be a finite positive integer`);
+   }
+
+   return parsed;
 }

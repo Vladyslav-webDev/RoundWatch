@@ -31,6 +31,7 @@ Startup validates:
 - MainNet facilitator and Indexer URLs use HTTPS;
 - MainNet `ROUNDWATCH_PUBLIC_BASE_URL` is present, absolute, HTTPS, free of credentials/query/fragment, and non-loopback;
 - a MainNet Indexer URL does not visibly point at TestNet; and
+- watch TTL and global/per-payer capacity values are finite positive integers; and
 - `ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=1` is rejected on MainNet.
 
 These guards reduce accidental cross-network or ephemeral production operation. They do not authenticate the configured external services or prove that an arbitrary URL serves the intended network; operators must still review configuration.
@@ -78,11 +79,19 @@ The request parser accepts only checksum-valid addresses and positive integer am
 
 If a poll lookup fails, that watch's cursor is not advanced. The error is isolated so later watches are still evaluated. If a watch somehow lacks a scan baseline, the poller refuses cursorless scanning.
 
+Each new watch persists a server-controlled `expiresAt` equal to `createdAt + 30 minutes`. Elapsed unfinished watches transition to terminal state `expired` through SQLite before active or reconciliation lists are returned and before later state changes are accepted. They remain readable but cannot generate further Indexer work. A successful `matched` result and a definitive terminal settlement mismatch are not overwritten by expiry.
+
 ## Idempotency and duplicate-purchase protection
 
 Each watch requires an 8–128 character idempotency key, stored under a SQLite unique constraint. A repeated key returns HTTP `409` with the existing public watch. Because the handler response is an error, the normal x402 lifecycle does not settle another service payment for that duplicate request; this behavior is covered by the recovery workflow and tests.
 
 Idempotency keys are global to the database and are not authentication credentials. The API returns the existing record for the key rather than replacing it or proving that a later caller owns it. Clients should use unguessable, obligation-specific values and retain their checkpoint locally.
+
+## Capacity admission
+
+The challenge-release limits are 50 open obligations globally and 5 per verified service payer. Open means `settlement_pending`, `active`, or non-terminal `settlement_unknown`; `matched`, `expired`, and definitive terminal mismatches do not count. The payer key comes from the deterministic verified AVM transaction identity, never a caller-supplied body field.
+
+Expiry, capacity checks, and insertion run synchronously at the SQLite boundary, with the check and insert protected by an immediate transaction. Exhaustion returns HTTP `429` before the handler can return success. The installed after-handler x402 flow therefore cancels settlement and does not charge for the rejected watch. These limits bound the current persistent polling liability; they are not an SLA or a claim of arbitrary load capacity.
 
 ## MainNet client guard
 
@@ -100,7 +109,7 @@ This runner is for explicitly authorized evidence collection, not routine health
 
 - The current service is a single instance with in-process workers and local SQLite. It has no multi-instance leader election or distributed queue.
 - Availability depends on Render, its persistent disk, GoPlausible, the configured AlgoNode Indexer, and Algorand MainNet.
-- There is no defined TTL, quota, capacity policy, or SLA.
+- The current 30-minute TTL and 50-global/5-per-payer admission limits are challenge-release operational policy, not an SLA or final commercial capacity policy.
 - Watch status is unauthenticated. Anyone who knows a UUID can retrieve its record, including addresses, amounts, optional notes, settlement metadata, and transaction IDs.
 - Algorand transfers and public addresses are already public, but an invoice note can add application-specific information. Do not place confidential or personal data in it.
 - There is no cancellation or deletion API and no documented retention policy.
