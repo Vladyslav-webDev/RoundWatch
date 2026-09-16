@@ -68,6 +68,7 @@ interface WatchRow {
    created_at: string;
    matched_transaction: string | null;
    matched_round: number | null;
+   settlement_reconciliation_terminal: number;
 }
 
 export class RoundWatchStore {
@@ -109,7 +110,8 @@ export class RoundWatchStore {
             scan_after_round INTEGER,
             created_at TEXT NOT NULL,
             matched_transaction TEXT,
-            matched_round INTEGER
+            matched_round INTEGER,
+            settlement_reconciliation_terminal INTEGER NOT NULL DEFAULT 0
          );
       `);
 
@@ -119,12 +121,62 @@ export class RoundWatchStore {
       );
       this.ensureColumn('expected_service_network', 'expected_service_network TEXT');
       this.ensureColumn('expected_service_payer', 'expected_service_payer TEXT');
+      this.ensureColumn(
+         'settlement_reconciliation_terminal',
+         'settlement_reconciliation_terminal INTEGER NOT NULL DEFAULT 0',
+      );
 
       this.database.exec(`
          CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_expected_service_tx_unique
          ON roundwatch_watches(expected_service_transaction)
          WHERE expected_service_transaction IS NOT NULL;
       `);
+   }
+
+   recordSettlementCandidate(
+      id: string,
+      evidence: SettlementEvidence,
+   ): WatchRecord {
+      const existing = this.getWatch(id);
+
+      if (!existing) {
+         throw new Error(`Cannot record settlement for missing watch ${id}`);
+      }
+
+      assertSettlementEvidenceMatches(existing, evidence);
+
+      if (existing.state === 'active' || existing.state === 'matched') {
+         if (existing.serviceTransaction === evidence.transaction) {
+            return existing;
+         }
+
+         throw new Error(`Watch ${id} was already activated by another settlement`);
+      }
+
+      if (
+         existing.state !== 'settlement_pending' &&
+         existing.state !== 'settlement_unknown'
+      ) {
+         throw new Error(`Watch ${id} cannot record settlement while ${existing.state}`);
+      }
+
+      this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET
+            expected_service_transaction = COALESCE(expected_service_transaction, ?),
+            expected_service_network = COALESCE(expected_service_network, ?),
+            expected_service_payer = COALESCE(expected_service_payer, ?)
+         WHERE id = ?
+           AND state IN ('settlement_pending', 'settlement_unknown')
+           AND settlement_reconciliation_terminal = 0
+      `).run(
+         evidence.transaction,
+         evidence.network,
+         evidence.payer ?? null,
+         id,
+      );
+
+      return this.getWatch(id)!;
    }
 
    prepareWatch(
@@ -189,33 +241,7 @@ export class RoundWatchStore {
          throw new Error(`Cannot activate missing watch ${id}`);
       }
 
-      if (
-         existing.expectedServiceTransaction &&
-         existing.expectedServiceTransaction !== evidence.transaction
-      ) {
-         throw new Error(
-            `Watch ${id} settlement transaction does not match the prepared payment`,
-         );
-      }
-
-      if (
-         existing.expectedServiceNetwork &&
-         existing.expectedServiceNetwork !== evidence.network
-      ) {
-         throw new Error(
-            `Watch ${id} settlement network does not match the prepared payment`,
-         );
-      }
-
-      if (
-         existing.expectedServicePayer &&
-         evidence.payer &&
-         existing.expectedServicePayer !== evidence.payer
-      ) {
-         throw new Error(
-            `Watch ${id} settlement payer does not match the prepared payment`,
-         );
-      }
+      assertSettlementEvidenceMatches(existing, evidence);
 
       if (existing.state === 'active' || existing.state === 'matched') {
          if (existing.serviceTransaction === evidence.transaction) {
@@ -225,8 +251,13 @@ export class RoundWatchStore {
          throw new Error(`Watch ${id} was already activated by another settlement`);
       }
 
-      if (existing.state !== 'settlement_pending') {
-         throw new Error(`Watch ${id} is ${existing.state}, not settlement_pending`);
+      if (
+         existing.state !== 'settlement_pending' &&
+         existing.state !== 'settlement_unknown'
+      ) {
+         throw new Error(
+            `Watch ${id} is ${existing.state}, not settlement_pending or settlement_unknown`,
+         );
       }
 
       const activatedAt = new Date().toISOString();
@@ -240,7 +271,9 @@ export class RoundWatchStore {
             activation_round = ?,
             activated_at = ?,
             scan_after_round = ?
-         WHERE id = ? AND state = 'settlement_pending'
+         WHERE id = ?
+           AND state IN ('settlement_pending', 'settlement_unknown')
+           AND settlement_reconciliation_terminal = 0
       `).run(
          evidence.transaction,
          evidence.network,
@@ -261,8 +294,21 @@ export class RoundWatchStore {
    markSettlementUnknown(id: string): void {
       this.database.prepare(`
          UPDATE roundwatch_watches
-         SET state = 'settlement_unknown'
+         SET
+            state = 'settlement_unknown',
+            settlement_reconciliation_terminal = 0
          WHERE id = ? AND state = 'settlement_pending'
+      `).run(id);
+   }
+
+   markSettlementInvalid(id: string): void {
+      this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET
+            state = 'settlement_unknown',
+            settlement_reconciliation_terminal = 1
+         WHERE id = ?
+           AND state IN ('settlement_pending', 'settlement_unknown')
       `).run(id);
    }
 
@@ -318,11 +364,12 @@ export class RoundWatchStore {
       return rows.map(mapRow);
    }
 
-   listSettlementPendingWatches(): WatchRecord[] {
+   listSettlementReconciliationCandidates(): WatchRecord[] {
       const rows = this.database.prepare(`
          SELECT * FROM roundwatch_watches
-         WHERE state = 'settlement_pending'
+         WHERE state IN ('settlement_pending', 'settlement_unknown')
            AND expected_service_transaction IS NOT NULL
+           AND settlement_reconciliation_terminal = 0
          ORDER BY created_at ASC
       `).all() as unknown as WatchRow[];
 
@@ -343,6 +390,39 @@ export class RoundWatchStore {
             `ALTER TABLE roundwatch_watches ADD COLUMN ${definition};`,
          );
       }
+   }
+}
+
+function assertSettlementEvidenceMatches(
+   watch: WatchRecord,
+   evidence: SettlementEvidence,
+): void {
+   if (
+      watch.expectedServiceTransaction &&
+      watch.expectedServiceTransaction !== evidence.transaction
+   ) {
+      throw new Error(
+         `Watch ${watch.id} settlement transaction does not match the prepared payment`,
+      );
+   }
+
+   if (
+      watch.expectedServiceNetwork &&
+      watch.expectedServiceNetwork !== evidence.network
+   ) {
+      throw new Error(
+         `Watch ${watch.id} settlement network does not match the prepared payment`,
+      );
+   }
+
+   if (
+      watch.expectedServicePayer &&
+      evidence.payer &&
+      watch.expectedServicePayer !== evidence.payer
+   ) {
+      throw new Error(
+         `Watch ${watch.id} settlement payer does not match the prepared payment`,
+      );
    }
 }
 

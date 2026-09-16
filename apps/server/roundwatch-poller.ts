@@ -40,21 +40,30 @@ export class RoundWatchPoller {
       const currentRound = await this.indexer.getCurrentRound();
 
       for (const watch of watches) {
-         if (watch.scanAfterRound === undefined) {
-            this.store.advanceScanRound(watch.id, currentRound);
-            continue;
-         }
+         try {
+            if (watch.scanAfterRound === undefined) {
+               console.error(
+                  `RoundWatch watch ${watch.id} has no safe scan baseline; cursor was not advanced`,
+               );
+               continue;
+            }
 
-         const match = await this.indexer.findMatch(
-            watch,
-            watch.scanAfterRound + 1,
-            currentRound,
-         );
+            const match = await this.indexer.findMatch(
+               watch,
+               watch.scanAfterRound + 1,
+               currentRound,
+            );
 
-         if (match) {
-            this.store.markMatched(watch.id, match.transaction, match.round);
-         } else {
-            this.store.advanceScanRound(watch.id, currentRound);
+            if (match) {
+               this.store.markMatched(watch.id, match.transaction, match.round);
+            } else {
+               this.store.advanceScanRound(watch.id, currentRound);
+            }
+         } catch (error) {
+            console.error(
+               `RoundWatch poll failed for watch ${watch.id}:`,
+               safeErrorMessage(error),
+            );
          }
       }
    }

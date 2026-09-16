@@ -20,14 +20,21 @@ import {
 import {
    ALGORAND_TESTNET,
    createApp,
+   ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
    TESTNET_USDC_ASSET_ID,
 } from './app.js';
+import { resolveRoundWatchPublicBaseUrl } from './network-config.js';
 import {
    AlgorandIndexerClient,
    type RoundWatchIndexer,
    type WatchMatch,
 } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
+import {
+   SettlementReconciler,
+   type IndexedAssetTransfer,
+   type SettlementLookupIndexer,
+} from './roundwatch-reconciler.js';
 import {
    RoundWatchStore,
    type WatchRecord,
@@ -123,6 +130,173 @@ test('a watch activates only after settlement and duplicate creation is rejected
    } finally {
       store.close();
    }
+});
+
+test('failed activation-round lookup leaves a recoverable watch and reconciliation establishes the baseline', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FailingRoundIndexer();
+   const facilitator = new FakeFacilitator(store, 'invoice-round-failure');
+   const app = createApp({
+      avmAddress: RECEIVER,
+      facilitatorClient: facilitator,
+      store,
+      indexer,
+   });
+
+   try {
+      const requestBody = JSON.stringify({
+         idempotencyKey: 'invoice-round-failure',
+         expectedSender: SPEC.expectedSender,
+         expectedReceiver: SPEC.expectedReceiver,
+         atomicAmount: SPEC.atomicAmount,
+         invoiceNote: SPEC.invoiceNote,
+      });
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: requestBody,
+      });
+      const requiredHeader = unpaid.headers.get('payment-required');
+      assert.ok(requiredHeader);
+      const required = decodePaymentRequiredHeader(requiredHeader);
+      const paymentHeader = encodePaymentSignatureHeader({
+         x402Version: 2,
+         accepted: required.accepts[0]!,
+         payload: { testAuthorization: true },
+      });
+      const paid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body: requestBody,
+      });
+
+      assert.equal(paid.status, 500);
+      const pending = store.getByIdempotencyKey('invoice-round-failure');
+      assert.equal(pending?.state, 'settlement_pending');
+      assert.equal(pending?.expectedServiceTransaction, 'SERVICE_SETTLEMENT_TX');
+      assert.equal(pending?.scanAfterRound, undefined);
+
+      const reconciler = new SettlementReconciler(
+         store,
+         new StaticSettlementLookup({
+            transaction: 'SERVICE_SETTLEMENT_TX',
+            sender: SENDER,
+            receiver: RECEIVER,
+            assetId: TESTNET_USDC_ASSET_ID,
+            atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+            round: 600,
+         }),
+         {
+            network: ALGORAND_TESTNET,
+            receiver: RECEIVER,
+            assetId: TESTNET_USDC_ASSET_ID,
+            atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+            intervalMilliseconds: 5_000,
+         },
+      );
+
+      await reconciler.reconcileOnce();
+      const active = store.getWatch(pending!.id);
+      assert.equal(active?.state, 'active');
+      assert.equal(active?.activationRound, 600);
+      assert.equal(active?.scanAfterRound, 600);
+
+      indexer.round = 605;
+      indexer.match = { transaction: 'FUTURE_AFTER_RECOVERY', round: 604 };
+      await new RoundWatchPoller(store, indexer).runOnce();
+      assert.equal(store.getWatch(pending!.id)?.state, 'matched');
+      assert.equal(
+         store.getWatch(pending!.id)?.matchedTransaction,
+         'FUTURE_AFTER_RECOVERY',
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('an active watch without a cursor never advances silently', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeIndexer(700);
+
+   try {
+      const prepared = store.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'cursorless-active-watch',
+      });
+      store.activateWatch(prepared.watch.id, {
+         transaction: 'CURSORLESS_SERVICE_TX',
+         network: ALGORAND_TESTNET,
+         payer: SENDER,
+      });
+
+      await new RoundWatchPoller(store, indexer).runOnce();
+
+      assert.equal(store.getWatch(prepared.watch.id)?.scanAfterRound, undefined);
+      assert.equal(indexer.findMatchCalls, 0);
+   } finally {
+      store.close();
+   }
+});
+
+test('one watch lookup failure does not starve later watches or advance the failed cursor', async () => {
+   const store = new RoundWatchStore(':memory:');
+
+   try {
+      for (const [key, transaction] of [
+         ['poll-isolation-a', 'POLL_SERVICE_A'],
+         ['poll-isolation-b', 'POLL_SERVICE_B'],
+      ] as const) {
+         const prepared = store.prepareWatch({ ...SPEC, idempotencyKey: key });
+         store.activateWatch(
+            prepared.watch.id,
+            { transaction, network: ALGORAND_TESTNET, payer: SENDER },
+            100,
+         );
+      }
+
+      const indexer = new FirstLookupFailsIndexer();
+      await new RoundWatchPoller(store, indexer).runOnce();
+
+      assert.equal(indexer.watchIds.length, 2);
+      const failed = store.getWatch(indexer.watchIds[0]!);
+      const processed = store.getWatch(indexer.watchIds[1]!);
+      assert.equal(failed?.state, 'active');
+      assert.equal(failed?.scanAfterRound, 100);
+      assert.equal(processed?.state, 'matched');
+      assert.equal(processed?.matchedTransaction, 'ISOLATED_MATCH');
+   } finally {
+      store.close();
+   }
+});
+
+test('MainNet public base URL is required, HTTPS, and normalized', () => {
+   assert.throws(
+      () => resolveRoundWatchPublicBaseUrl(undefined, 'mainnet'),
+      /required on MainNet/,
+   );
+   assert.throws(
+      () => resolveRoundWatchPublicBaseUrl('http://roundwatch.example', 'mainnet'),
+      /must use HTTPS/,
+   );
+   assert.throws(
+      () => resolveRoundWatchPublicBaseUrl('https://127.0.0.1', 'mainnet'),
+      /loopback/,
+   );
+   assert.throws(
+      () => resolveRoundWatchPublicBaseUrl('https://localhost.', 'mainnet'),
+      /localhost/,
+   );
+   assert.equal(
+      resolveRoundWatchPublicBaseUrl(
+         'https://roundwatch-api.onrender.com///',
+         'mainnet',
+      ),
+      'https://roundwatch-api.onrender.com',
+   );
+   assert.equal(resolveRoundWatchPublicBaseUrl(undefined, 'testnet'), undefined);
 });
 
 test('SQLite restart recovers an active watch and the poller matches only a later transfer', async () => {
@@ -281,6 +455,7 @@ class FakeFacilitator implements FacilitatorClient {
 
 class FakeIndexer implements RoundWatchIndexer {
    match?: WatchMatch;
+   findMatchCalls = 0;
 
    constructor(public round: number) {}
 
@@ -293,7 +468,51 @@ class FakeIndexer implements RoundWatchIndexer {
       _minRound: number,
       _maxRound: number,
    ): Promise<WatchMatch | undefined> {
+      this.findMatchCalls += 1;
       return this.match;
+   }
+}
+
+class FailingRoundIndexer extends FakeIndexer {
+   private shouldFail = true;
+
+   constructor() {
+      super(0);
+   }
+
+   override async getCurrentRound(): Promise<number> {
+      if (this.shouldFail) {
+         this.shouldFail = false;
+         throw new Error('Indexer round unavailable');
+      }
+
+      return this.round;
+   }
+}
+
+class StaticSettlementLookup implements SettlementLookupIndexer {
+   constructor(private readonly transfer: IndexedAssetTransfer) {}
+
+   async lookupAssetTransfer(): Promise<IndexedAssetTransfer> {
+      return this.transfer;
+   }
+}
+
+class FirstLookupFailsIndexer implements RoundWatchIndexer {
+   readonly watchIds: string[] = [];
+
+   async getCurrentRound(): Promise<number> {
+      return 105;
+   }
+
+   async findMatch(watch: WatchRecord): Promise<WatchMatch | undefined> {
+      this.watchIds.push(watch.id);
+
+      if (this.watchIds.length === 1) {
+         throw new Error('Synthetic per-watch lookup failure');
+      }
+
+      return { transaction: 'ISOLATED_MATCH', round: 104 };
    }
 }
 

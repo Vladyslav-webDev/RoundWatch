@@ -48,18 +48,20 @@ test('a pending watch activates after its prepared service transaction appears o
       });
 
       await reconciler.reconcileOnce();
+      await reconciler.reconcileOnce();
 
       const recovered = store.getWatch(prepared.watch.id);
       assert.equal(recovered?.state, 'active');
       assert.equal(recovered?.serviceTransaction, 'SERVICE_TX');
       assert.equal(recovered?.servicePayer, PAYER);
       assert.equal(recovered?.activationRound, 900);
+      assert.equal(lookup.calls, 1);
    } finally {
       store.close();
    }
 });
 
-test('an on-chain transaction that does not match the expected service payment fails closed', async () => {
+test('an on-chain mismatch is terminal, fails closed, and is not retried forever', async () => {
    const store = new RoundWatchStore(':memory:');
    const lookup = new FakeSettlementLookup({
       transaction: 'WRONG_SERVICE_TX',
@@ -89,8 +91,52 @@ test('an on-chain transaction that does not match the expected service payment f
       });
 
       await reconciler.reconcileOnce();
+      await reconciler.reconcileOnce();
 
       assert.equal(store.getWatch(prepared.watch.id)?.state, 'settlement_unknown');
+      assert.equal(lookup.calls, 1);
+   } finally {
+      store.close();
+   }
+});
+
+test('an ambiguous settlement failure remains eligible for exact reconciliation', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const lookup = new FakeSettlementLookup({
+      transaction: 'AMBIGUOUS_SERVICE_TX',
+      sender: PAYER,
+      receiver: RECEIVER,
+      assetId: TESTNET_USDC_ASSET_ID,
+      atomicAmount: '1000',
+      round: 902,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'reconcile-ambiguous' },
+         {
+            expectedTransaction: 'AMBIGUOUS_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+      );
+      store.markSettlementUnknown(prepared.watch.id);
+      const reconciler = new SettlementReconciler(store, lookup, {
+         network: ALGORAND_TESTNET,
+         receiver: RECEIVER,
+         assetId: TESTNET_USDC_ASSET_ID,
+         atomicAmount: '1000',
+         intervalMilliseconds: 5_000,
+      });
+
+      await reconciler.reconcileOnce();
+      await reconciler.reconcileOnce();
+
+      const recovered = store.getWatch(prepared.watch.id);
+      assert.equal(recovered?.state, 'active');
+      assert.equal(recovered?.activationRound, 902);
+      assert.equal(recovered?.scanAfterRound, 902);
+      assert.equal(lookup.calls, 1);
    } finally {
       store.close();
    }
@@ -130,11 +176,14 @@ test('Indexer transaction lookup returns exact settlement evidence', async () =>
 });
 
 class FakeSettlementLookup implements SettlementLookupIndexer {
+   calls = 0;
+
    constructor(private readonly transfer: IndexedAssetTransfer | undefined) {}
 
    async lookupAssetTransfer(
       _transactionId: string,
    ): Promise<IndexedAssetTransfer | undefined> {
+      this.calls += 1;
       return this.transfer;
    }
 }
