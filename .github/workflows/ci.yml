@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - hardening/mainnet-readiness
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Full-history secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.29.1 \
+            git --redact --no-banner /repo
+
+      - name: Reject tracked environment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad_files=$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.example$' || true)
+          if [ -n "$bad_files" ]; then
+            echo "Tracked environment files are forbidden:"
+            echo "$bad_files"
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: RoundWatch focused tests
+        run: pnpm -C apps/server test
+
+      - name: MainNet client safety tests
+        run: pnpm -C apps/client test
+
+      - name: Build production container
+        run: docker build -t roundwatch-ci .

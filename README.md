@@ -1,340 +1,292 @@
-# Algorand x402 Challenge
+# RoundWatch
 
-Minimal x402 v2 payment infrastructure for the Algorand Global x402 Challenge.
+RoundWatch is an x402-paid service that durably watches for one exact future Algorand USDC payment.
 
-The current milestone intentionally focuses only on proving the complete payment flow on Algorand TestNet:
+## What it solves
 
-```text
-HTTP 402
-→ payment requirements
-→ signed TestNet USDC payment
-→ GoPlausible verification
-→ on-chain settlement
-→ HTTP 200
+A short-lived agent, job, or service may need to know whether a particular payment arrives after the caller has stopped running. Keeping that caller alive to poll an Algorand Indexer is unnecessary if a durable observer can own the wait instead.
+
+RoundWatch lets a caller define the expected payment, purchase one watch through x402, and exit. The service persists the obligation, continues scanning Algorand, and records the matching transaction for later retrieval.
+
+A backend that already operates durable Indexer or subscriber infrastructure may reasonably implement this itself. RoundWatch is for callers that do not want to own that operational component.
+
+## Lifecycle
+
+1. The client submits the exact expected sender, receiver, atomic amount, and optional invoice note.
+2. x402 returns payment requirements and the client signs the service payment locally.
+3. GoPlausible verifies and settles the service payment.
+4. RoundWatch activates the persisted watch only after it has a safe Algorand round from which to scan.
+5. The caller may exit while RoundWatch polls the Algorand Indexer.
+6. The watch becomes `matched` when an exact future USDC asset transfer appears.
+7. The caller reads the durable result with `GET /v1/watch/:id`.
+
+See [Architecture](docs/ARCHITECTURE.md) for the normal, recovery, and matching paths.
+
+## Live production service
+
+| Property | Current value |
+| --- | --- |
+| API | `https://roundwatch-api.onrender.com` |
+| Create a watch | `POST /v1/watch` |
+| Read a watch | `GET /v1/watch/:id` |
+| Health | `GET /health` |
+| Network | Algorand MainNet |
+| CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
+| Asset | Circle USDC, ASA `31566704` |
+| Service price | `0.001 USDC` (`1000` atomic units) |
+| Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
+| Facilitator | `https://facilitator.goplausible.xyz` |
+| Hosting | Render, with persistent SQLite storage mounted at `/data` |
+| Watch lifetime | 30 minutes from durable creation |
+| Open-obligation capacity | 50 globally; 5 per verified service payer |
+
+The production server does not contain or need a wallet mnemonic or private key.
+
+## API
+
+### Health
+
+```http
+GET /health
 ```
 
-The final product/use case is intentionally not implemented yet.
-
-## Stack
-
-- TypeScript
-- Node.js
-- pnpm workspace
-- Hono
-- x402 v2
-- Algorand AVM
-- TestNet USDC
-- hosted GoPlausible facilitator
-- Bazaar discovery extension
-
-## Repository structure
-
-```text
-x402-challenge/
-├─ apps/
-│  ├─ server/
-│  └─ client/
-├─ docs/
-│  ├─ ARCHITECTURE.md
-│  ├─ SECURITY.md
-│  └─ X402_OPPORTUNITY_MAP.md
-├─ .gitignore
-├─ README.md
-├─ package.json
-├─ pnpm-lock.yaml
-└─ pnpm-workspace.yaml
-```
-
-## Current endpoints
-
-### `GET /health`
-
-Free endpoint used to verify that the resource server is running.
-
-Expected response:
+Production response:
 
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "network": "mainnet"
 }
 ```
 
-### `GET /demo`
+### Create a watch
 
-x402-protected TestNet endpoint.
-
-Price:
-
-```text
-$0.005 TestNet USDC
+```http
+POST /v1/watch
+Content-Type: application/json
 ```
 
-An unpaid request returns:
-
-```text
-HTTP 402 Payment Required
-```
-
-After a valid payment is verified and settled:
+Example body:
 
 ```json
 {
-  "ok": true,
-  "message": "x402 payment verified",
-  "timestamp": "<ISO timestamp>"
+  "idempotencyKey": "invoice-2026-09-16-001",
+  "expectedSender": "3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ",
+  "expectedReceiver": "EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY",
+  "atomicAmount": "1",
+  "invoiceNote": "roundwatch:invoice-2026-09-16-001"
 }
 ```
 
-## TestNet configuration
+An ordinary request receives `402 Payment Required`. An x402-capable client reads the payment requirements, signs the advertised service payment, and retries the same request. RoundWatch returns success only after settlement and durable activation succeed:
 
-Algorand TestNet USDC:
-
-```text
-ASA ID: 10458941
+```json
+{
+  "watchId": "f5d2fb6f-b224-4aae-989c-87a5418fd2ae",
+  "message": "The watch is returned only if x402 settlement and durable activation succeed"
+}
 ```
 
-Facilitator:
+Request fields:
 
-```text
-https://facilitator.goplausible.xyz
+| Field | Required | Rules |
+| --- | --- | --- |
+| `idempotencyKey` | Yes | String, 8–128 characters. It is globally unique in the service database. Reuse returns HTTP `409` with the existing public watch record and does not activate a second watch. |
+| `expectedSender` | Yes | Checksum-valid 58-character Algorand address. |
+| `expectedReceiver` | Yes | Checksum-valid 58-character Algorand address. It is the receiver of the future invoice payment, not necessarily the RoundWatch service receiver. |
+| `atomicAmount` | Yes | Positive integer string, at most JavaScript's maximum safe integer (`9007199254740991`). For six-decimal USDC, `1000` means `0.001 USDC`. |
+| `invoiceNote` | No | Exact UTF-8 note to match, 1–128 bytes when present. |
+
+The watched asset is not a request field. The server selects the USDC ASA from its explicit network configuration: MainNet ASA `31566704` or TestNet ASA `10458941`.
+
+The server also controls the lifetime and admission policy. New watches expire 30 minutes after `createdAt`; callers cannot override that deadline. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` with a machine-readable error before the handler succeeds, so x402 does not settle that rejected service payment.
+
+### Read a watch
+
+```http
+GET /v1/watch/f5d2fb6f-b224-4aae-989c-87a5418fd2ae
 ```
 
-Challenge attribution:
+The response is `{ "watch": ... }`. This abridged matched example shows the stable consumer-facing fields; the live record also exposes settlement and scan metadata when available:
 
-```text
-x402-global-challenge
+```json
+{
+  "watch": {
+    "id": "f5d2fb6f-b224-4aae-989c-87a5418fd2ae",
+    "state": "matched",
+    "expectedSender": "3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ",
+    "expectedReceiver": "EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY",
+    "assetId": 31566704,
+    "atomicAmount": "1",
+    "invoiceNote": "roundwatch:invoice-2026-09-16-001",
+    "createdAt": "2026-09-16T12:00:00.000Z",
+    "expiresAt": "2026-09-16T12:30:00.000Z",
+    "matchedTransaction": "VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA",
+    "matchedRound": 65096073
+  }
+}
 ```
 
-## Requirements
+Unknown IDs return HTTP `404`.
 
-- Node.js 24+
-- pnpm
-- two Algorand TestNet accounts:
-  - payer
-  - receiver
-- TestNet ALGO on both accounts
-- TestNet USDC opt-in on both accounts
-- TestNet USDC available to the payer
+### Watch states
 
-## Install
+| State | Meaning |
+| --- | --- |
+| `settlement_pending` | The watch specification and deterministic service-payment identity are persisted, but activation is not yet proven. Reconciliation can recover a settlement/activation crash window. |
+| `active` | The service payment is established and a safe initial scan round is stored. The poller is looking for the future invoice payment. |
+| `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
+| `settlement_unknown` | Settlement did not produce an immediately usable activation. An ambiguous outcome remains eligible for exact reconciliation; a definitive on-chain mismatch is terminal and remains fail-closed in this public state. |
+| `expired` | The persisted deadline passed before a successful match. The terminal record remains readable but is never polled, reconciled, or reactivated. |
 
-From the repository root:
+### Exact matching
+
+A transaction matches only when all configured properties agree:
+
+- sender;
+- receiver;
+- network-selected USDC ASA;
+- atomic amount; and
+- invoice note, when the request supplied one.
+
+Only confirmed asset transfers after the watch's activation baseline are considered. A watch records the first exact match it encounters and then stops scanning.
+
+## x402 payment and recovery
+
+The Hono resource server uses x402 v2 and the hosted GoPlausible facilitator. Before settlement, RoundWatch persists the deterministic Algorand service-payment transaction ID derived from the verified payment payload. After settlement, it records the settlement evidence, obtains the current Indexer round, and activates the watch from that safe baseline.
+
+If the process stops after on-chain settlement but before activation is committed, the reconciliation worker looks up that exact transaction. It activates the watch only if transaction ID, network, service receiver, USDC ASA, amount, and payer (when available) agree. A definitive mismatch fails closed. No cursorless watch is activated when the initial round cannot be acquired.
+
+## Local development
+
+Requirements:
+
+- Node.js 24;
+- pnpm 12.3.4 (declared by the workspace); and
+- a TestNet account only if you intentionally exercise a paid local flow.
+
+Install dependencies:
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 ```
 
-## Environment configuration
-
-### Server
-
-Copy:
-
-```text
-apps/server/.env.example
-```
-
-to:
-
-```text
-apps/server/.env
-```
-
-Configure:
+Copy `apps/server/.env.example` to `apps/server/.env` and configure a public TestNet receiver address:
 
 ```env
-AVM_ADDRESS=<receiver Algorand address>
+ROUNDWATCH_NETWORK=testnet
+AVM_ADDRESS=<public TestNet receiver address>
 FACILITATOR_URL=https://facilitator.goplausible.xyz
+ROUNDWATCH_DB_PATH=data/roundwatch.sqlite
+ROUNDWATCH_POLL_INTERVAL_MS=5000
+ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
+ROUNDWATCH_WATCH_TTL_MS=1800000
+ROUNDWATCH_MAX_OPEN_WATCHES=50
+ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER=5
+PORT=4021
 ```
 
-`AVM_ADDRESS` is the public receiver address.
-
-The server does not require the receiver private key.
-
-### Client
-
-Copy:
-
-```text
-apps/client/.env.example
-```
-
-to:
-
-```text
-apps/client/.env
-```
-
-Configure:
-
-```env
-AVM_MNEMONIC="<25-word TestNet payer mnemonic>"
-```
-
-The payer mnemonic must be a disposable TestNet credential.
-
-Never commit `.env` files.
-
-## Typecheck
-
-From the repository root:
-
-```bash
-pnpm typecheck
-```
-
-This checks both the resource server and payer client.
-
-## Run the server
-
-From the repository root:
+Then start the server:
 
 ```bash
 pnpm dev:server
 ```
 
-Expected:
-
-```text
-x402 Resource Server listening at http://localhost:4021
-```
-
-## Verify the free endpoint
+Free checks:
 
 ```bash
 curl -i http://localhost:4021/health
+curl -i -X POST http://localhost:4021/spike/watch \
+  -H "content-type: application/json" \
+  --data '{"idempotencyKey":"local-invoice-001","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-Expected:
+The second request should return HTTP `402` before any payment. The server's default local route is `/spike/watch`, not the production `/v1/watch` route.
 
-```text
-HTTP/1.1 200 OK
-```
+Paid TestNet utilities use `apps/client/.env` and keep signing in the client process. Never use a funded MainNet mnemonic for local development and never commit an `.env` file. The automated test suite does not require a wallet or make payments.
 
-## Verify unpaid x402 access
+## TestNet and MainNet separation
+
+| Configuration | TestNet | MainNet |
+| --- | --- | --- |
+| Selection | Default when omitted, or `ROUNDWATCH_NETWORK=testnet` | Must set `ROUNDWATCH_NETWORK=mainnet` |
+| Watch route | `/spike/watch` | `/v1/watch` |
+| USDC ASA | `10458941` | `31566704` |
+| CAIP-2 | `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=` | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
+| Discovery tag | `roundwatch-spike-0` | `x402-global-challenge` |
+| Public base URL | Optional | Required, HTTPS, and non-loopback |
+| Database path | Local default allowed | Explicit absolute persistent path required |
+
+See [Deployment](docs/DEPLOYMENT.md) before operating MainNet.
+
+## Tests and CI
+
+Run the local verification suite:
 
 ```bash
-curl -i http://localhost:4021/demo
+pnpm typecheck
+pnpm -C apps/server test
+pnpm -C apps/client test
+docker build -t roundwatch-local .
 ```
 
-Expected:
+GitHub Actions performs a full-depth checkout, scans complete Git history with Gitleaks, rejects tracked `.env` files other than examples, installs from the frozen lockfile, typechecks both workspaces, runs server and MainNet safety tests, and builds the production image. Tests are synthetic/read-only and do not authorize MainNet spending.
+
+## Security model
+
+- Wallet signing belongs to the client; the resource server needs only its public receiver address.
+- MainNet startup validates the network, receiver address, HTTPS endpoints, public base URL, and persistent database path.
+- Service settlement is reconciled against exact on-chain fields before recovery activation.
+- Future invoice matching is exact, and activation never starts without a safe round cursor.
+- SQLite uniqueness on the idempotency key prevents duplicate watch creation.
+- Persisted expiry and transactional global/per-payer admission bound unfinished polling obligations; capacity rejection happens before settlement.
+- `.env` files and wallet material must never be committed; CI enforces tracked-env and full-history secret checks.
+
+The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. See [Security](docs/SECURITY.md) for trust boundaries and operational assumptions.
+
+## MainNet proof
+
+The production flow was executed successfully on **2026-09-16**:
+
+- x402 service settlement: `OJMUUHJPZVXS6MNW4TISXXAZIHAPNYNM446DAFY35OAJOBDDOPYA`, confirmed round `65095955`;
+- durable watch: `7c606f02-0257-4dfd-b59c-a13b61f480f0`;
+- later invoice transfer: `VZKWYELPR4HHXPXM476NRLNU4JUKAEUUD4HGHFNAHDRD5IBFB2MA`, confirmed round `65096073`;
+- RoundWatch reported the same invoice transaction as matched at round `65096073`.
+
+Independent MainNet Indexer verification confirmed both transfers used Circle USDC ASA `31566704`, the expected sender and receiver, and atomic amounts `1000` for the service payment and `1` for the watched invoice. The matched watch persisted across multiple Render redeploys.
+
+After correctness hardening at merge commit `69afd9dc070a7f9c12206b038f117cc1f2b3fdb3`, a free production smoke check confirmed `{ "status": "ok", "network": "mainnet" }` and the pre-existing matched watch remained unchanged. No second paid MainNet E2E was performed or is implied.
+
+GoPlausible Bazaar also discovered the production resource with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. On 2026-09-16, the merchant leaderboard entry showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank of 145 among 147 entries is a dated observation, not a permanent project property.
+
+Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
+
+## Current limitations
+
+- The current challenge-release policy is a 30-minute lifetime, 50 global open obligations, and 5 open obligations per verified service payer. These are operational safety bounds, not a commercial SLA or final pricing/capacity policy.
+- There is no cancellation operation, SLA, or long-term pricing policy.
+- The current deployment is a single application instance with an in-process poller/reconciler and local persistent SQLite. It is not a horizontally coordinated worker system.
+- Per-watch poll failures are isolated so one failing watch does not starve later watches, but that does not establish arbitrary production-scale capacity.
+- Results are retrieved by polling; there is no webhook or push-notification API.
+- Watch status is readable without authentication by anyone who knows the watch ID.
+
+## Repository structure
 
 ```text
-HTTP/1.1 402 Payment Required
+.
+├── apps/
+│   ├── server/              # Hono API, x402 integration, SQLite, Indexer workers
+│   └── client/              # TestNet utilities and guarded MainNet verification runner
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DEPLOYMENT.md
+│   ├── MAINNET_READINESS.md
+│   ├── SECURITY.md
+│   ├── FAULT_INJECTION.md
+│   └── ROUNDWATCH_SPIKE.md
+├── .github/workflows/ci.yml
+├── Dockerfile
+└── README.md
 ```
 
-The response contains the x402 payment requirements including:
-
-- Algorand TestNet network
-- TestNet USDC asset
-- payment amount
-- receiver address
-- facilitator fee payer
-- Bazaar discovery metadata
-- challenge attribution tag
-
-## Run the payer client
-
-Keep the server running.
-
-In another terminal:
-
-```bash
-pnpm dev:client
-```
-
-The client:
-
-1. performs a plain request and verifies HTTP 402;
-2. restores the TestNet payer from `AVM_MNEMONIC`;
-3. creates the AVM signer;
-4. signs the TestNet USDC payment;
-5. retries the resource request through x402;
-6. prints settlement information;
-7. prints the paid JSON response.
-
-A successful run ends with:
-
-```text
-Plain response: 402 Payment Required
-
-Paid response: 200 OK
-```
-
-and a successful settlement containing an Algorand transaction ID.
-
-## Verified TestNet milestone
-
-The complete payment flow has been executed successfully:
-
-```text
-plain GET /demo
-→ 402
-
-payer client
-→ reads payment requirements
-→ signs 0.005 TestNet USDC payment
-→ retries request
-
-GoPlausible
-→ verifies
-→ settles
-
-Algorand TestNet
-→ USDC transferred on-chain to receiver
-
-server
-→ 200 JSON
-```
-
-## CAIP-2 compatibility note
-
-During implementation with `@x402/avm@2.25.0`, the exported Algorand TestNet identifier did not match the full network identifier advertised by the live GoPlausible `/supported` endpoint.
-
-The implementation therefore currently uses the full TestNet identifier explicitly:
-
-```text
-algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=
-```
-
-This workaround should be re-evaluated when the AVM package is upgraded.
-
-## Security
-
-- `.env` files are ignored by Git.
-- Mnemonics and private keys must never be committed.
-- TestNet credentials should be disposable.
-- The resource server requires only the receiver public address.
-- MainNet credentials are explicitly out of scope for the current milestone.
-
-See:
-
-```text
-docs/SECURITY.md
-```
-
-## Current scope
-
-Implemented:
-
-- x402 v2 resource server
-- GoPlausible hosted facilitator
-- TestNet USDC settlement
-- Bazaar discovery metadata
-- challenge attribution
-- payer CLI client
-- complete TestNet end-to-end payment flow
-
-Not implemented yet:
-
-- final product/use case
-- MainNet
-- production wallet
-- database
-- authentication
-- UI
-- dashboard
-- custom facilitator
-- smart contracts
-
-The next product decision is intentionally separated from the infrastructure milestone.
+Historical TestNet development evidence remains in [RoundWatch Spike](docs/ROUNDWATCH_SPIKE.md) and [Fault Injection](docs/FAULT_INJECTION.md). The current product and production contract are described here and in the four operational documents linked above.
