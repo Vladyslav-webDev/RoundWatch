@@ -1,7 +1,8 @@
 /* Product architecture map: replaces the old linear component list with the real
    RoundWatch system boundary and its two distinct flows: x402 service settlement
    and later verified payment evidence. The underlying list stays in the markup as
-   a no-JS semantic fallback; the visual layer is a responsive SVG. */
+   a no-JS semantic fallback; the visual layer uses a full desktop SVG and a compact
+   vertical mobile SVG so the architecture stays legible without horizontal panning. */
 
 .technology-layout {
   grid-template-columns: minmax(0, 1.32fr) minmax(330px, 0.68fr);
@@ -58,14 +59,15 @@
 
 @media (max-width: 560px) {
   .architecture-core {
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
-    scrollbar-width: thin;
-    scrollbar-color: #5a4639 #111210;
+    overflow: hidden;
   }
 
   .architecture-core::before {
-    width: 680px;
+    width: 100%;
     max-width: none;
+    aspect-ratio: 360 / 760;
+    background-image: url("/roundwatch-system-map-mobile.svg");
+    background-position: center;
+    background-size: contain;
   }
 }
