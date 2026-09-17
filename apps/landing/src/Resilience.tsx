@@ -118,7 +118,7 @@ export default function Resilience() {
         </p>
         <span className="proof-note mono">
           <Icon name="check" />
-          Restart recovery tested on Algorand TestNet
+          Restart recovery covered by automated fault tests
           <br />
           persistence confirmed across MainNet redeploys
         </span>
