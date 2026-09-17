@@ -544,8 +544,8 @@ function Technology() {
             </div>
             <p>Reason over verified evidence — never replace it.</p>
             <small>
-              A future extension. GPT-6 Astra is used to build RoundWatch; it is
-              not a step in the current runtime.
+              A future extension. Intelligent reasoning can consume verified
+              evidence; settlement and matching remain deterministic.
             </small>
           </aside>
         </div>
@@ -556,19 +556,19 @@ function Technology() {
 
 function Ecosystem() {
   const identities = [
-    { key: "product-hunt", name: "Product Hunt", relationship: "Launch platform" },
-    { key: "openai", name: "OpenAI", relationship: "Model provider" },
-    { key: "astra", name: "GPT-6 Astra", relationship: "Development tooling" },
     { key: "algorand", name: "Algorand", relationship: "MainNet settlement" },
     { key: "x402", name: "x402", relationship: "Payment protocol" },
+    { key: "goplausible", name: "GoPlausible", relationship: "Settlement facilitator" },
+    { key: "render", name: "Render", relationship: "Service runtime" },
+    { key: "sqlite", name: "SQLite", relationship: "Durable state" },
   ] as const;
   return (
-    <section className="ecosystem" aria-label="Technology and launch context">
+    <section className="ecosystem" aria-label="Runtime and protocol stack">
       <div className="container ecosystem-caption">
         <span className="mono">
-          Built with open standards. Made for what’s next.
+          Open standards. Verifiable state. Durable execution.
         </span>
-        <span>Product Hunt is our launch platform.</span>
+        <span>The production stack behind every watch.</span>
       </div>
       <div className="ribbon">
         <div className="ribbon-track ambient">
@@ -795,30 +795,30 @@ function Landing() {
           <section
             className="challenge"
             data-reveal
-            aria-labelledby="challenge-title"
+            aria-labelledby="proof-context-title"
           >
             <div>
-              <p className="eyebrow">Built with GPT-6 Astra</p>
-              <h2 id="challenge-title">
-                Durable watches
+              <p className="eyebrow">Operational proof</p>
+              <h2 id="proof-context-title">
+                Live evidence.
                 <br />
-                for on-chain events.
+                Durable state.
               </h2>
             </div>
             <div>
               <p className="challenge-marker mono">
-                Built during the GPT-6 Astra Challenge
+                Algorand MainNet
                 <br />
-                <span>Product Hunt · September 18, 2026</span>
+                <span>x402 · Circle USDC · persistent SQLite</span>
               </p>
               <p>
-                RoundWatch is a live MainNet service. GPT-6 Astra helped research,
-                design, harden, and ship the system; deterministic infrastructure
-                remains responsible for settlement and matching.
+                RoundWatch has completed a real MainNet service settlement,
+                preserved the watch across redeploys, and matched the exact future
+                USDC transfer it was created to observe.
               </p>
               <p className="challenge-footnote">
-                The challenge is launch context, not a runtime dependency or the
-                reason the product exists.
+                The service contract is public: exact matching, a 30-minute watch
+                lifetime, and bounded open capacity.
               </p>
             </div>
           </section>
