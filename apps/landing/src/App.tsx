@@ -4,53 +4,55 @@ import { BrandMark, Icon, StateStack } from "./graphics";
 import type { IconName } from "./graphics";
 import WorkflowReplay from "./WorkflowReplay";
 import Resilience from "./Resilience";
+import VideoShowcase from "./VideoShowcase";
 import { MotionProvider, useMotion } from "./motion";
 
 const navigation = [
-  { label: "Product", id: "product" },
-  { label: "How it works", id: "how-it-works" },
-  { label: "Technology", id: "technology" },
-  { label: "Demo", id: "demo" },
+  { label: "Product", href: "#product" },
+  { label: "Quickstart", href: "/start" },
+  { label: "Technology", href: "#technology" },
+  { label: "Demo", href: "#video-demo" },
 ];
+
 const flow = [
   {
-    title: "Agent performs work",
-    text: "An autonomous agent completes the requested task.",
+    title: "Define the exact payment",
+    text: "The caller specifies the sender, receiver, atomic amount, and optional invoice note.",
     icon: "work",
     detail:
-      "Useful work is complete. Payment settlement is still a separate event.",
-    status: "Work complete",
-    boundary: "Payment not established",
-    next: "Initiate payment",
+      "RoundWatch persists the exact watch specification before the paid retry, so the obligation has a durable identity from the start.",
+    status: "Watch specified",
+    boundary: "No service settlement yet",
+    next: "Settle x402 fee",
   },
   {
-    title: "x402 payment initiated",
-    text: "Payment enters the settlement workflow.",
+    title: "Settle the x402 service fee",
+    text: "The client signs locally and retries the same request through the x402 payment flow.",
     icon: "code",
     detail:
-      "Initiating a payment is not proof of settlement. The workflow waits for evidence.",
-    status: "Initiated",
-    boundary: "Awaiting settlement",
-    next: "Observe evidence",
+      "GoPlausible verifies and settles the service payment. RoundWatch never needs the caller’s mnemonic or private key.",
+    status: "Settlement established",
+    boundary: "Activation still requires a safe round",
+    next: "Activate watch",
   },
   {
-    title: "RoundWatch observes",
-    text: "RoundWatch waits for successful settlement evidence and persists the resulting state.",
+    title: "RoundWatch owns the wait",
+    text: "A safe Algorand round and scan progress are persisted so the caller can exit.",
     icon: "database",
     detail:
-      "Successful settlement evidence is the condition for advancing durable state.",
-    status: "Observing",
-    boundary: "Successful settlement required",
-    next: "Persist state",
+      "The durable watch keeps polling from a saved cursor. Restart recovery preserves the waiting obligation instead of tying it to one process lifetime.",
+    status: "Watch active",
+    boundary: "Future payment not matched",
+    next: "Observe MainNet",
   },
   {
-    title: "Verified & continue",
-    text: "The workflow now has durable evidence from which the next action can safely proceed.",
+    title: "Match & retrieve evidence",
+    text: "The first exact future USDC transfer is stored with its transaction ID and confirmed round.",
     icon: "check",
     detail:
-      "Verified, persisted evidence gives the next action a trustworthy starting point.",
-    status: "Evidence persisted",
-    boundary: "Next action may proceed",
+      "Sender, receiver, MainNet USDC asset, atomic amount, and optional note must all agree before the watch becomes matched.",
+    status: "Durable evidence ready",
+    boundary: "Exact match established",
     next: "Workflow continuation",
   },
 ] satisfies {
@@ -171,15 +173,15 @@ function Header() {
         >
           {navigation.map((item) => (
             <a
-              key={item.id}
-              href={`#${item.id}`}
+              key={item.href}
+              href={item.href}
               onClick={() => setOpen(false)}
             >
               {item.label}
             </a>
           ))}
         </nav>
-        <a className="header-cta button button-secondary" href="#demo">
+        <a className="header-cta button button-secondary" href="#video-demo">
           <span>View demo</span>
           <Icon name="arrow" />
         </a>
@@ -235,19 +237,19 @@ function Product() {
           {[
             [
               "Observe",
-              "Watches for the payment event the workflow is expecting.",
+              "Watches one exact future Algorand USDC payment after the caller exits.",
               "01",
               "eye",
             ],
             [
               "Verify",
-              "State advances only from successful settlement evidence.",
+              "Matches sender, receiver, asset, atomic amount, and optional invoice note.",
               "02",
               "shield",
             ],
             [
               "Persist",
-              "Settlement state and observation progress survive process restarts.",
+              "Watch state and scan progress survive process restarts and redeploys.",
               "03",
               "database",
             ],
@@ -283,9 +285,9 @@ function Product() {
       <div className="product-boundary mono">
         <span>Expected payment</span>
         <span aria-hidden="true">→</span>
-        <span>Verified evidence</span>
+        <span>Durable watch</span>
         <span aria-hidden="true">→</span>
-        <span>Next action</span>
+        <span>Verified evidence</span>
       </div>
     </section>
   );
@@ -303,17 +305,17 @@ function Flow() {
     >
       <div className="section-heading">
         <div>
-          <Eyebrow number="02">The flow</Eyebrow>
+          <Eyebrow number="03">The flow</Eyebrow>
           <h2 id="flow-title">
-            From completed work
+            Create the watch once.
             <br />
-            to what’s next.
+            Retrieve the evidence later.
           </h2>
         </div>
         <p>
-          A payment is a moment.
+          The caller does not have to stay alive
           <br />
-          Verified state is a starting point.
+          just to keep checking the chain.
         </p>
       </div>
       <ol className="flow-rail">
@@ -400,39 +402,39 @@ function Technology() {
     checks: number[];
   }[] = [
     {
-      title: "Agent",
-      text: "Completes the task",
+      title: "Caller",
+      text: "Defines the exact payment",
       icon: "work",
       className: "",
       checks: [],
     },
     {
-      title: "x402 payment",
-      text: "Initiates the payment",
+      title: "x402 service payment",
+      text: "Purchases the bounded watch",
       icon: "code",
       className: "",
-      checks: [1],
+      checks: [0],
     },
     {
       title: "Algorand settlement",
-      text: "Establishes the on-chain result",
+      text: "Establishes service settlement",
       icon: "link",
       className: "",
       checks: [0, 1],
     },
     {
       title: "RoundWatch",
-      text: "Observes, verifies, persists",
+      text: "Activates, observes, persists",
       icon: null,
       className: "architecture-watch",
-      checks: [0, 2, 3, 4, 5],
+      checks: [1, 2, 3, 4, 5],
     },
     {
-      title: "Verified durable evidence",
-      text: "The basis for workflow continuation",
+      title: "Verified future payment",
+      text: "Exact match with transaction evidence",
       icon: "shield",
       className: "architecture-evidence",
-      checks: [1, 2, 4],
+      checks: [2, 5],
     },
   ];
   return (
@@ -442,7 +444,7 @@ function Technology() {
       data-reveal
       aria-labelledby="technology-title"
     >
-      <Eyebrow number="03">Technology</Eyebrow>
+      <Eyebrow number="04">Technology</Eyebrow>
       <h2 id="technology-title">
         Deterministic where it matters.
         <br />
@@ -500,17 +502,18 @@ function Technology() {
             Every next step, grounded.
           </h3>
           <p>
-            Settlement is established by deterministic infrastructure. A
-            language model does not decide whether a payment settled.
+            Settlement and payment matching are established by deterministic
+            infrastructure. A language model does not decide whether a payment
+            settled or matched.
           </p>
           <ul className="capability-checks">
             {[
-              "Settlement observation",
-              "Successful-settlement evidence",
-              "Durable state",
+              "x402 service settlement",
+              "Safe activation round",
+              "Durable watch state",
               "Persistent scan cursor",
               "Restart recovery",
-              "Future-payment detection",
+              "Exact future-payment matching",
             ].map((item, index) => (
               <li
                 key={item}
@@ -528,7 +531,7 @@ function Technology() {
           </ul>
           <p className="prototype-note">
             <span className="signal-dot" />
-            Verified in the Algorand TestNet prototype.
+            Live and verified on Algorand MainNet.
           </p>
           <aside className="reasoning-note">
             <span className="mono">An open path for reasoning</span>
@@ -541,8 +544,8 @@ function Technology() {
             </div>
             <p>Reason over verified evidence — never replace it.</p>
             <small>
-              A future extension. GPT-6 Astra is used to build RoundWatch; it is
-              not a step in the current runtime.
+              A future extension. Intelligent reasoning can consume verified
+              evidence; settlement and matching remain deterministic.
             </small>
           </aside>
         </div>
@@ -553,19 +556,19 @@ function Technology() {
 
 function Ecosystem() {
   const identities = [
-    { key: "product-hunt", name: "Product Hunt", relationship: "Launch platform" },
-    { key: "openai", name: "OpenAI", relationship: "Model provider" },
-    { key: "astra", name: "GPT-6 Astra", relationship: "Development tooling" },
-    { key: "algorand", name: "Algorand", relationship: "TestNet settlement" },
+    { key: "algorand", name: "Algorand", relationship: "MainNet settlement" },
     { key: "x402", name: "x402", relationship: "Payment protocol" },
+    { key: "goplausible", name: "GoPlausible", relationship: "Settlement facilitator" },
+    { key: "render", name: "Render", relationship: "Service runtime" },
+    { key: "sqlite", name: "SQLite", relationship: "Durable state" },
   ] as const;
   return (
-    <section className="ecosystem" aria-label="Technology and launch context">
+    <section className="ecosystem" aria-label="Runtime and protocol stack">
       <div className="container ecosystem-caption">
         <span className="mono">
-          Built with open standards. Made for what’s next.
+          Open standards. Verifiable state. Durable execution.
         </span>
-        <span>Product Hunt is our launch platform.</span>
+        <span>The production stack behind every watch.</span>
       </div>
       <div className="ribbon">
         <div className="ribbon-track ambient">
@@ -659,19 +662,19 @@ function Landing() {
                 </span>
               </h1>
               <p className="hero-description">
-                RoundWatch observes agent payments, verifies settlement, and
-                preserves durable evidence so autonomous workflows can safely
-                keep moving.
+                RoundWatch lets agents create a durable watch for one exact future
+                Algorand payment, exit, and retrieve verified on-chain evidence
+                later.
               </p>
               <div className="button-row">
-                <ButtonLink href="#demo">See the demo</ButtonLink>
-                <ButtonLink href="#how-it-works" secondary>
-                  How it works
+                <ButtonLink href="#video-demo">See the demo</ButtonLink>
+                <ButtonLink href="/start" secondary>
+                  Start in 60 seconds
                 </ButtonLink>
               </div>
               <p className="hero-proof mono">
                 <i className="signal-dot" />
-                Built on x402. Proven on Algorand TestNet.
+                Built on x402. Proven on Algorand MainNet.
               </p>
             </div>
             <div className="hero-art">
@@ -696,10 +699,10 @@ function Landing() {
           </section>
           <ul className="proof-strip">
             {[
-              ["link", "On-chain verification", "Real settlements"],
-              ["database", "Persistent state", "Survives restarts"],
-              ["shield", "Restart-safe", "Agents keep going"],
-              ["bolt", "Built for agentic workflows", "Open standards"],
+              ["link", "MainNet verification", "Real settlements"],
+              ["database", "Durable watch state", "Survives restarts"],
+              ["shield", "Exact matching", "Evidence, not inference"],
+              ["bolt", "Built for agents", "Caller can exit"],
             ].map(([icon, title, label]) => (
               <li key={title}>
                 <Icon name={icon as IconName} />
@@ -711,26 +714,27 @@ function Landing() {
             ))}
           </ul>
           <Product />
+          <VideoShowcase />
           <Flow />
           <Technology />
           <section
-            id="demo"
+            id="workflow-replay"
             className="section demo"
             data-reveal
-            aria-labelledby="demo-title"
+            aria-labelledby="replay-title"
           >
             <div className="section-heading">
               <div>
-                <Eyebrow number="04">Demo</Eyebrow>
-                <h2 id="demo-title">
-                  Watch a payment
+                <Eyebrow number="05">Lifecycle replay</Eyebrow>
+                <h2 id="replay-title">
+                  Follow the watch
                   <br />
-                  become trusted state.
+                  from request to evidence.
                 </h2>
               </div>
               <p>
-                Follow the boundary from completed work to durable evidence, one
-                event at a time.
+                An illustrative replay of the verified MainNet lifecycle, one
+                durable state transition at a time.
               </p>
             </div>
             <WorkflowReplay />
@@ -741,7 +745,7 @@ function Landing() {
             data-reveal
             aria-labelledby="why-title"
           >
-            <Eyebrow number="06">Why it matters</Eyebrow>
+            <Eyebrow number="07">Why it matters</Eyebrow>
             <h2 id="why-title">
               A more reliable
               <br />
@@ -751,20 +755,20 @@ function Landing() {
               {[
                 [
                   "For agents",
-                  "The confidence to continue.",
-                  "Know when a paid workflow has reliable evidence to continue.",
+                  "The freedom to leave.",
+                  "Create a durable wait, exit the process, and retrieve the exact payment evidence later.",
                   "01",
                 ],
                 [
                   "For services",
                   "A clearer payment boundary.",
-                  "Create a clearer boundary between completed work, settlement, and what happens next.",
+                  "Separate caller lifetime from the infrastructure that owns observation and durable evidence.",
                   "02",
                 ],
                 [
                   "For developers",
                   "State that outlasts a process.",
-                  "Use durable settlement state instead of relying on volatile process memory.",
+                  "Use persisted watch state and scan progress instead of keeping a worker alive just to poll.",
                   "03",
                 ],
               ].map(([label, title, copy, number]) => (
@@ -791,29 +795,30 @@ function Landing() {
           <section
             className="challenge"
             data-reveal
-            aria-labelledby="challenge-title"
+            aria-labelledby="proof-context-title"
           >
             <div>
-              <p className="eyebrow">Built with GPT-6 Astra</p>
-              <h2 id="challenge-title">
-                Built on evidence.
+              <p className="eyebrow">Operational proof</p>
+              <h2 id="proof-context-title">
+                Live evidence.
                 <br />
-                Built with intelligence.
+                Durable state.
               </h2>
             </div>
             <div>
               <p className="challenge-marker mono">
-                GPT-6 Astra Challenge
+                Algorand MainNet
                 <br />
-                <span>Product Hunt · September 18, 2026</span>
+                <span>x402 · Circle USDC · persistent SQLite</span>
               </p>
               <p>
-                We’re building RoundWatch with GPT-6 Astra: deterministic
-                settlement infrastructure, developed with intelligent tooling.
+                RoundWatch has completed a real MainNet service settlement,
+                preserved the watch across redeploys, and matched the exact future
+                USDC transfer it was created to observe.
               </p>
               <p className="challenge-footnote">
-                The model helps build the system. Verified settlement remains
-                the foundation.
+                The service contract is public: exact matching, a 30-minute watch
+                lifetime, and bounded open capacity.
               </p>
             </div>
           </section>
@@ -824,14 +829,14 @@ function Landing() {
           >
             <p className="eyebrow">The next action starts with trust</p>
             <h2 id="cta-title">
-              Watch autonomous work
+              Create the watch.
               <br />
-              <span>complete the loop.</span>
+              <span>Let the workflow move on.</span>
             </h2>
             <div className="button-row">
-              <ButtonLink href="#demo">View demo</ButtonLink>
-              <ButtonLink href="#how-it-works" secondary>
-                How it works
+              <ButtonLink href="#video-demo">View demo</ButtonLink>
+              <ButtonLink href="/start" secondary>
+                Start in 60 seconds
               </ButtonLink>
             </div>
             <div className="cta-orbit" aria-hidden="true">
@@ -847,14 +852,14 @@ function Landing() {
           <div>
             <Brand />
             <p>
-              Reliable settlement evidence
+              Durable payment evidence
               <br />
               for autonomous work.
             </p>
           </div>
           <nav aria-label="Footer navigation">
             {navigation.map((item) => (
-              <a href={`#${item.id}`} key={item.id}>
+              <a href={item.href} key={item.href}>
                 {item.label}
               </a>
             ))}

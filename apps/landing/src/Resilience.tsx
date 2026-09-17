@@ -103,7 +103,7 @@ export default function Resilience() {
     >
       <div className="resilience-copy">
         <p className="eyebrow">
-          <span>05</span>
+          <span>06</span>
           <span className="eyebrow-slash">/</span>Resilience
         </p>
         <h2 id="resilience-title">
@@ -118,9 +118,9 @@ export default function Resilience() {
         </p>
         <span className="proof-note mono">
           <Icon name="check" />
-          Verified with a real process restart
+          Restart recovery covered by automated fault tests
           <br />
-          on Algorand TestNet
+          persistence confirmed across MainNet redeploys
         </span>
       </div>
       <div

@@ -1,5 +1,6 @@
 import App from "./App";
 import { LegalFooterBar, LegalPage } from "./Legal";
+import QuickstartPage from "./Quickstart";
 
 type RootAppProps = {
   path?: string;
@@ -15,6 +16,15 @@ export default function RootApp({ path }: RootAppProps) {
 
   if (pathname === "/privacy" || pathname === "/privacy/") {
     return <LegalPage kind="privacy" />;
+  }
+
+  if (pathname === "/start" || pathname === "/start/") {
+    return (
+      <>
+        <QuickstartPage />
+        <LegalFooterBar />
+      </>
+    );
   }
 
   return (

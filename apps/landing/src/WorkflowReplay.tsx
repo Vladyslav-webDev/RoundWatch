@@ -6,56 +6,56 @@ import "./narrative-motion.css";
 const events = [
   {
     time: "10:24:01",
-    source: "agent",
-    message: "Task completed",
-    state: "Work complete",
-    signal: "Waiting",
-    heading: ["Work complete.", "Awaiting", "payment."],
-    icon: "work",
+    source: "watch",
+    message: "Exact future payment defined",
+    state: "Watch specified",
+    signal: "Defined",
+    heading: ["Watch defined.", "Waiting for", "service settlement."],
+    icon: "eye",
   },
   {
     time: "10:24:02",
-    source: "payment",
-    message: "x402 payment initiated",
-    state: "Payment pending",
-    signal: "Payment",
-    heading: ["Payment initiated.", "Awaiting", "evidence."],
+    source: "x402",
+    message: "Service payment requirements accepted",
+    state: "Settlement pending",
+    signal: "x402",
+    heading: ["Service fee accepted.", "Settlement", "to establish."],
     icon: "code",
   },
   {
     time: "10:24:05",
-    source: "observer",
-    message: "Transaction detected",
-    state: "Evidence observed",
-    signal: "Detected",
-    heading: ["Transaction detected.", "Settlement", "to verify."],
-    icon: "eye",
-  },
-  {
-    time: "10:24:08",
     source: "settlement",
-    message: "Settlement verified",
+    message: "x402 service payment settled",
     state: "Settlement verified",
     signal: "Verified",
-    heading: ["Settlement verified.", "Evidence", "to persist."],
+    heading: ["Settlement verified.", "Safe round", "to persist."],
     icon: "shield",
   },
   {
     time: "10:24:08",
     source: "state",
-    message: "Evidence persisted",
-    state: "State persisted",
-    signal: "Persisted",
-    heading: ["Evidence persisted.", "Durable", "state."],
+    message: "Watch activated from safe round",
+    state: "Watch active",
+    signal: "Active",
+    heading: ["Watch activated.", "Caller may", "exit now."],
     icon: "database",
   },
   {
-    time: "10:24:09",
-    source: "workflow",
-    message: "Continuation unlocked",
-    state: "Ready to continue",
+    time: "10:25:11",
+    source: "observer",
+    message: "Exact future USDC payment matched",
+    state: "Payment matched",
+    signal: "Matched",
+    heading: ["Payment matched.", "Transaction", "evidence found."],
+    icon: "eye",
+  },
+  {
+    time: "10:25:11",
+    source: "evidence",
+    message: "Transaction ID and round persisted",
+    state: "Durable evidence ready",
     signal: "Ready",
-    heading: ["Verified.", "Persisted.", "Ready for what’s next."],
+    heading: ["Matched.", "Persisted.", "Ready to retrieve."],
     icon: "check",
   },
 ] as const;
@@ -127,7 +127,7 @@ export default function WorkflowReplay() {
         setPlaying(false);
         if (!userControlled)
           setAnnouncement(
-            "Workflow replay complete. Settlement verified, evidence persisted, ready to continue.",
+            "Workflow replay complete. Watch activated, future payment matched, durable evidence ready.",
           );
       }
     }, remaining.current);
@@ -182,7 +182,7 @@ export default function WorkflowReplay() {
             <i className="signal-dot" />
             Workflow replay
           </span>
-          <span className="mono terminal-network">Algorand TestNet</span>
+          <span className="mono terminal-network">Algorand MainNet</span>
         </div>
         <div className="terminal-content">
           <ol className="event-list" aria-label="Illustrative workflow events">
@@ -196,7 +196,7 @@ export default function WorkflowReplay() {
                 <span className="event-source">[{event.source}]</span>
                 <span className="event-message">
                   {event.message}
-                  {index === 3 && <Icon name="check" />}
+                  {index === 2 && <Icon name="check" />}
                 </span>
               </li>
             ))}
@@ -206,11 +206,11 @@ export default function WorkflowReplay() {
             <div className="replay-state-body" key={shownCount}>
               <Icon name={current?.icon ?? "eye"} />
               <p>
-                {current?.heading[0] ?? "From payment"}
+                {current?.heading[0] ?? "From a watch"}
                 <br />
-                {current?.heading[1] ?? "to trusted"}
+                {current?.heading[1] ?? "to exact"}
                 <br />
-                <em>{current?.heading[2] ?? "state."}</em>
+                <em>{current?.heading[2] ?? "evidence."}</em>
               </p>
             </div>
           </div>
@@ -270,7 +270,7 @@ export default function WorkflowReplay() {
         </div>
       </div>
       <p className="replay-note">
-        Illustrative sequence based on verified prototype behavior. No live
+        Illustrative sequence based on the verified MainNet flow. No live
         connection or payment is made.
       </p>
       <p className="narrative-announcement" role="status">

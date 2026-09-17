@@ -4,6 +4,8 @@ import RootApp from "./RootApp";
 import "./styles.css";
 import "./interaction.css";
 import "./legal.css";
+import "./launch-polish.css";
+import "./system-map.css";
 
 const root = document.getElementById("root")!;
 const app = (

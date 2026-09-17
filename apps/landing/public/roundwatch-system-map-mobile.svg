@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 760" role="img" aria-labelledby="title desc">
+  <title id="title">RoundWatch mobile system architecture</title>
+  <desc id="desc">A compact vertical map showing a client buying a bounded RoundWatch watch through x402, RoundWatch persisting durable state, observing Algorand MainNet, and returning exact payment evidence.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#151513"/>
+      <stop offset="1" stop-color="#0c0d0c"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#ff642d" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#ff642d" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10z" fill="#ff642d"/>
+    </marker>
+    <marker id="arrowLight" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10z" fill="#d9d5cc"/>
+    </marker>
+    <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .label{font:600 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.07em;fill:#f5f3ee}
+      .micro{font:500 7px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.1em;fill:#8f918f}
+      .copy{font:500 9px Arial,sans-serif;fill:#a7a8a4}
+      .node{fill:#101110;stroke:#3a3935;stroke-width:1}
+      .strong{fill:#13110f;stroke:#75462e;stroke-width:1}
+      .service{fill:none;stroke:#ff642d;stroke-width:1.7;marker-end:url(#arrowOrange)}
+      .evidence{fill:none;stroke:#d9d5cc;stroke-opacity:.78;stroke-width:1.35;marker-end:url(#arrowLight)}
+      .internal{fill:none;stroke:#65584d;stroke-width:1}
+      .pulseOrange{fill:#ffe1cf;filter:url(#softGlow)}
+      .pulseLight{fill:#f5f3ee;filter:url(#softGlow)}
+      @media (prefers-reduced-motion:reduce){.pulse{display:none}}
+    </style>
+  </defs>
+
+  <rect width="360" height="760" fill="transparent"/>
+  <circle cx="180" cy="364" r="150" fill="url(#glow)" opacity=".13"/>
+  <text x="22" y="28" class="micro">ROUNDWATCH / SYSTEM MAP</text>
+  <text x="338" y="28" text-anchor="end" class="micro">MOBILE VIEW</text>
+
+  <rect x="52" y="58" width="256" height="78" rx="3" class="node"/>
+  <text x="72" y="86" class="label">AGENT / CLIENT</text>
+  <text x="72" y="108" class="copy">defines exact payment · signs locally</text>
+  <text x="72" y="124" class="copy">can exit after durable activation</text>
+
+  <text x="180" y="158" text-anchor="middle" class="micro" fill="#ff8a5c">WATCH PURCHASE / X402</text>
+  <path d="M180 136 L180 184" class="service"/>
+
+  <rect x="34" y="184" width="292" height="344" rx="4" fill="url(#panel)" stroke="#494640"/>
+  <text x="54" y="212" class="label">ROUNDWATCH</text>
+  <text x="306" y="212" text-anchor="end" class="micro">DURABLE SERVICE</text>
+
+  <rect x="56" y="234" width="248" height="64" rx="3" class="strong"/>
+  <text x="76" y="260" class="label">API + X402 LIFECYCLE</text>
+  <text x="76" y="281" class="copy">402 · verified retry · watch status</text>
+
+  <path d="M180 298 L180 326" class="internal"/>
+  <ellipse cx="180" cy="348" rx="74" ry="17" fill="#17130f" stroke="#a75d36"/>
+  <rect x="106" y="348" width="148" height="54" fill="#151310" stroke="#815038"/>
+  <ellipse cx="180" cy="402" rx="74" ry="17" fill="#11110f" stroke="#815038"/>
+  <text x="180" y="353" text-anchor="middle" class="label">DURABLE STATE</text>
+  <text x="180" y="379" text-anchor="middle" class="copy">SQLite · cursor · evidence</text>
+  <text x="180" y="395" text-anchor="middle" class="copy">settlement · watch lifecycle</text>
+
+  <rect x="56" y="438" width="112" height="64" rx="3" class="node"/>
+  <text x="70" y="462" class="label">SETTLEMENT</text>
+  <text x="70" y="477" class="label">RECOVERY</text>
+  <text x="70" y="493" class="copy">exact tx reconcile</text>
+
+  <rect x="192" y="438" width="112" height="64" rx="3" class="node"/>
+  <text x="206" y="462" class="label">WATCH</text>
+  <text x="206" y="477" class="label">OBSERVER</text>
+  <text x="206" y="493" class="copy">exact matching</text>
+
+  <path d="M112 438 L142 414" class="internal"/>
+  <path d="M248 438 L218 414" class="internal"/>
+
+  <path d="M180 528 L180 570" class="service"/>
+  <text x="195" y="553" class="micro" fill="#ff8a5c">SERVICE SETTLEMENT</text>
+
+  <rect x="52" y="570" width="256" height="76" rx="3" class="strong"/>
+  <text x="72" y="596" class="label">ALGORAND MAINNET</text>
+  <text x="72" y="617" class="copy">service settlement + future USDC payment</text>
+  <text x="72" y="633" class="copy">confirmed chain state via Indexer</text>
+
+  <path d="M248 570 C300 548 316 514 286 490" class="evidence"/>
+  <path d="M286 490 C302 436 298 402 254 379" class="evidence"/>
+  <path d="M106 379 C72 350 70 315 88 298" class="evidence"/>
+  <path d="M88 298 C64 270 62 242 82 222" class="evidence"/>
+  <path d="M82 222 C48 190 42 152 98 136" class="evidence"/>
+  <text x="281" y="540" text-anchor="end" class="micro">CONFIRMED EVIDENCE</text>
+  <text x="62" y="333" class="micro">STATUS / MATCH</text>
+
+  <circle r="3.5" class="pulse pulseOrange">
+    <animateMotion dur="5.5s" repeatCount="indefinite" path="M180 136 L180 184 L180 528 L180 570"/>
+  </circle>
+  <circle r="3.5" class="pulse pulseLight">
+    <animateMotion dur="7s" repeatCount="indefinite" path="M248 570 C300 548 316 514 286 490 C302 436 298 402 254 379 C190 346 120 346 106 379 C72 350 70 315 88 298 C64 270 62 242 82 222 C48 190 42 152 98 136"/>
+  </circle>
+
+  <line x1="52" y1="682" x2="308" y2="682" stroke="#2f2f2c"/>
+  <text x="180" y="706" text-anchor="middle" class="micro" fill="#d4d0c7">PAY ONCE · EXIT · WAIT · MATCH · EVIDENCE</text>
+  <text x="180" y="730" text-anchor="middle" class="copy">Durable waiting, without a durable caller.</text>
+</svg>
