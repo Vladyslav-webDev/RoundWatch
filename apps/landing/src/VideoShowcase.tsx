@@ -1,5 +1,3 @@
-import { Icon } from "./graphics";
-
 export default function VideoShowcase() {
   return (
     <section
@@ -26,29 +24,18 @@ export default function VideoShowcase() {
         </p>
       </div>
 
-      <div className="launch-video-frame" aria-label="Reserved demo video frame">
-        <div className="launch-video-grid" aria-hidden="true" />
-        <div className="launch-video-placeholder">
-          <span className="launch-video-play" aria-hidden="true">
-            <Icon name="play" />
-          </span>
-          <p className="mono">Demo video slot prepared</p>
-          <h3>The final demo will be embedded here.</h3>
-          <p>
-            The page structure, aspect ratio, responsive layout, and media policy
-            are ready. The recording can replace this placeholder without moving
-            the surrounding content.
-          </p>
-          <div className="launch-video-sequence mono">
-            <span>Create watch</span>
-            <span>→</span>
-            <span>x402 settlement</span>
-            <span>→</span>
-            <span>Caller exits</span>
-            <span>→</span>
-            <span>MainNet match</span>
-          </div>
-        </div>
+      <div className="launch-video-frame">
+        <video
+          className="launch-video-media"
+          controls
+          playsInline
+          preload="metadata"
+          poster="/demo/roundwatch-demo-poster.jpg"
+          aria-label="RoundWatch production demo on Algorand MainNet"
+        >
+          <source src="/demo/roundwatch-demo.mp4" type="video/mp4" />
+          Your browser does not support the video element.
+        </video>
       </div>
     </section>
   );
