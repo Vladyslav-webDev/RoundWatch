@@ -26,13 +26,13 @@ export default function VideoShowcase() {
         </p>
       </div>
 
-      <div className="launch-video-frame" aria-label="Reserved launch video frame">
+      <div className="launch-video-frame" aria-label="Reserved demo video frame">
         <div className="launch-video-grid" aria-hidden="true" />
         <div className="launch-video-placeholder">
           <span className="launch-video-play" aria-hidden="true">
             <Icon name="play" />
           </span>
-          <p className="mono">Launch video slot prepared</p>
+          <p className="mono">Demo video slot prepared</p>
           <h3>The final demo will be embedded here.</h3>
           <p>
             The page structure, aspect ratio, responsive layout, and media policy
