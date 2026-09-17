@@ -1,0 +1,71 @@
+/* Product architecture map: replaces the old linear component list with the real
+   RoundWatch system boundary and its two distinct flows: x402 service settlement
+   and later verified payment evidence. The underlying list stays in the markup as
+   a no-JS semantic fallback; the visual layer is a responsive SVG. */
+
+.technology-layout {
+  grid-template-columns: minmax(0, 1.32fr) minmax(330px, 0.68fr);
+  gap: 70px;
+  align-items: start;
+}
+
+.architecture-core {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(145deg, #111210, #0a0b0a);
+  box-shadow:
+    0 28px 90px rgba(0, 0, 0, 0.22),
+    inset 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.architecture-core > .diagram-label,
+.architecture-core > .architecture-path,
+.architecture-core > .architecture-next {
+  display: none;
+}
+
+.architecture-core::before {
+  content: "";
+  display: block;
+  width: 100%;
+  aspect-ratio: 920 / 700;
+  background: url("/roundwatch-system-map.svg") center / contain no-repeat;
+}
+
+@media (max-width: 1200px) {
+  .technology-layout {
+    grid-template-columns: minmax(0, 1.18fr) minmax(315px, 0.82fr);
+    gap: 44px;
+  }
+}
+
+@media (max-width: 900px) {
+  .technology-layout {
+    grid-template-columns: 1fr;
+    gap: 44px;
+  }
+
+  .architecture-core::before {
+    width: 100%;
+  }
+
+  .technology-copy {
+    max-width: 720px;
+  }
+}
+
+@media (max-width: 560px) {
+  .architecture-core {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+    scrollbar-color: #5a4639 #111210;
+  }
+
+  .architecture-core::before {
+    width: 680px;
+    max-width: none;
+  }
+}
