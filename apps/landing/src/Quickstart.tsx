@@ -169,7 +169,7 @@ export default function QuickstartPage() {
 
         <section className="quickstart-contract">
           <div>
-            <p className="eyebrow">Current challenge-release contract</p>
+            <p className="eyebrow">Current operating limits</p>
             <h2>Bounded by design.</h2>
           </div>
           <dl>
