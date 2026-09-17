@@ -68,6 +68,20 @@
   color: var(--dim);
 }
 
+.launch-video-frame:has(.launch-video-media) {
+  min-height: 0;
+  background: #050505;
+}
+
+.launch-video-media {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #050505;
+}
+
 .quickstart-site {
   min-height: 100vh;
   overflow: clip;
@@ -365,6 +379,10 @@
   .launch-video-frame,
   .launch-video-placeholder {
     min-height: 500px;
+  }
+
+  .launch-video-frame:has(.launch-video-media) {
+    min-height: 0;
   }
 
   .quickstart-contract {
