@@ -132,9 +132,11 @@
   line-height: .98;
   letter-spacing: -0.062em;
   font-weight: 430;
+  white-space: normal;
 }
 
 .quickstart-hero h1 span {
+  display: block;
   color: var(--orange);
 }
 
