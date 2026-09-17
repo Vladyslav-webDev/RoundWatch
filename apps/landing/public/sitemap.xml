@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://roundwatch.observer/</loc></url>
+  <url><loc>https://roundwatch.observer/start</loc></url>
+  <url><loc>https://roundwatch.observer/impressum</loc></url>
+  <url><loc>https://roundwatch.observer/privacy</loc></url>
 </urlset>

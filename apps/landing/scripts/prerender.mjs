@@ -17,6 +17,12 @@ const routes = [
     canonical: "https://roundwatch.observer/",
   },
   {
+    path: "/start",
+    output: "dist/start/index.html",
+    title: "Start in 60 seconds — RoundWatch",
+    canonical: "https://roundwatch.observer/start",
+  },
+  {
     path: "/impressum",
     output: "dist/impressum/index.html",
     title: "Impressum — RoundWatch",
