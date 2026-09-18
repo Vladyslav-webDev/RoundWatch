@@ -15,7 +15,7 @@ A backend that already operates durable Indexer or subscriber infrastructure may
 1. The client submits the exact expected sender, receiver, atomic amount, and optional invoice note.
 2. x402 returns payment requirements and the client signs the service payment locally.
 3. GoPlausible verifies and settles the service payment.
-4. RoundWatch activates the persisted watch only after it has a safe Algorand round from which to scan.
+4. RoundWatch activates the persisted watch only after the exact service-payment transaction is confirmed; that transaction's confirmed round becomes the scan baseline.
 5. The caller may exit while RoundWatch polls the Algorand Indexer.
 6. The watch becomes `matched` when an exact future USDC asset transfer appears.
 7. The caller reads the durable result with `GET /v1/watch/:id`.
@@ -39,7 +39,7 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
 | Facilitator | `https://facilitator.goplausible.xyz` |
 | Hosting | Render, with persistent SQLite storage mounted at `/data` |
-| Watch lifetime | 30 minutes from durable creation |
+| Eligibility deadline | 30 minutes from durable creation; terminal `expired` requires complete validated chain coverage through a fixed closing checkpoint |
 | Open-obligation capacity | 50 globally; 5 per verified service payer |
 
 The production server does not contain or need a wallet mnemonic or private key.
@@ -136,7 +136,7 @@ Unknown IDs return HTTP `404`.
 | State | Meaning |
 | --- | --- |
 | `settlement_pending` | The watch specification and deterministic service-payment identity are persisted, but activation is not yet proven. Reconciliation can recover a settlement/activation crash window. |
-| `active` | The service payment is established and a safe initial scan round is stored. The poller is looking for the future invoice payment. |
+| `active` | The exact service-payment transaction is confirmed; its confirmed round is the activation baseline and initial scan cursor. The poller is looking for the future invoice payment. |
 | `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
 | `settlement_unknown` | Settlement did not produce an immediately usable activation. An ambiguous outcome remains eligible for exact reconciliation; a definitive on-chain mismatch is terminal and remains fail-closed in this public state. |
 | `expired` | The deadline's complete eligible chain range was scanned through a fixed closing checkpoint with no exact match. The terminal record remains readable. |
@@ -263,9 +263,11 @@ The production flow was executed successfully on **2026-09-16**:
 
 Independent MainNet Indexer verification confirmed both transfers used Circle USDC ASA `31566704`, the expected sender and receiver, and atomic amounts `1000` for the service payment and `1` for the watched invoice. The matched watch persisted across multiple Render redeploys.
 
-After correctness hardening at merge commit `69afd9dc070a7f9c12206b038f117cc1f2b3fdb3`, a free production smoke check confirmed `{ "status": "ok", "network": "mainnet" }` and the pre-existing matched watch remained unchanged. No second paid MainNet E2E was performed or is implied.
+After the initial MainNet proof, the production service received a larger correctness/resource hardening merge at `18e8712431bc02a904dd5a3f227b2f5a49e9f6f7`. That release replaced wall-clock-only expiry with chain-time eligibility plus a fixed closing checkpoint, activated watches from the exact confirmed service-payment round, bounded all Indexer work through a shared dispatcher, added fair bounded servicing across watches, and strengthened settlement reconciliation and pagination validation. Render deployed that merge successfully and free production smoke checks returned the expected MainNet health, x402 `402`, and status behavior.
 
-GoPlausible Bazaar also discovered the production resource with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. On 2026-09-16, the merchant leaderboard entry showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank of 145 among 147 entries is a dated observation, not a permanent project property.
+A follow-up production fix at `d05fabaea6124ed5658dd13cf06167a885aefeb0` replaced an invalid Bazaar example receiver with a checksum-valid Algorand address and added regression coverage. A post-deploy external `402` smoke decoded the live `payment-required` header and verified the production URL, MainNet network, `exact` scheme, ASA `31566704`, amount `1000`, and checksum-valid Bazaar example addresses. No second paid MainNet E2E was performed after these hardening releases or is implied.
+
+GoPlausible Bazaar had already discovered the production resource with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. On 2026-09-16, the merchant leaderboard entry showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank of 145 among 147 entries is a dated observation, not a permanent project property.
 
 Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 

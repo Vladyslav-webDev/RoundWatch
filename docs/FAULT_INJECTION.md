@@ -1,5 +1,7 @@
 # RoundWatch live TestNet fault-injection runbook
 
+> **TestNet recovery evidence.** This runbook reproduces a specific settlement/activation crash path. The current production contract is documented in [README](../README.md), [Architecture](ARCHITECTURE.md), and [MainNet Readiness](MAINNET_READINESS.md).
+
 Purpose: prove the real settlement → activation crash recovery path before any MainNet payment.
 
 This test deliberately kills the TestNet server **after the x402 service payment has settled** but **before the SQLite activation commit**. The restarted process must recover the pending watch from on-chain evidence, then continue through the later watched-payment match.
@@ -11,10 +13,10 @@ This test deliberately kills the TestNet server **after the x402 service payment
 - Use the existing ignored local `.env` files. Never paste a mnemonic into Git, chat, logs, or documentation.
 - Use a fresh SQLite file for this proof so an older pending row cannot trigger the intentional exit.
 
-## 1. Sync the hardening branch
+## 1. Sync the current production source
 
 ```powershell
-git switch hardening/mainnet-readiness
+git switch main
 git pull
 pnpm install --frozen-lockfile
 pnpm typecheck

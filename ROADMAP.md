@@ -33,17 +33,34 @@ The current production baseline includes:
   note;
 - persistent SQLite state on a mounted Render disk;
 - restart-safe watch state and scan progress;
+- deterministic service-payment identity persisted before settlement;
 - settlement reconciliation across the settlement/activation crash window;
-- safe activation from a confirmed Algorand round;
-- durable matched transaction ID and confirmed round;
-- 30-minute server-controlled watch lifetime;
-- bounded open-obligation capacity;
+- activation from the exact confirmed service-payment round;
+- same-round invoice exclusion and a fixed activation baseline;
+- a 30-minute creation-based eligibility deadline whose passage alone does not
+  manufacture expiry;
+- terminal expiry only after complete validated chain coverage through a fixed
+  closing checkpoint;
+- finite round windows, strict page/watermark validation, and no durable cursor
+  advance on incomplete scans;
+- a shared finite Indexer dispatcher with bounded rate, burst, and aggregate
+  concurrency;
+- fair bounded poll sweeps so one busy or failing watch cannot monopolize the
+  service loop;
+- bounded open-obligation capacity: 50 globally and 5 per verified service
+  payer;
+- admission before settlement when capacity is unavailable;
 - public status retrieval through `GET /v1/watch/:id`;
-- MainNet paid end-to-end proof;
+- checksum-valid Bazaar discovery examples covered by regression tests;
+- a post-deploy external production `402` smoke that verifies the live URL,
+  MainNet network, exact scheme, Circle USDC ASA, price, and Bazaar examples;
+- MainNet paid end-to-end proof from the pre-hardening production baseline; and
 - public MIT-licensed repository and technical documentation.
 
 The shipped Bazaar integration is not the same claim as proven autonomous
-discoverability. That is qualified separately below.
+discoverability. A compatible client can inspect the live machine-readable
+contract, but black-box discovery by an unknown agent remains a separate
+milestone below.
 
 ## Now — Autonomy Foundation v0
 
@@ -53,40 +70,43 @@ layers.
 
 ### Production baseline and autonomy boundary
 
-Before changing the public contract:
+The current MainNet baseline is now captured and regression-tested:
 
-- capture the current MainNet `/v1/watch` and status behavior;
-- capture the live `402 Payment-Required` contract and settlement behavior;
-- verify the current Bazaar registration and metadata as seen externally;
-- preserve a known-good paid MainNet baseline for regression comparison;
-- define the supported autonomy boundary.
+- production resource: `POST /v1/watch`;
+- status resource: `GET /v1/watch/:id`;
+- live `402 Payment-Required` terms for URL, network, scheme, asset, amount,
+  and service receiver;
+- checksum-valid Bazaar examples in the live discovery metadata;
+- a preserved paid MainNet proof for comparison; and
+- a free external post-deploy smoke for the current hardened release.
 
-The target is **zero RoundWatch-specific setup**, not zero infrastructure setup.
-An autonomous client may already have an x402-capable signer or wallet, Algorand
-MainNet access, USDC, a spend policy, and access to a supported Bazaar discovery
-root. It should not require a preconfigured RoundWatch URL, SDK, README, MCP
-server, or hand-written parameter mapping.
+The target remains **zero RoundWatch-specific setup**, not zero infrastructure
+setup. An autonomous client may already have an x402-capable signer or wallet,
+Algorand MainNet access, USDC, a spend policy, and access to a supported Bazaar
+discovery root. It should not require a preconfigured RoundWatch URL, SDK,
+README, MCP server, or hand-written parameter mapping.
 
-### Lifecycle and payment correctness
+### Remaining lifecycle and public-contract work
 
-Harden the current lifecycle before declaring the API contract stable:
+The correctness baseline is hardened; the remaining work is primarily about
+making that behavior explicit and ergonomic for autonomous clients:
 
-- define exact expiry semantics so a valid payment near the lifetime boundary is
-  not silently missed;
-- ensure status reads do not create surprising lifecycle side effects;
-- expose recovery and terminal states in a form an automated client can reason
-  about;
-- preserve settlement reconciliation across process and network failures;
-- define idempotency replay semantics that prevent duplicate settlement;
-- distinguish safe replay from conflicting reuse of an idempotency key;
-- avoid exposing an existing watch on an idempotency collision that is not
-  authorized to see it;
-- define whether a watch ID is a bearer capability and which status fields are
-  safe to expose publicly;
-- define stable polling guidance and retry behavior;
-- keep capacity exhaustion and settlement uncertainty machine-readable.
+- define stable machine-readable error codes across validation, capacity,
+  settlement uncertainty, idempotency conflicts, and status reads;
+- distinguish safe idempotent replay from conflicting reuse of an idempotency
+  key without risking duplicate settlement;
+- decide whether a watch ID is intentionally a bearer capability and document
+  which returned fields are safe for public retrieval;
+- expose stable `terminal` and `retryable` semantics;
+- expose polling guidance such as `pollAfterMs` and an explicit `statusUrl`;
+- ensure status reads and recovery states are easy for an automated client to
+  interpret without knowing implementation details; and
+- keep every retry path incapable of turning recovery into a second service
+  charge.
 
-A retry must never turn recovery into a second service charge.
+The chain-time expiry, exact activation baseline, bounded Indexer work,
+pre-settlement admission, recovery semantics, and no-wall-clock-side-effect
+rules are implemented production invariants rather than roadmap items.
 
 ### x402 / AVM compatibility
 
@@ -220,7 +240,7 @@ Consider only when user evidence justifies the additional surface area:
 - webhook or push delivery as an alternative to polling;
 - cancellation where the economics and settlement semantics are clear;
 - authenticated/private watch status if bearer-style watch IDs are insufficient;
-- longer or configurable watch lifetimes;
+- longer or configurable eligibility windows;
 - renewal or standing-watch models;
 - stronger operational reporting.
 
