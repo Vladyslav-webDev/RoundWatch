@@ -43,6 +43,11 @@ export interface SettlementIntent {
    expectedTransaction: string;
    network: string;
    payer?: string;
+   receiver: string;
+   assetId: number;
+   atomicAmount: string;
+   firstValid: number;
+   lastValid: number;
 }
 
 export interface WatchRecord extends WatchSpec {
@@ -61,6 +66,15 @@ export interface WatchRecord extends WatchSpec {
    expiresAt?: string;
    matchedTransaction?: string;
    matchedRound?: number;
+   closingRound?: number;
+   evidenceVersion: number;
+   serviceReceiver?: string;
+   serviceAssetId?: number;
+   serviceAtomicAmount?: string;
+   serviceFirstValid?: number;
+   serviceLastValid?: number;
+   reconciliationAttempts: number;
+   reconciliationNextAttemptAt?: string;
 }
 
 export interface SettlementEvidence {
@@ -92,6 +106,15 @@ interface WatchRow {
    matched_transaction: string | null;
    matched_round: number | null;
    settlement_reconciliation_terminal: number;
+   closing_round: number | null;
+   evidence_version: number;
+   service_receiver: string | null;
+   service_asset_id: number | null;
+   service_atomic_amount: string | null;
+   service_first_valid: number | null;
+   service_last_valid: number | null;
+   reconciliation_attempts: number;
+   reconciliation_next_attempt_at: string | null;
 }
 
 export class RoundWatchStore {
@@ -139,6 +162,15 @@ export class RoundWatchStore {
          'settlement_reconciliation_terminal INTEGER NOT NULL DEFAULT 0',
       );
       this.ensureColumn('expires_at', 'expires_at TEXT');
+      this.ensureColumn('closing_round', 'closing_round INTEGER');
+      this.ensureColumn('evidence_version', 'evidence_version INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('service_receiver', 'service_receiver TEXT');
+      this.ensureColumn('service_asset_id', 'service_asset_id INTEGER');
+      this.ensureColumn('service_atomic_amount', 'service_atomic_amount TEXT');
+      this.ensureColumn('service_first_valid', 'service_first_valid INTEGER');
+      this.ensureColumn('service_last_valid', 'service_last_valid INTEGER');
+      this.ensureColumn('reconciliation_attempts', 'reconciliation_attempts INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('reconciliation_next_attempt_at', 'reconciliation_next_attempt_at TEXT');
       this.ensureExpiredStateConstraint();
 
       this.database.exec(`
@@ -147,24 +179,7 @@ export class RoundWatchStore {
          WHERE expected_service_transaction IS NOT NULL;
       `);
 
-      // Legacy unfinished obligations receive a full TTL grace period from the
-      // first startup on the migrated schema. Terminal historical rows remain
-      // unchanged and expose no synthetic expiry.
-      const legacyExpiry = this.expiryFrom(this.currentTime());
-      this.database.prepare(`
-         UPDATE roundwatch_watches
-         SET expires_at = ?
-         WHERE expires_at IS NULL
-           AND (
-              state IN ('settlement_pending', 'active')
-              OR (
-                 state = 'settlement_unknown'
-                 AND settlement_reconciliation_terminal = 0
-              )
-           )
-      `).run(legacyExpiry);
-
-      this.expireOpenWatches();
+      // evidence_version=0 rows are legacy. No new proof fields are fabricated.
    }
 
    recordSettlementCandidate(
@@ -221,7 +236,6 @@ export class RoundWatchStore {
       created: boolean;
    } {
       const now = this.currentTime();
-      this.expireOpenWatches(now);
       this.database.exec('BEGIN IMMEDIATE;');
 
       try {
@@ -265,9 +279,15 @@ export class RoundWatchStore {
                expected_service_transaction,
                expected_service_network,
                expected_service_payer,
+               service_receiver,
+               service_asset_id,
+               service_atomic_amount,
+               service_first_valid,
+               service_last_valid,
                created_at,
-               expires_at
-            ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               expires_at,
+               evidence_version
+            ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          `).run(
             id,
             spec.idempotencyKey,
@@ -279,8 +299,14 @@ export class RoundWatchStore {
             settlementIntent?.expectedTransaction ?? null,
             settlementIntent?.network ?? null,
             settlementIntent?.payer ?? null,
+            settlementIntent?.receiver ?? null,
+            settlementIntent?.assetId ?? null,
+            settlementIntent?.atomicAmount ?? null,
+            settlementIntent?.firstValid ?? null,
+            settlementIntent?.lastValid ?? null,
             createdAt,
             expiresAt,
+            settlementIntent ? 1 : 0,
          );
 
          const inserted = this.database.prepare(`
@@ -342,7 +368,6 @@ export class RoundWatchStore {
          WHERE id = ?
            AND state IN ('settlement_pending', 'settlement_unknown')
            AND settlement_reconciliation_terminal = 0
-           AND (expires_at IS NULL OR expires_at > ?)
       `).run(
          evidence.transaction,
          evidence.network,
@@ -351,11 +376,9 @@ export class RoundWatchStore {
          activatedAt,
          activationRound ?? null,
          id,
-         activatedAt,
       );
 
       if (result.changes !== 1) {
-         this.expireOpenWatches();
          throw new Error(`Watch ${id} activation lost a state race`);
       }
 
@@ -363,7 +386,6 @@ export class RoundWatchStore {
    }
 
    markSettlementUnknown(id: string): void {
-      this.expireOpenWatches();
       this.database.prepare(`
          UPDATE roundwatch_watches
          SET
@@ -374,7 +396,6 @@ export class RoundWatchStore {
    }
 
    markSettlementInvalid(id: string): void {
-      this.expireOpenWatches();
       this.database.prepare(`
          UPDATE roundwatch_watches
          SET
@@ -390,39 +411,29 @@ export class RoundWatchStore {
       transaction: string,
       round: number,
    ): WatchRecord | undefined {
-      const now = this.currentTime().toISOString();
       this.database.prepare(`
          UPDATE roundwatch_watches
          SET
             state = 'matched',
             matched_transaction = ?,
-            matched_round = ?,
-            scan_after_round = ?
+            matched_round = ?
          WHERE id = ?
            AND state = 'active'
-           AND (expires_at IS NULL OR expires_at > ?)
-      `).run(transaction, round, round, id, now);
-
-      this.expireOpenWatches();
+      `).run(transaction, round, id);
 
       return this.getWatch(id);
    }
 
-   advanceScanRound(id: string, round: number): void {
-      const now = this.currentTime().toISOString();
-      this.database.prepare(`
-         UPDATE roundwatch_watches
-         SET scan_after_round = ?
-         WHERE id = ?
-           AND state = 'active'
-           AND (expires_at IS NULL OR expires_at > ?)
-      `).run(round, id, now);
-
-      this.expireOpenWatches();
+   advanceScanRound(id: string, expectedRound: number, round: number): boolean {
+      if (!Number.isSafeInteger(round) || round <= expectedRound) return false;
+      const result = this.database.prepare(`
+         UPDATE roundwatch_watches SET scan_after_round = ?
+         WHERE id = ? AND state = 'active' AND scan_after_round = ? AND ? > scan_after_round
+      `).run(round, id, expectedRound, round);
+      return result.changes === 1;
    }
 
    getWatch(id: string): WatchRecord | undefined {
-      this.expireOpenWatches();
       const row = this.database.prepare(`
          SELECT * FROM roundwatch_watches WHERE id = ?
       `).get(id) as unknown as WatchRow | undefined;
@@ -431,7 +442,6 @@ export class RoundWatchStore {
    }
 
    getByIdempotencyKey(idempotencyKey: string): WatchRecord | undefined {
-      this.expireOpenWatches();
       const row = this.database.prepare(`
          SELECT * FROM roundwatch_watches WHERE idempotency_key = ?
       `).get(idempotencyKey) as unknown as WatchRow | undefined;
@@ -440,7 +450,6 @@ export class RoundWatchStore {
    }
 
    listActiveWatches(): WatchRecord[] {
-      this.expireOpenWatches();
       const rows = this.database.prepare(`
          SELECT * FROM roundwatch_watches
          WHERE state = 'active'
@@ -451,34 +460,39 @@ export class RoundWatchStore {
    }
 
    listSettlementReconciliationCandidates(): WatchRecord[] {
-      this.expireOpenWatches();
+      const now = this.currentTime().toISOString();
       const rows = this.database.prepare(`
          SELECT * FROM roundwatch_watches
          WHERE state IN ('settlement_pending', 'settlement_unknown')
            AND expected_service_transaction IS NOT NULL
            AND settlement_reconciliation_terminal = 0
-         ORDER BY created_at ASC
-      `).all() as unknown as WatchRow[];
+           AND (reconciliation_next_attempt_at IS NULL OR reconciliation_next_attempt_at <= ?)
+         ORDER BY COALESCE(reconciliation_next_attempt_at, created_at), created_at ASC
+      `).all(now) as unknown as WatchRow[];
 
       return rows.map(mapRow);
    }
 
-   expireOpenWatches(now = this.currentTime()): number {
-      const result = this.database.prepare(`
-         UPDATE roundwatch_watches
-         SET state = 'expired'
-         WHERE expires_at IS NOT NULL
-           AND expires_at <= ?
-           AND (
-              state IN ('settlement_pending', 'active')
-              OR (
-                 state = 'settlement_unknown'
-                 AND settlement_reconciliation_terminal = 0
-              )
-           )
-      `).run(now.toISOString());
+   setClosingRound(id: string, round: number): number | undefined {
+      this.database.prepare(`UPDATE roundwatch_watches SET closing_round = COALESCE(closing_round, ?)
+         WHERE id = ? AND state = 'active' AND evidence_version = 1`).run(round, id);
+      return this.getWatch(id)?.closingRound;
+   }
 
-      return Number(result.changes);
+   markExpired(id: string, expectedScanRound: number, closingRound: number): boolean {
+      const result = this.database.prepare(`UPDATE roundwatch_watches SET state = 'expired'
+         WHERE id = ? AND state = 'active' AND evidence_version = 1
+           AND scan_after_round = ? AND closing_round = ? AND scan_after_round >= closing_round
+      `).run(id, expectedScanRound, closingRound);
+      return result.changes === 1;
+   }
+
+   recordReconciliationFailure(id: string, nextAttemptAt: Date): void {
+      this.database.prepare(`UPDATE roundwatch_watches
+         SET reconciliation_attempts = reconciliation_attempts + 1,
+             reconciliation_next_attempt_at = ?
+         WHERE id = ? AND settlement_reconciliation_terminal = 0
+      `).run(nextAttemptAt.toISOString(), id);
    }
 
    close(): void {
@@ -537,7 +551,16 @@ export class RoundWatchStore {
             expires_at TEXT,
             matched_transaction TEXT,
             matched_round INTEGER,
-            settlement_reconciliation_terminal INTEGER NOT NULL DEFAULT 0
+            settlement_reconciliation_terminal INTEGER NOT NULL DEFAULT 0,
+            closing_round INTEGER,
+            evidence_version INTEGER NOT NULL DEFAULT 0,
+            service_receiver TEXT,
+            service_asset_id INTEGER,
+            service_atomic_amount TEXT,
+            service_first_valid INTEGER,
+            service_last_valid INTEGER,
+            reconciliation_attempts INTEGER NOT NULL DEFAULT 0,
+            reconciliation_next_attempt_at TEXT
          );
       `);
    }
@@ -583,7 +606,16 @@ export class RoundWatchStore {
                expires_at,
                matched_transaction,
                matched_round,
-               settlement_reconciliation_terminal
+               settlement_reconciliation_terminal,
+               closing_round,
+               evidence_version,
+               service_receiver,
+               service_asset_id,
+               service_atomic_amount,
+               service_first_valid,
+               service_last_valid,
+               reconciliation_attempts,
+               reconciliation_next_attempt_at
             )
             SELECT
                id,
@@ -607,7 +639,16 @@ export class RoundWatchStore {
                expires_at,
                matched_transaction,
                matched_round,
-               settlement_reconciliation_terminal
+               settlement_reconciliation_terminal,
+               closing_round,
+               evidence_version,
+               service_receiver,
+               service_asset_id,
+               service_atomic_amount,
+               service_first_valid,
+               service_last_valid,
+               reconciliation_attempts,
+               reconciliation_next_attempt_at
             FROM roundwatch_watches_legacy;
 
             DROP TABLE roundwatch_watches_legacy;
@@ -726,6 +767,15 @@ function mapRow(row: WatchRow): WatchRecord {
          ? {}
          : { matchedTransaction: row.matched_transaction }),
       ...(row.matched_round === null ? {} : { matchedRound: row.matched_round }),
+      ...(row.closing_round === null ? {} : { closingRound: row.closing_round }),
+      evidenceVersion: row.evidence_version,
+      ...(row.service_receiver === null ? {} : { serviceReceiver: row.service_receiver }),
+      ...(row.service_asset_id === null ? {} : { serviceAssetId: row.service_asset_id }),
+      ...(row.service_atomic_amount === null ? {} : { serviceAtomicAmount: row.service_atomic_amount }),
+      ...(row.service_first_valid === null ? {} : { serviceFirstValid: row.service_first_valid }),
+      ...(row.service_last_valid === null ? {} : { serviceLastValid: row.service_last_valid }),
+      reconciliationAttempts: row.reconciliation_attempts,
+      ...(row.reconciliation_next_attempt_at === null ? {} : { reconciliationNextAttemptAt: row.reconciliation_next_attempt_at }),
    };
 }
 

@@ -1,65 +1,69 @@
-import type { RoundWatchIndexer } from './roundwatch-indexer.js';
-import type { RoundWatchStore } from './roundwatch-store.js';
+import { matchesWatch, type RoundWatchIndexer } from './roundwatch-indexer.js';
+import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
+
+export const DEFAULT_SCAN_ROUND_WINDOW = 100;
+
+interface ScanSession {
+   minRound: number;
+   maxRound: number;
+   nextToken?: string;
+   seenTokens: Set<string>;
+}
 
 export class RoundWatchPoller {
    private timer?: NodeJS.Timeout;
    private running = false;
    private started = false;
+   private nextWatchIndex = 0;
+   private readonly sessions = new Map<string, ScanSession>();
 
    constructor(
       private readonly store: RoundWatchStore,
       private readonly indexer: RoundWatchIndexer,
       private readonly intervalMilliseconds = 5_000,
-   ) {}
+      private readonly roundWindow = DEFAULT_SCAN_ROUND_WINDOW,
+      private readonly now: () => Date = () => new Date(),
+   ) {
+      if (!Number.isSafeInteger(roundWindow) || roundWindow <= 0) {
+         throw new Error('roundWindow must be a finite positive integer');
+      }
+   }
 
    start(): void {
-      if (this.started) {
-         return;
-      }
-
+      if (this.started) return;
       this.started = true;
       void this.tick();
    }
 
    stop(): void {
       this.started = false;
-
-      if (this.timer) {
-         clearTimeout(this.timer);
-         this.timer = undefined;
-      }
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = undefined;
    }
 
    async runOnce(): Promise<void> {
       const watches = this.store.listActiveWatches();
 
       if (watches.length === 0) {
+         this.nextWatchIndex = 0;
          return;
       }
 
-      const currentRound = await this.indexer.getCurrentRound();
+      const startIndex = this.nextWatchIndex % watches.length;
+      const ordered = [
+         ...watches.slice(startIndex),
+         ...watches.slice(0, startIndex),
+      ];
 
-      for (const watch of watches) {
+      // Rotate which watch receives the first turn on the next sweep. Every
+      // watch still receives at most one service turn in this sweep.
+      this.nextWatchIndex = (startIndex + 1) % watches.length;
+
+      for (const watch of ordered) {
          try {
-            if (watch.scanAfterRound === undefined) {
-               console.error(
-                  `RoundWatch watch ${watch.id} has no safe scan baseline; cursor was not advanced`,
-               );
-               continue;
-            }
-
-            const match = await this.indexer.findMatch(
-               watch,
-               watch.scanAfterRound + 1,
-               currentRound,
-            );
-
-            if (match) {
-               this.store.markMatched(watch.id, match.transaction, match.round);
-            } else {
-               this.store.advanceScanRound(watch.id, currentRound);
-            }
+            await this.serviceWatch(watch);
          } catch (error) {
+            this.sessions.delete(watch.id);
             console.error(
                `RoundWatch poll failed for watch ${watch.id}:`,
                safeErrorMessage(error),
@@ -68,24 +72,94 @@ export class RoundWatchPoller {
       }
    }
 
-   private async tick(): Promise<void> {
-      if (this.running) {
+   private async serviceWatch(initial: WatchRecord): Promise<void> {
+      if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
+         console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
          return;
       }
 
+      let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
+      if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
+         const tip = await this.indexer.getCurrentRound('checkpoint');
+         const block = await this.indexer.getBlock(tip);
+         if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
+            this.store.setClosingRound(watch.id, block.round);
+            watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
+            console.log(`RoundWatch finalization checkpoint fixed for watch ${watch.id} at round ${block.round}`);
+         }
+      }
+
+      if (watch.closingRound !== undefined && watch.scanAfterRound >= watch.closingRound) {
+         this.store.markExpired(watch.id, watch.scanAfterRound, watch.closingRound);
+         return;
+      }
+
+      let session = this.sessions.get(watch.id);
+      if (session && session.minRound !== watch.scanAfterRound + 1) {
+         this.sessions.delete(watch.id);
+         session = undefined;
+      }
+      if (!session) {
+         const tip = await this.indexer.getCurrentRound('health');
+         const maxRound = Math.min(
+            watch.scanAfterRound + this.roundWindow,
+            tip,
+            watch.closingRound ?? Number.MAX_SAFE_INTEGER,
+         );
+         if (maxRound <= watch.scanAfterRound) return;
+         session = {
+            minRound: watch.scanAfterRound + 1,
+            maxRound,
+            seenTokens: new Set<string>(),
+         };
+         this.sessions.set(watch.id, session);
+      }
+
+      const page = await this.indexer.searchWatchPage(
+         watch,
+         session.minRound,
+         session.maxRound,
+         session.nextToken,
+      );
+      if (page.currentRound < session.maxRound) {
+         throw new Error(`Indexer coverage ${page.currentRound} is below requested round ${session.maxRound}`);
+      }
+      const match = page.transactions.find(transaction => matchesWatch(transaction, watch));
+      if (match) {
+         this.store.markMatched(watch.id, match.transaction, match.round);
+         this.sessions.delete(watch.id);
+         console.log(`RoundWatch matched watch ${watch.id} in round ${match.round}`);
+         return;
+      }
+      if (page.nextToken) {
+         if (page.nextToken === session.nextToken || session.seenTokens.has(page.nextToken)) {
+            throw new Error('Indexer pagination continuation repeated or stalled');
+         }
+         session.seenTokens.add(page.nextToken);
+         session.nextToken = page.nextToken;
+         return;
+      }
+
+      const advanced = this.store.advanceScanRound(watch.id, watch.scanAfterRound, session.maxRound);
+      this.sessions.delete(watch.id);
+      if (!advanced) return;
+      console.log(`RoundWatch scan progress watch=${watch.id} coveredThrough=${session.maxRound}`);
+      const updated = this.store.getWatch(watch.id);
+      if (updated?.closingRound !== undefined && updated.scanAfterRound !== undefined && updated.scanAfterRound === updated.closingRound) {
+         this.store.markExpired(updated.id, updated.scanAfterRound, updated.closingRound);
+         console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`);
+      }
+   }
+
+   private async tick(): Promise<void> {
+      if (this.running) return;
       this.running = true;
-
-      try {
-         await this.runOnce();
-      } catch (error) {
-         console.error('RoundWatch poll failed:', safeErrorMessage(error));
-      } finally {
+      try { await this.runOnce(); }
+      catch (error) { console.error('RoundWatch poll failed:', safeErrorMessage(error)); }
+      finally {
          this.running = false;
-
          if (this.started) {
-            this.timer = setTimeout(() => {
-               void this.tick();
-            }, this.intervalMilliseconds);
+            this.timer = setTimeout(() => void this.tick(), this.intervalMilliseconds);
             this.timer.unref();
          }
       }

@@ -5,10 +5,7 @@ import { serve } from '@hono/node-server';
 import { HTTPFacilitatorClient } from '@x402/core/server';
 import { isValidAlgorandAddress } from '@x402/avm';
 
-import {
-   createApp,
-   ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
-} from './app.js';
+import { createApp } from './app.js';
 import {
    resolveRoundWatchNetwork,
    resolveRoundWatchPublicBaseUrl,
@@ -16,6 +13,13 @@ import {
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
+import {
+   DEFAULT_INDEXER_BURST,
+   DEFAULT_INDEXER_CONCURRENCY,
+   DEFAULT_INDEXER_REQUESTS_PER_SECOND,
+   IndexerRequestDispatcher,
+} from './roundwatch-scheduler.js';
+import { DEFAULT_SCAN_ROUND_WINDOW } from './roundwatch-poller.js';
 import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
@@ -60,6 +64,10 @@ let publicBaseUrl;
 let watchTtlMilliseconds;
 let maxOpenWatches;
 let maxOpenWatchesPerPayer;
+let indexerRequestsPerSecond;
+let indexerBurst;
+let indexerConcurrency;
+let scanRoundWindow;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -82,6 +90,14 @@ try {
       DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
       'ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER',
    );
+   indexerRequestsPerSecond = parseRequiredPositiveNumber(
+      process.env.ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND,
+      DEFAULT_INDEXER_REQUESTS_PER_SECOND,
+      'ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND',
+   );
+   indexerBurst = parseRequiredPositiveInteger(process.env.ROUNDWATCH_INDEXER_BURST, DEFAULT_INDEXER_BURST, 'ROUNDWATCH_INDEXER_BURST');
+   indexerConcurrency = parseRequiredPositiveInteger(process.env.ROUNDWATCH_INDEXER_CONCURRENCY, DEFAULT_INDEXER_CONCURRENCY, 'ROUNDWATCH_INDEXER_CONCURRENCY');
+   scanRoundWindow = parseRequiredPositiveInteger(process.env.ROUNDWATCH_SCAN_ROUND_WINDOW, DEFAULT_SCAN_ROUND_WINDOW, 'ROUNDWATCH_SCAN_ROUND_WINDOW');
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
    process.exit(1);
@@ -156,17 +172,20 @@ const storeOptions = {
 const store = faultExitAfterSettle
    ? new TestnetExitAfterSettleStore(databasePath, storeOptions)
    : new RoundWatchStore(databasePath, storeOptions);
-const indexer = new AlgorandIndexerClient(indexerUrl);
+const dispatcher = new IndexerRequestDispatcher({
+   requestsPerSecond: indexerRequestsPerSecond,
+   burst: indexerBurst,
+   concurrency: indexerConcurrency,
+});
+const indexer = new AlgorandIndexerClient(indexerUrl, dispatcher);
 const poller = new RoundWatchPoller(
    store,
    indexer,
    pollIntervalMilliseconds,
+   scanRoundWindow,
 );
 const reconciler = new SettlementReconciler(store, indexer, {
    network: networkConfig.network,
-   receiver: avmAddress,
-   assetId: networkConfig.usdcAssetIdNumber,
-   atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
    intervalMilliseconds: reconciliationIntervalMilliseconds,
 });
 const app = createApp({
@@ -199,6 +218,7 @@ server.on('listening', () => {
    console.log(
       `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
    );
+   console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
 
    if (faultExitAfterSettle) {
       console.warn(
@@ -268,5 +288,11 @@ function parseRequiredPositiveInteger(
       throw new Error(`${variableName} must be a finite positive integer`);
    }
 
+   return parsed;
+}
+
+function parseRequiredPositiveNumber(value: string | undefined, fallback: number, variableName: string): number {
+   const parsed = value === undefined || value.trim() === '' ? fallback : Number(value);
+   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${variableName} must be a finite positive number`);
    return parsed;
 }

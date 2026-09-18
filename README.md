@@ -101,7 +101,7 @@ Request fields:
 
 The watched asset is not a request field. The server selects the USDC ASA from its explicit network configuration: MainNet ASA `31566704` or TestNet ASA `10458941`.
 
-The server also controls the lifetime and admission policy. New watches expire 30 minutes after `createdAt`; callers cannot override that deadline. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` with a machine-readable error before the handler succeeds, so x402 does not settle that rejected service payment.
+The server controls the lifetime and admission policy. New watches have an immutable eligibility deadline 30 minutes after `createdAt`; callers cannot override it. Passing that wall-clock time does not itself expire a watch; proof requires complete chain coverage through a closing checkpoint. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` before settlement.
 
 ### Read a watch
 
@@ -139,7 +139,7 @@ Unknown IDs return HTTP `404`.
 | `active` | The service payment is established and a safe initial scan round is stored. The poller is looking for the future invoice payment. |
 | `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
 | `settlement_unknown` | Settlement did not produce an immediately usable activation. An ambiguous outcome remains eligible for exact reconciliation; a definitive on-chain mismatch is terminal and remains fail-closed in this public state. |
-| `expired` | The persisted deadline passed before a successful match. The terminal record remains readable but is never polled, reconciled, or reactivated. |
+| `expired` | The deadline's complete eligible chain range was scanned through a fixed closing checkpoint with no exact match. The terminal record remains readable. |
 
 ### Exact matching
 
@@ -151,13 +151,15 @@ A transaction matches only when all configured properties agree:
 - atomic amount; and
 - invoice note, when the request supplied one.
 
-Only confirmed asset transfers after the watch's activation baseline are considered. A watch records the first exact match it encounters and then stops scanning.
+Only confirmed asset transfers strictly after the confirmed service-payment round are considered; same-round invoice transfers remain excluded. Sender, receiver, ASA, atomic amount, and optional note must match, and the transaction block time must be strictly before the creation-based deadline. Processing time does not affect eligibility.
 
 ## x402 payment and recovery
 
-The Hono resource server uses x402 v2 and the hosted GoPlausible facilitator. Before settlement, RoundWatch persists the deterministic Algorand service-payment transaction ID derived from the verified payment payload. After settlement, it records the settlement evidence, obtains the current Indexer round, and activates the watch from that safe baseline.
+The Hono resource server uses x402 v2 and the hosted GoPlausible facilitator. Before settlement, RoundWatch persists the deterministic Algorand service-payment transaction ID and immutable receiver, ASA, atomic amount, payer, `FirstValid`, and `LastValid` terms derived from the verified signed payload. After settlement, an exact Indexer lookup supplies the confirmed service-payment round, which becomes both the activation baseline and initial cursor.
 
-If the process stops after on-chain settlement but before activation is committed, the reconciliation worker looks up that exact transaction. It activates the watch only if transaction ID, network, service receiver, USDC ASA, amount, and payer (when available) agree. A definitive mismatch fails closed. No cursorless watch is activated when the initial round cannot be acquired.
+If the process stops after on-chain settlement but before activation is committed, the reconciliation worker looks up that exact transaction under persisted exponential backoff. It activates only when the original immutable terms agree. A bare 404 is retryable; only a sufficiently covered post-`LastValid` historical absence search can establish terminal nonpayment. A definitive confirmed mismatch fails closed.
+
+All Indexer calls share one token-bucket/concurrency dispatcher. Scans use finite round windows and page-level validation; each page and retry consumes capacity. Pagination tokens stay in memory, so restart replays the unfinished window from its durable cursor. When the deadline has passed, RoundWatch fixes an indexed block whose timestamp is at or after the deadline as `closingRound`; only complete validated coverage through that round can produce `expired`. Status reads never manufacture expiry from wall time.
 
 ## Local development
 
@@ -185,6 +187,10 @@ ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
 ROUNDWATCH_WATCH_TTL_MS=1800000
 ROUNDWATCH_MAX_OPEN_WATCHES=50
 ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER=5
+ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND=4
+ROUNDWATCH_INDEXER_BURST=4
+ROUNDWATCH_INDEXER_CONCURRENCY=2
+ROUNDWATCH_SCAN_ROUND_WINDOW=100
 PORT=4021
 ```
 
@@ -241,7 +247,7 @@ GitHub Actions performs a full-depth checkout, scans complete Git history with G
 - Service settlement is reconciled against exact on-chain fields before recovery activation.
 - Future invoice matching is exact, and activation never starts without a safe round cursor.
 - SQLite uniqueness on the idempotency key prevents duplicate watch creation.
-- Persisted expiry and transactional global/per-payer admission bound unfinished polling obligations; capacity rejection happens before settlement.
+- Transactional global/per-payer admission and the shared finite Indexer dispatcher bound persistent and external work; capacity rejection happens before settlement.
 - `.env` files and wallet material must never be committed; CI enforces tracked-env and full-history secret checks.
 
 The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. See [Security](docs/SECURITY.md) for trust boundaries and operational assumptions.
@@ -268,7 +274,7 @@ Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 - The current challenge-release policy is a 30-minute lifetime, 50 global open obligations, and 5 open obligations per verified service payer. These are operational safety bounds, not a commercial SLA or final pricing/capacity policy.
 - There is no cancellation operation, SLA, or long-term pricing policy.
 - The current deployment is a single application instance with an in-process poller/reconciler and local persistent SQLite. It is not a horizontally coordinated worker system.
-- Per-watch poll failures are isolated so one failing watch does not starve later watches, but that does not establish arbitrary production-scale capacity.
+- Each poll sweep gives every active watch at most one bounded servicing turn; pagination yields between sweeps, and FIFO Indexer dispatch enforces the global request bound. The tuning values are not an SLA or arbitrary-scale claim.
 - Results are retrieved by polling; there is no webhook or push-notification API.
 - Watch status is readable without authentication by anyone who knows the watch ID.
 

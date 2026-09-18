@@ -11,6 +11,7 @@ import { ExactAvmScheme } from '@x402/avm/exact/server';
 import {
    USDC_DECIMALS,
    convertToTokenAmount,
+   decodeSignedTransaction,
    getSenderFromTransaction,
    getTransactionId,
    isValidAlgorandAddress,
@@ -139,7 +140,6 @@ export function createApp(dependencies: AppDependencies): Hono {
          throw new Error('Settled RoundWatch response had no watch ID');
       }
 
-      let activationRound: number | undefined;
       const settlementEvidence = {
          transaction: context.result.transaction,
          network: context.result.network,
@@ -149,20 +149,32 @@ export function createApp(dependencies: AppDependencies): Hono {
       store.recordSettlementCandidate(watchId, settlementEvidence);
 
       try {
-         activationRound = await indexer.getCurrentRound();
+         const transfer = await indexer.lookupAssetTransfer(
+            settlementEvidence.transaction,
+            'activation',
+         );
+         const watch = store.getWatch(watchId);
+         if (!transfer || !watch) return;
+         const matches =
+            transfer.transaction === settlementEvidence.transaction &&
+            transfer.sender === watch.expectedServicePayer &&
+            transfer.receiver === watch.serviceReceiver &&
+            transfer.assetId === watch.serviceAssetId &&
+            transfer.atomicAmount === watch.serviceAtomicAmount &&
+            transfer.round >= (watch.serviceFirstValid ?? Number.MAX_SAFE_INTEGER) &&
+            transfer.round <= (watch.serviceLastValid ?? -1);
+         if (!matches) {
+            store.markSettlementInvalid(watchId);
+            return;
+         }
+         store.activateWatch(watchId, settlementEvidence, transfer.round);
       } catch (error) {
          console.warn(
-            'RoundWatch could not capture an activation round:',
+            'RoundWatch could not confirm the service transaction activation round:',
             safeErrorMessage(error),
          );
          return;
       }
-
-      store.activateWatch(
-         watchId,
-         settlementEvidence,
-         activationRound,
-      );
    });
 
    resourceServer.onSettleFailure(async context => {
@@ -298,6 +310,9 @@ export function createApp(dependencies: AppDependencies): Hono {
             settlementIntent = extractSettlementIntent(
                paymentHeader,
                networkConfig.network,
+               avmAddress,
+               networkConfig.usdcAssetIdNumber,
+               ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
             );
          } catch (error) {
             if (requireSettlementIntent) {
@@ -326,6 +341,7 @@ export function createApp(dependencies: AppDependencies): Hono {
          prepared = store.prepareWatch(parsed.spec, settlementIntent);
       } catch (error) {
          if (error instanceof WatchCapacityError) {
+            console.warn(`RoundWatch admission rejected scope=${error.scope}`);
             return c.json(
                {
                   error: 'RoundWatch capacity is currently exhausted',
@@ -376,6 +392,9 @@ export function createApp(dependencies: AppDependencies): Hono {
 function extractSettlementIntent(
    paymentHeader: string,
    expectedNetwork: string,
+   expectedReceiver: string,
+   expectedAssetId: number,
+   expectedAtomicAmount: string,
 ): SettlementIntent {
    const decoded = decodePaymentSignatureHeader(paymentHeader) as unknown as {
       accepted?: { network?: unknown };
@@ -415,12 +434,35 @@ function extractSettlementIntent(
    }
 
    const expectedTransaction = getTransactionId(transactionBytes);
+   const signed = decodeSignedTransaction(encodedTransaction);
+   const transaction = signed.txn;
    const payer = getSenderFromTransaction(transactionBytes, true);
+   const transfer = transaction.assetTransfer;
+   const receiver = transfer?.receiver?.toString();
+   const assetId = Number(transfer?.assetId);
+   const atomicAmount = transfer?.amount?.toString();
+   const firstValid = Number(transaction.firstValid);
+   const lastValid = Number(transaction.lastValid);
+
+   if (
+      receiver !== expectedReceiver ||
+      assetId !== expectedAssetId ||
+      atomicAmount !== expectedAtomicAmount ||
+      !Number.isSafeInteger(firstValid) || firstValid < 0 ||
+      !Number.isSafeInteger(lastValid) || lastValid < firstValid
+   ) {
+      throw new Error('Signed service transaction terms do not match the accepted purchase');
+   }
 
    return {
       expectedTransaction,
       network: expectedNetwork,
       payer,
+      receiver,
+      assetId,
+      atomicAmount,
+      firstValid,
+      lastValid,
    };
 }
 
@@ -490,8 +532,22 @@ function parseWatchSpec(
    };
 }
 
-function publicWatch(watch: WatchRecord): Omit<WatchRecord, 'idempotencyKey'> {
-   const { idempotencyKey: _, ...result } = watch;
+function publicWatch(watch: WatchRecord): Record<string, unknown> {
+   const result: Record<string, unknown> = { ...watch };
+   for (const internal of [
+      'idempotencyKey',
+      'evidenceVersion',
+      'serviceReceiver',
+      'serviceAssetId',
+      'serviceAtomicAmount',
+      'serviceFirstValid',
+      'serviceLastValid',
+      'reconciliationAttempts',
+      'reconciliationNextAttemptAt',
+      'closingRound',
+   ]) {
+      delete result[internal];
+   }
    return result;
 }
 
