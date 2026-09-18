@@ -20,7 +20,9 @@ A backend that already operates durable Indexer or subscriber infrastructure may
 6. The watch becomes `matched` when an exact future USDC asset transfer appears.
 7. The caller reads the durable result with `GET /v1/watch/:id`.
 
-See [Architecture](docs/ARCHITECTURE.md) for the normal, recovery, and matching paths.\n\nSee [Roadmap](ROADMAP.md) for the current product direction and prioritization.
+See [Architecture](docs/ARCHITECTURE.md) for the normal, recovery, and matching paths.
+
+See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 
 ## Live production service
 
