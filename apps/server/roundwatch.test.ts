@@ -139,12 +139,15 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
       };
       const example = decoded.extensions?.bazaar?.info?.input?.body;
       assert.ok(example);
-      assert.equal(typeof example.expectedSender, 'string');
-      assert.equal(typeof example.expectedReceiver, 'string');
-      assert.equal(isValidAlgorandAddress(example.expectedSender), true);
-      assert.equal(isValidAlgorandAddress(example.expectedReceiver), true);
-      assert.equal(example.expectedSender, PAYER);
-      assert.equal(example.expectedReceiver, RECEIVER);
+      const expectedSender = example.expectedSender;
+      const expectedReceiver = example.expectedReceiver;
+      if (typeof expectedSender !== 'string' || typeof expectedReceiver !== 'string') {
+         assert.fail('Bazaar watch example must contain string Algorand addresses');
+      }
+      assert.equal(isValidAlgorandAddress(expectedSender), true);
+      assert.equal(isValidAlgorandAddress(expectedReceiver), true);
+      assert.equal(expectedSender, PAYER);
+      assert.equal(expectedReceiver, RECEIVER);
    } finally {
       store.close();
    }
