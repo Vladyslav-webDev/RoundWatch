@@ -71,7 +71,7 @@ const watchDiscovery = declareDiscoveryExtension({
    input: {
       idempotencyKey: 'invoice-2026-09-15-001',
       expectedSender: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
-      expectedReceiver: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAR7CWY',
+      expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
       atomicAmount: '1000',
       invoiceNote: 'roundwatch:invoice-2026-09-15-001',
    },
