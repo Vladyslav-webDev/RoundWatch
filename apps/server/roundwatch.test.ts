@@ -16,7 +16,7 @@ import {
    decodePaymentRequiredHeader,
    encodePaymentSignatureHeader,
 } from '@x402/core/http';
-import { getTransactionId } from '@x402/avm';
+import { getTransactionId, isValidAlgorandAddress } from '@x402/avm';
 
 import { ALGORAND_TESTNET, createApp, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, TESTNET_USDC_ASSET_ID } from './app.js';
 import {
@@ -93,6 +93,64 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
       assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
    } finally { store.close(); }
+});
+
+test('Bazaar discovery watch example uses checksum-valid Algorand addresses', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [{ x402Version: 2, scheme: 'exact', network: ALGORAND_TESTNET }],
+               extensions: [], signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+      });
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: 'bazaar-address-smoke',
+            expectedSender: PAYER,
+            expectedReceiver: RECEIVER,
+            atomicAmount: '1',
+         }),
+      });
+      assert.equal(response.status, 402);
+
+      const encoded = response.headers.get('payment-required');
+      assert.ok(encoded);
+      const decoded = decodePaymentRequiredHeader(encoded) as unknown as {
+         extensions?: {
+            bazaar?: {
+               info?: {
+                  input?: {
+                     body?: {
+                        expectedSender?: unknown;
+                        expectedReceiver?: unknown;
+                     };
+                  };
+               };
+            };
+         };
+      };
+      const example = decoded.extensions?.bazaar?.info?.input?.body;
+      assert.ok(example);
+      const expectedSender = example.expectedSender;
+      const expectedReceiver = example.expectedReceiver;
+      if (typeof expectedSender !== 'string' || typeof expectedReceiver !== 'string') {
+         assert.fail('Bazaar watch example must contain string Algorand addresses');
+      }
+      assert.equal(isValidAlgorandAddress(expectedSender), true);
+      assert.equal(isValidAlgorandAddress(expectedReceiver), true);
+      assert.equal(expectedSender, PAYER);
+      assert.equal(expectedReceiver, RECEIVER);
+   } finally {
+      store.close();
+   }
 });
 
 test('paid x402 middleware persists signed purchase terms and activates from the exact service round', async () => {
