@@ -32,12 +32,12 @@ const flow = [
     detail:
       "GoPlausible verifies and settles the service payment. RoundWatch never needs the caller’s mnemonic or private key.",
     status: "Settlement established",
-    boundary: "Activation still requires a safe round",
+    boundary: "Activation requires the confirmed service-payment round",
     next: "Activate watch",
   },
   {
     title: "RoundWatch owns the wait",
-    text: "A safe Algorand round and scan progress are persisted so the caller can exit.",
+    text: "The confirmed service-payment round and scan progress are persisted so the caller can exit.",
     icon: "database",
     detail:
       "The durable watch keeps polling from a saved cursor. Restart recovery preserves the waiting obligation instead of tying it to one process lifetime.",
@@ -509,7 +509,7 @@ function Technology() {
           <ul className="capability-checks">
             {[
               "x402 service settlement",
-              "Safe activation round",
+              "Confirmed service-payment round",
               "Durable watch state",
               "Persistent scan cursor",
               "Restart recovery",
@@ -817,8 +817,9 @@ function Landing() {
                 USDC transfer it was created to observe.
               </p>
               <p className="challenge-footnote">
-                The service contract is public: exact matching, a 30-minute watch
-                lifetime, and bounded open capacity.
+                The service contract is public: exact matching, a 30-minute
+                eligibility deadline, proof-based terminal expiry, and bounded open
+                capacity.
               </p>
             </div>
           </section>

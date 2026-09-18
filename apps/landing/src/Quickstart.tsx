@@ -68,7 +68,7 @@ export default function QuickstartPage() {
             <span>Algorand MainNet</span>
             <span>USDC ASA 31566704</span>
             <span>0.001 USDC service fee</span>
-            <span>30 minute watch lifetime</span>
+            <span>30 minute eligibility deadline</span>
           </div>
         </section>
 
@@ -136,8 +136,9 @@ export default function QuickstartPage() {
               <h2>Save the watch ID and leave</h2>
               <p>
                 A successful paid request returns a durable <code>watchId</code>.
-                RoundWatch activates from a safe Algorand round, persists the scan
-                cursor, and owns the waiting obligation after your process exits.
+                RoundWatch confirms the exact service-payment transaction, uses its
+                confirmed round as the activation baseline, persists the scan cursor,
+                and owns the waiting obligation after your process exits.
               </p>
               <CodeBlock>{`{
   "watchId": "f5d2fb6f-b224-4aae-989c-87a5418fd2ae",
@@ -153,7 +154,9 @@ export default function QuickstartPage() {
               <p>
                 Poll the public status endpoint whenever your workflow returns. A
                 matched watch exposes the exact Algorand transaction ID and confirmed
-                round that satisfied the watch.
+                round that satisfied the watch. Passing the 30-minute deadline does not
+                itself produce <code>expired</code>; terminal expiry requires complete
+                indexed coverage through a fixed closing checkpoint.
               </p>
               <CodeBlock>{statusRequest}</CodeBlock>
               <div className="quickstart-states mono" aria-label="Watch states">
@@ -186,8 +189,8 @@ export default function QuickstartPage() {
               <dd>0.001 USDC</dd>
             </div>
             <div>
-              <dt>Watch lifetime</dt>
-              <dd>30 minutes from durable creation</dd>
+              <dt>Eligibility deadline</dt>
+              <dd>30 minutes from durable creation; expiry is proof-based</dd>
             </div>
             <div>
               <dt>Open capacity</dt>
