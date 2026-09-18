@@ -240,7 +240,7 @@ Consider only when user evidence justifies the additional surface area:
 - webhook or push delivery as an alternative to polling;
 - cancellation where the economics and settlement semantics are clear;
 - authenticated/private watch status if bearer-style watch IDs are insufficient;
-- longer or configurable watch lifetimes;
+- longer or configurable eligibility windows;
 - renewal or standing-watch models;
 - stronger operational reporting.
 
