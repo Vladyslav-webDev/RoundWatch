@@ -1,5 +1,7 @@
 # RoundWatch Spike 0
 
+> **Historical TestNet evidence only.** This document describes the original RoundWatch spike and its then-known limitations. It is not the current production contract. See [README](../README.md), [Architecture](ARCHITECTURE.md), [Security](SECURITY.md), and [MainNet Readiness](MAINNET_READINESS.md) for the deployed behavior.
+
 Date: 2026-09-14
 
 Network: Algorand TestNet
