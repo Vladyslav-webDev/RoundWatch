@@ -15,7 +15,7 @@ A backend that already operates durable Indexer or subscriber infrastructure may
 1. The client submits the exact expected sender, receiver, atomic amount, and optional invoice note.
 2. x402 returns payment requirements and the client signs the service payment locally.
 3. GoPlausible verifies and settles the service payment.
-4. RoundWatch activates the persisted watch only after it has a safe Algorand round from which to scan.
+4. RoundWatch activates the persisted watch only after the exact service-payment transaction is confirmed; that transaction's confirmed round becomes the scan baseline.
 5. The caller may exit while RoundWatch polls the Algorand Indexer.
 6. The watch becomes `matched` when an exact future USDC asset transfer appears.
 7. The caller reads the durable result with `GET /v1/watch/:id`.
