@@ -65,3 +65,34 @@ jobs:
 
       - name: Build production container
         run: docker build -t roundwatch-ci .
+
+      - name: Temporary production Bazaar 402 smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          headers=$(mktemp)
+          body=$(mktemp)
+          status=$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' \
+            -X POST 'https://roundwatch-api.onrender.com/v1/watch' \
+            -H 'Content-Type: application/json' \
+            --data '{"idempotencyKey":"gha-postdeploy-bazaar-smoke-001","expectedSender":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1","invoiceNote":"roundwatch:gha-postdeploy-bazaar-smoke-001"}')
+          test "$status" = "402"
+          payment_required=$(awk 'BEGIN{IGNORECASE=1} /^payment-required:/ {sub(/\r$/, ""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' "$headers")
+          test -n "$payment_required"
+          PAYMENT_REQUIRED="$payment_required" node <<'NODE'
+          const encoded = process.env.PAYMENT_REQUIRED;
+          const decoded = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+          const accepted = decoded.accepts?.[0];
+          const example = decoded.extensions?.bazaar?.info?.input?.body;
+          const expectedNetwork = 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=';
+          const expectedReceiver = 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
+          const expectedSender = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+          if (decoded.resource?.url !== 'https://roundwatch-api.onrender.com/v1/watch') throw new Error('wrong resource URL');
+          if (accepted?.scheme !== 'exact') throw new Error('wrong scheme');
+          if (accepted?.network !== expectedNetwork) throw new Error('wrong network');
+          if (accepted?.amount !== '1000') throw new Error('wrong amount');
+          if (accepted?.asset !== '31566704') throw new Error('wrong asset');
+          if (example?.expectedSender !== expectedSender) throw new Error('wrong Bazaar sender example');
+          if (example?.expectedReceiver !== expectedReceiver) throw new Error('wrong Bazaar receiver example');
+          console.log('production-bazaar-smoke-ok');
+          NODE
