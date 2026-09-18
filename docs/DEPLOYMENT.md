@@ -137,7 +137,7 @@ Deploy the reviewed image or commit through Render's normal deployment path. Pre
 
 Observe startup logs for the selected network, USDC ASA, Indexer URL, and SQLite path. Investigate startup failures; do not bypass the guards.
 
-The first startup adds the proof, immutable-purchase, and reconciliation-backoff columns idempotently. Legacy rows retain evidence version 0: missing validity ranges, purchase terms, deadlines, closing checkpoints, and coverage are not fabricated. Historical matched rows remain unchanged; ambiguous legacy rows remain unresolved. Preserve a consistent database backup before deployment and verify the known matched watch afterward.
+Schema migrations are idempotent. Legacy rows retain evidence version 0: missing validity ranges, purchase terms, deadlines, closing checkpoints, and coverage are not fabricated. Historical matched rows remain unchanged; ambiguous legacy rows remain unresolved. Preserve a consistent database backup before deployment and verify the known matched watch afterward.
 
 ### 4. Run free post-deploy smoke checks
 
@@ -164,7 +164,9 @@ curl -i -X POST https://roundwatch-api.onrender.com/v1/watch \
   --data '{"idempotencyKey":"smoke-readonly-20260916","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-Do not attach a payment signature. Expected result: HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, ASA `31566704`, amount `1000`, approved service receiver, and `x402-global-challenge` tag.
+Do not attach a payment signature. Expected result: HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `1000`, approved service receiver, and `x402-global-challenge` tag.
+
+Also decode the `payment-required` header and inspect the Bazaar discovery example. Both `expectedSender` and `expectedReceiver` must be checksum-valid Algorand addresses. The current receiver example is `AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI`. Discovery examples are not payment authority, but malformed examples can break autonomous clients before they ever reach settlement.
 
 Persistence check:
 
