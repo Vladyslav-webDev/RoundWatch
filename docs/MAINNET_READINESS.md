@@ -1,6 +1,6 @@
 # RoundWatch MainNet readiness
 
-Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, and correctness hardening are proven. Repository publication, the hardening-to-`main` merge, and challenge submission remain human-controlled steps.
+Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, and the post-hardening production deployment are proven. The current production `main` is `d05fabaea6124ed5658dd13cf06167a885aefeb0`.
 
 This is a dated evidence record, not an availability or performance guarantee.
 
@@ -22,40 +22,71 @@ This is a dated evidence record, not an availability or performance guarantee.
 
 The production server has no mnemonic or private key. The dedicated payer signs locally.
 
-## Final audit and correctness hardening
+## Production hardening and current release
 
-A final read-only public-readiness audit was completed. It identified failure-path issues around activation baselines, ambiguous settlement recovery, definitive settlement mismatches, and per-watch poll isolation. The fixes were tested, merged into `hardening/mainnet-readiness`, and deployed.
+The initial production-readiness audit identified failure-path issues around
+activation baselines, ambiguous settlement recovery, definitive settlement
+mismatches, and per-watch poll isolation. Those fixes were followed by a broader
+correctness/resource hardening pass that is now merged to `main` and live on
+Render.
 
-Production hardening merge commit:
+The principal production hardening merge is:
 
 ```text
-69afd9dc070a7f9c12206b038f117cc1f2b3fdb3
+18e8712431bc02a904dd5a3f227b2f5a49e9f6f7
 ```
 
-The deployed hardening includes:
+That release establishes the current correctness model:
 
-- no cursorless activation when activation-round acquisition fails;
-- exact on-chain settlement reconciliation establishing the safe initial scan baseline;
-- retryable recovery for ambiguous settlement outcomes;
-- terminal fail-closed handling for a definitive on-chain settlement mismatch;
-- per-watch poll failure isolation so one watch does not starve later watches;
-- mandatory valid HTTPS `ROUNDWATCH_PUBLIC_BASE_URL` on MainNet;
-- guarded MainNet checkpoint, runtime, receiver, asset, amount, note, and response validation;
-- full-history Gitleaks CI and tracked `.env` rejection;
-- server correctness/reconciliation tests and client MainNet safety tests; and
-- production Docker build validation.
+- MainNet persists the deterministic service-payment transaction identity and
+  immutable signed purchase terms before settlement;
+- normal and recovery activation use the **exact confirmed service-payment
+  round**, not an unrelated current Indexer tip;
+- only confirmed invoice transfers with `confirmedRound > activationRound`
+  are eligible, so same-round transfers remain excluded;
+- the 30-minute value is an exclusive creation-based **eligibility deadline**,
+  not a wall-clock state transition;
+- after the deadline, RoundWatch fixes a chain checkpoint at or after that
+  deadline and reaches `expired` only after complete validated coverage through
+  the resulting closing round;
+- all Indexer work passes through one finite dispatcher with bounded rate,
+  burst, and aggregate concurrency;
+- scans use finite round windows, strict page/watermark validation, and never
+  advance the durable cursor when coverage is incomplete;
+- each poll sweep gives every active watch at most one bounded servicing turn,
+  preventing a busy pagination session or one failing watch from monopolizing
+  progress;
+- settlement reconciliation remains retryable when evidence is incomplete and
+  fail-closed when a definitive mismatch is proven;
+- admission is transactionally capped at 50 unfinished obligations globally and
+  5 per verified service payer, with capacity rejection before settlement; and
+- legacy rows never receive fabricated proof fields, deadlines, or coverage.
 
-Correctness-hardening CI passed. The history-aware secret scan is part of that CI: checkout uses full depth and Gitleaks v8.29.1 scans complete Git history with redaction enabled.
+CI for the hardening release passed the full-history secret scan, tracked-env
+guard, typecheck, RoundWatch focused tests, MainNet client safety tests, and
+production container build. Render then auto-deployed the exact merge commit and
+free production smoke checks confirmed MainNet health, unpaid x402 behavior, and
+status retrieval without an additional MainNet spend.
 
-Render successfully auto-deployed the merge commit. A free post-deploy smoke check passed, `/health` continued to report MainNet, and the pre-existing matched watch `7c606f02-0257-4dfd-b59c-a13b61f480f0` survived the migration/redeploy unchanged.
+A follow-up discovery fix was squash-merged as:
 
-No second paid MainNet E2E was performed after this patch, and this document does not imply one. The free health and persisted-watch checks were sufficient to verify the deployed change without another spend.
+```text
+d05fabaea6124ed5658dd13cf06167a885aefeb0
+```
 
-## Bounded-capacity release candidate
+It replaced an invalid Bazaar example receiver with a checksum-valid Algorand
+address and added regression coverage that decodes the x402
+`payment-required` header and validates both discovery example addresses. The
+follow-up deploy reached `live` on Render. An external post-deploy GitHub
+Actions smoke then issued an unpaid production `POST /v1/watch`, received HTTP
+`402`, decoded the live header, and verified the production URL, MainNet
+network, `exact` scheme, ASA `31566704`, amount `1000`, and both Bazaar
+example addresses.
 
-The final publication candidate adds a server-controlled 30-minute expiry, a global cap of 50 open obligations, and a cap of 5 open obligations per deterministic verified service payer. Capacity rejection occurs in the application handler before x402 settlement and returns HTTP `429`. Persisted expiry removes elapsed unfinished watches from polling, reconciliation, and capacity while retaining their public `expired` record.
-
-The SQLite migration transactionally adds the new state constraint and expiry column. Legacy unfinished rows receive a full configured TTL from the first upgraded startup; the known historical matched watch remains matched and may have no `expiresAt` because it predates the field. This candidate is locally tested but is not described as deployed until the human-controlled merge and Render branch switch occur. No additional MainNet payment is required for deployment validation.
+No second paid MainNet E2E was performed after these hardening releases, and
+this document does not imply one. The paid MainNet proof below remains the
+known-good pre-hardening baseline; the current hardened release is covered by
+free production regression checks.
 
 ## Settlement and activation recovery
 
@@ -65,11 +96,11 @@ Normal path:
 
 ```text
 verified payment authorization
-→ persist pending watch and deterministic service-payment identity
+→ persist pending watch, deterministic service-payment identity, and signed validity terms
 → facilitator settles
-→ settlement hook records evidence
-→ acquire current Indexer round
-→ activate with that round as the initial scan cursor
+→ settlement hook records the successful transaction ID
+→ exact Indexer lookup confirms that service-payment transaction
+→ activate using its confirmed round as both activation baseline and initial scan cursor
 ```
 
 Recovery path:
@@ -132,29 +163,40 @@ The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: tru
 | Persistent production state | Passed | MainNet requires an absolute path; Render uses `/data/roundwatch.sqlite` |
 | URL and address startup validation | Passed | Checksum-valid receiver and HTTPS production endpoints required |
 | Settlement crash reconciliation | Passed | Focused tests plus live TestNet fault injection |
-| Safe activation baseline | Passed | Normal and reconciliation activation store a confirmed Indexer round |
+| Exact activation baseline | Passed | Normal and recovery activation use the confirmed service-payment transaction round |
+| Chain-time expiry proof | Passed | Deadline passage alone cannot expire; complete validated coverage through a fixed closing round is required |
 | Ambiguous/invalid settlement handling | Passed | Ambiguous outcomes retry; definitive mismatch is terminal/fail-closed |
-| Poll failure isolation | Passed | One watch failure neither advances its cursor nor starves later watches |
-| Bounded open obligations | Candidate passed | Persisted 30-minute expiry, 50 global and 5 per-payer caps, pre-settlement rejection, restart and migration tests |
-| Server test suite | Passed | Request, persistence, poller, and reconciliation coverage |
+| Bounded Indexer work | Passed | Shared finite rate/burst/concurrency dispatcher covers scans, retries, activation, recovery, and checkpoint work |
+| Fair poll servicing | Passed | Each active watch receives at most one bounded turn per rotated sweep |
+| Bounded open obligations | Passed | 30-minute eligibility deadline, 50 global and 5 per-payer caps, transactional pre-settlement rejection |
+| Pagination and coverage integrity | Passed | Finite windows, strict watermarks/filters, continuation without premature cursor advance |
+| Server test suite | Passed | Request, persistence, poller, scheduler, Indexer, and reconciliation coverage |
 | MainNet client safety suite | Passed | Runtime, checkpoint, payment-critical, and response guards |
 | History-aware secret scan | Passed | Full-depth checkout plus Gitleaks complete-history scan |
 | Tracked environment guard | Passed | CI rejects tracked `.env` files except examples |
 | Production container | Passed | CI builds the root Dockerfile |
 | Public HTTPS API | Passed | Render deployment and free health/preflight checks |
-| Paid MainNet service purchase | Passed | Settlement transaction and active watch recorded above |
+| Paid MainNet service purchase | Passed | Settlement transaction and active watch recorded below |
 | Later exact invoice match | Passed | Same invoice txid and round recorded by Indexer and RoundWatch |
 | Persistence through redeploy | Passed | Existing matched watch unchanged after multiple redeploys |
-| Bazaar discovery | Passed | Correct resource metadata and `settleCount: 1` |
+| Bazaar discovery metadata | Passed | Production metadata is present; live post-deploy `402` smoke validates current URL/payment terms and checksum-valid examples |
 | Challenge attribution | Passed | Merchant entry reported `challenge: true` |
 
-## Remaining human-controlled steps
+## Current release state
 
-- The repository is still private. Do not describe it as publicly released until a human changes its visibility.
-- The final hardening-to-`main` merge has not been performed. Merge only after the documentation/publication review is accepted.
-- Complete the challenge-submission process and any required Electric Capital submission path after repository publication.
-- Do not move funds or repeat a paid MainNet test unless a separately reviewed need receives explicit human authorization.
+- The repository is public and MIT licensed.
+- The correctness/resource hardening is merged to `main` and deployed on
+  Render.
+- The current production source is
+  `d05fabaea6124ed5658dd13cf06167a885aefeb0`.
+- Routine release validation should remain free: health, unpaid `402`, existing
+  watch status, logs, and discovery metadata checks.
+- A new paid MainNet E2E is **not** required merely to validate documentation,
+  deployment, or discovery changes. Any additional spend remains an explicitly
+  authorized evidence-collection action.
+- Challenge submission/leaderboard state is operationally separate from this
+  technical readiness record and may change independently.
 
 ## Product and operational limitations
 
-RoundWatch now defines a challenge-release safety policy of a 30-minute watch lifetime, 50 global open obligations, and 5 open obligations per verified service payer. It still has no cancellation operation, SLA, long-term pricing policy, or horizontally coordinated worker design. The current single-instance SQLite deployment and sequential in-process poller are not a claim of arbitrary-scale operation, and the release limits are operational bounds rather than a commercial service commitment.
+RoundWatch now defines a challenge-release safety policy of a 30-minute eligibility deadline, 50 global unfinished obligations, and 5 unfinished obligations per verified service payer. It still has no cancellation operation, SLA, long-term pricing policy, or horizontally coordinated worker design. The current single-instance SQLite deployment uses bounded fair in-process servicing and a shared finite Indexer dispatcher, but it is not a claim of arbitrary-scale operation; the release limits are operational bounds rather than a commercial service commitment.
