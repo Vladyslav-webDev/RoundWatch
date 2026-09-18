@@ -31,7 +31,7 @@ Startup validates:
 - MainNet facilitator and Indexer URLs use HTTPS;
 - MainNet `ROUNDWATCH_PUBLIC_BASE_URL` is present, absolute, HTTPS, free of credentials/query/fragment, and non-loopback;
 - a MainNet Indexer URL does not visibly point at TestNet; and
-- watch TTL and global/per-payer capacity values are finite positive integers; and
+- watch TTL, round-window, dispatcher rate/burst/concurrency, and global/per-payer capacity values are finite positive values; and
 - `ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=1` is rejected on MainNet.
 
 These guards reduce accidental cross-network or ephemeral production operation. They do not authenticate the configured external services or prove that an arbitrary URL serves the intended network; operators must still review configuration.
@@ -51,8 +51,8 @@ For MainNet, the handler must successfully decode the verified AVM payment and p
 After facilitator settlement:
 
 1. the settlement transaction, network, and payer are checked against the prepared identity;
-2. an Indexer round must be acquired before normal activation; and
-3. that round becomes both the activation round and initial scan cursor.
+2. the exact settled transaction must be confirmed by the Indexer; and
+3. that transaction's confirmed round becomes both the activation round and initial scan cursor.
 
 If the process stops or the round lookup fails, the watch remains non-active and recoverable. The reconciler looks up only the prepared transaction ID and activates only when all applicable fields match:
 
@@ -75,11 +75,13 @@ An active watch has a safe `scanAfterRound` baseline. RoundWatch considers only 
 - decimal-free atomic amount string; and
 - decoded UTF-8 invoice note, if the watch specified one.
 
-The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. The Indexer client also rejects malformed or non-integer transaction data before comparison.
+The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage.
 
-If a poll lookup fails, that watch's cursor is not advanced. The error is isolated so later watches are still evaluated. If a watch somehow lacks a scan baseline, the poller refuses cursorless scanning.
+If any page, checkpoint, or watermark validation fails, the cursor is not advanced. Pagination tokens are process-local; restart replays the unfinished finite round window. Conditional cursor updates prevent stale work from moving coverage backward or skipping a range.
 
-Each new watch persists a server-controlled `expiresAt` equal to `createdAt + 30 minutes`. Elapsed unfinished watches transition to terminal state `expired` through SQLite before active or reconciliation lists are returned and before later state changes are accepted. They remain readable but cannot generate further Indexer work. A successful `matched` result and a definitive terminal settlement mismatch are not overwritten by expiry.
+Each new watch persists `expiresAt = createdAt + 30 minutes`. This is an exclusive chain-time eligibility boundary, not a wall-clock state transition. Expiry requires a fixed indexed block timestamped at or after the deadline plus complete validated coverage through that closing round. Status/idempotency reads have no expiry side effects, and Indexer lag or failure leaves the watch unresolved.
+
+Every Indexer HTTP attempt, including pagination, activation, reconciliation, absence proof, health, block lookup, failure, and timeout, passes through one finite token bucket and aggregate concurrency gate. Tokens are capped at the configured burst, so delayed timers and restart cannot accumulate unlimited capacity. Budget exhaustion delays work and never proves absence, coverage, expiry, or nonpayment.
 
 ## Idempotency and duplicate-purchase protection
 
@@ -91,7 +93,7 @@ Idempotency keys are global to the database and are not authentication credentia
 
 The challenge-release limits are 50 open obligations globally and 5 per verified service payer. Open means `settlement_pending`, `active`, or non-terminal `settlement_unknown`; `matched`, `expired`, and definitive terminal mismatches do not count. The payer key comes from the deterministic verified AVM transaction identity, never a caller-supplied body field.
 
-Expiry, capacity checks, and insertion run synchronously at the SQLite boundary, with the check and insert protected by an immediate transaction. Exhaustion returns HTTP `429` before the handler can return success. The installed after-handler x402 flow therefore cancels settlement and does not charge for the rejected watch. These limits bound the current persistent polling liability; they are not an SLA or a claim of arbitrary load capacity.
+Capacity checks and insertion run synchronously at the SQLite boundary under an immediate transaction. Exhaustion returns HTTP `429` before the handler can return success. These limits and the Indexer dispatcher bound persistent and external work; they are not an SLA.
 
 ## MainNet client guard
 

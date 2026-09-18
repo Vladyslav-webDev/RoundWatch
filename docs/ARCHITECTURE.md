@@ -36,10 +36,11 @@ flowchart LR
 | Hono API | Exposes health, paid watch creation, and free watch-status retrieval. The MainNet watch route is `/v1/watch`; TestNet uses `/spike/watch`. |
 | x402 resource server and middleware | Advertises exact AVM payment requirements, delegates verification/settlement to the facilitator, and invokes settlement lifecycle hooks. |
 | GoPlausible facilitator | Verifies the client's signed x402 payment and submits the Algorand USDC service transfer. It also consumes the Bazaar discovery extension. |
-| `RoundWatchStore` | Persists the watch specification, deterministic settlement identity, settlement evidence, activation cursor, and match result in SQLite. |
+| `RoundWatchStore` | Persists the watch, immutable purchase terms, proof metadata, conditional coverage cursor, and result in SQLite. |
 | `SettlementReconciler` | Recovers watches whose settlement succeeded or may have succeeded without a completed activation commit. |
 | `RoundWatchPoller` | Scans bounded Algorand round ranges for exact future invoice transfers and advances each successful watch cursor. |
-| `AlgorandIndexerClient` | Reads the current Indexer round, looks up a service-payment transaction by ID, and searches USDC asset transfers by sender and round range. |
+| `AlgorandIndexerClient` | Performs validated page-level transaction, block, health, and exact-transaction requests through the shared dispatcher. |
+| `IndexerRequestDispatcher` | Applies one finite token-bucket rate, burst, FIFO queue, and aggregate concurrency bound to every Indexer request attempt. |
 | Client | Chooses the expected invoice properties, handles HTTP 402, verifies requirements as appropriate, signs locally, retains the watch ID, and later reads status. |
 
 The application starts the reconciler and poller only after the HTTP server is listening. SIGINT and SIGTERM close the server, stop both workers, and close SQLite.
@@ -118,7 +119,7 @@ The post-middleware response guard reloads the watch. If it is not `active` or a
 
 Before the settlement call, MainNet requires the handler to derive the deterministic Algorand payment transaction ID and payer from the verified AVM transaction bytes. It persists these with the watch in `settlement_pending`.
 
-Normal settlement records the facilitator evidence and asks the Indexer for the current round. If that round lookup fails, the watch is not activated without a cursor. The persisted transaction identity leaves it recoverable.
+Normal settlement records facilitator evidence and looks up that exact transaction. Its confirmed round, rather than an Indexer health tip, becomes the activation round and initial cursor. A temporary failure leaves the paid durable obligation recoverable.
 
 When settlement reports a failure whose on-chain outcome is not definitive, the watch moves to `settlement_unknown`. Both non-terminal `settlement_pending` and `settlement_unknown` rows with an expected transaction ID are reconciliation candidates.
 
@@ -139,19 +140,24 @@ flowchart TD
     E -->|definitive mismatch| T
 ```
 
-An ambiguous absence remains retryable. A found transaction with a definitive field mismatch fails closed and is no longer retried, although its public state remains `settlement_unknown`. The reconciliation path was fault-injection tested on TestNet before the MainNet launch.
+A lookup 404 or ordinary failure remains retryable with persisted capped exponential backoff. Once the Indexer is beyond the signed `LastValid`, a complete txid search with an adequate response watermark may prove historical absence and terminal nonpayment. A confirmed transaction with incompatible immutable terms fails closed; both terminal outcomes remain public `settlement_unknown`.
 
 ## Future-payment matching lifecycle
 
-Each poll tick loads all `active` watches and obtains a current confirmed Indexer round. For each watch:
+Each poll sweep snapshots the `active` watches, rotates the starting position, and gives every watch at most one bounded servicing turn:
 
-1. atomically expire unfinished rows whose persisted `expiresAt` deadline has passed and load only remaining `active` watches;
-2. refuse to scan if `scanAfterRound` is missing;
-3. query the configured USDC asset from `scanAfterRound + 1` through the current round, filtered by expected sender;
-4. compare the receiver, ASA, integer amount, and optional decoded UTF-8 note exactly;
-5. store `matchedTransaction`, `matchedRound`, and state `matched` on the first exact match; otherwise advance `scanAfterRound` to the current round.
+1. after the deadline, look up an indexed block whose timestamp is at or after it and persist that fixed `closingRound`;
+2. choose a finite window from `scanAfterRound + 1`, clipped by the current Indexer tip and `closingRound`;
+3. validate and consume one page, retaining only the opaque continuation token in memory;
+4. advance the cursor conditionally only after every page proves the complete window and each page's `current-round` covers its requested upper bound; or
+5. record an exact eligible match without claiming intervening coverage; and
+6. transition to `expired` only after complete coverage reaches the fixed closing checkpoint with no eligible match.
 
-Failures are caught per watch. A failed lookup neither advances that watch's cursor nor prevents later watches in the same tick from being processed. This isolation is correctness hardening, not a claim of unlimited throughput.
+Indexer transaction eligibility uses `confirmedRound > activationRound` plus exact sender, receiver, ASA, atomic amount, optional note, and `roundTime * 1000 < expiresAt`. The deadline is exclusive. Restart during pagination discards the token and safely replays that finite window.
+
+The response contracts used here are the official Algorand Indexer [transaction search](https://dev.algorand.co/reference/rest-api/indexer/operations/searchfortransactions/), [exact transaction lookup](https://dev.algorand.co/reference/rest-api/indexer/operations/lookuptransaction/), and [block lookup](https://dev.algorand.co/reference/rest-api/indexer/operations/lookupblock/) APIs. In particular, a short page is not treated as complete when a continuation token exists.
+
+Failures are isolated per servicing turn. A busy pagination session yields after one page so later watches still progress in the same sweep. The rotating sweep order and dispatcher's FIFO queue give continuously eligible scan and recovery work eventual service without allowing timer delay to accumulate an unbounded catch-up burst.
 
 ## Persistence model
 
@@ -165,9 +171,12 @@ SQLite uses WAL mode and a single `roundwatch_watches` table. The durable record
 - scan cursor and creation time;
 - persisted server-controlled expiry time for bounded watches;
 - matched invoice transaction and confirmed round; and
-- an internal terminal-reconciliation flag used to distinguish a definitive mismatch from a retryable unknown outcome.
+- immutable signed service-payment receiver, ASA, amount, payer, `FirstValid`, and `LastValid`;
+- reconciliation attempts and next-attempt timestamp;
+- a fixed nullable closing checkpoint and evidence-version marker; and
+- an internal terminal-reconciliation flag used to distinguish a definitive mismatch/nonpayment proof from a retryable unknown outcome.
 
-The public API omits the idempotency key but otherwise exposes the mapped watch record. Schema compatibility for newer settlement columns is handled at startup with guarded `ALTER TABLE` additions. There is no distributed migration service or external database.
+The public API omits the idempotency key and internal proof, purchase-term, checkpoint, and retry metadata. Schema compatibility is handled at startup with guarded `ALTER TABLE` additions. There is no distributed migration service or external database.
 
 ## Idempotency
 
@@ -175,11 +184,11 @@ The public API omits the idempotency key but otherwise exposes the mapped watch 
 
 ## Expiry and admission capacity
 
-The challenge-release policy gives each new watch a server-controlled deadline of `createdAt + 30 minutes`. The deadline is persisted in SQLite and is not supplied by the caller. Store reads used by status, polling, reconciliation, activation, cursor advancement, and capacity admission first transition elapsed unfinished obligations to terminal state `expired`. An expired watch remains readable but cannot be polled, reconciled, matched, or reactivated. `matched` and definitive terminal `settlement_unknown` rows are never overwritten by expiry.
+The challenge-release contract gives each new watch a server-controlled deadline of `createdAt + 30 minutes`. Settlement latency consumes this interval. Wall-clock passage is not a lifecycle proof and reads never mutate the state. `expired` means the service baseline exists and the complete eligible range was validated through the fixed closing checkpoint with no match.
 
-An open obligation is `settlement_pending`, `active`, or non-terminal `settlement_unknown`. Admission is capped at 50 open obligations globally and 5 for the deterministic service payer derived from the verified AVM payment payload. The store expires elapsed rows, opens an immediate SQLite transaction, checks the idempotency key and both caps, and inserts the pending row without an asynchronous gap. Capacity failure returns HTTP `429` from the handler; because that is an error response before after-handler settlement, x402 cancels the payment rather than charging for a rejected obligation.
+An open obligation is `settlement_pending`, `active`, or non-terminal `settlement_unknown`. Admission is capped at 50 open obligations globally and 5 for the deterministic service payer derived from the verified AVM payment payload. The store opens an immediate SQLite transaction, checks the idempotency key and both caps, and inserts the pending row without an asynchronous gap. Capacity failure returns HTTP `429` before after-handler settlement.
 
-Legacy databases are rebuilt transactionally to extend the state constraint with `expired`. Existing unfinished rows that have no persisted deadline receive one full configured TTL from the first migrated startup. Historical matched and definitive terminal rows remain unchanged and may omit `expiresAt`.
+Schema additions are idempotent. Pre-hardening rows retain evidence version 0; missing validity terms, closing proof, deadlines, or historical coverage are never fabricated. Existing matched results remain unchanged, while ambiguous legacy rows stay conservative rather than being silently expired or declared unpaid.
 
 ## Deployment assumptions
 

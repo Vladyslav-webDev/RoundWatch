@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-
 import type { FacilitatorClient } from '@x402/core/server';
 import type {
    PaymentPayload,
@@ -17,102 +16,125 @@ import {
    decodePaymentRequiredHeader,
    encodePaymentSignatureHeader,
 } from '@x402/core/http';
+import { getTransactionId } from '@x402/avm';
 
+import { ALGORAND_TESTNET, createApp, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, TESTNET_USDC_ASSET_ID } from './app.js';
 import {
-   ALGORAND_TESTNET,
-   createApp,
-   ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
-   TESTNET_USDC_ASSET_ID,
-} from './app.js';
-import { resolveRoundWatchPublicBaseUrl } from './network-config.js';
+   MAINNET_NETWORK_CONFIG,
+   resolveRoundWatchNetwork,
+   resolveRoundWatchPublicBaseUrl,
+} from './network-config.js';
 import {
    AlgorandIndexerClient,
+   matchesWatch,
+   type IndexedBlock,
+   type IndexedWatchTransaction,
    type RoundWatchIndexer,
-   type WatchMatch,
+   type TransactionIdPage,
+   type TransactionPage,
 } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
-import {
-   SettlementReconciler,
-   type IndexedAssetTransfer,
-   type SettlementLookupIndexer,
-} from './roundwatch-reconciler.js';
+import { SettlementReconciler } from './roundwatch-reconciler.js';
+import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 import {
    RoundWatchStore,
    WatchCapacityError,
+   type SettlementIntent,
    type WatchRecord,
    type WatchSpec,
 } from './roundwatch-store.js';
 
-const SENDER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
-const RECEIVER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
-const WRONG_RECEIVER = 'NOT_THE_EXPECTED_RECEIVER';
+const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+const RECEIVER = 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
 const SPEC: WatchSpec = {
-   idempotencyKey: 'invoice-0001',
-   expectedSender: SENDER,
-   expectedReceiver: RECEIVER,
-   assetId: TESTNET_USDC_ASSET_ID,
-   atomicAmount: '2500000',
-   invoiceNote: 'roundwatch:invoice-0001',
+   idempotencyKey: 'invoice-0001', expectedSender: PAYER, expectedReceiver: RECEIVER,
+   assetId: TESTNET_USDC_ASSET_ID, atomicAmount: '2500000', invoiceNote: 'invoice:1',
 };
+const intent = (tx = 'SERVICE_TX'): SettlementIntent => ({
+   expectedTransaction: tx, network: ALGORAND_TESTNET, payer: PAYER,
+   receiver: RECEIVER, assetId: TESTNET_USDC_ASSET_ID, atomicAmount: '1000',
+   firstValid: 90, lastValid: 190,
+});
 
-test('a watch activates only after settlement and duplicate creation is rejected', async () => {
+const SERVICE_RECEIVER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
+const SIGNED_SERVICE_PAYMENT =
+   'gqNzaWfEQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACjdHhuiqRhYW10zQPopGFyY3bEIAhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCo2ZlZQCiZnZko2dlbqx0ZXN0bmV0LXYxLjCiZ2jEIEhjtRiks8hOyBDyLU8QgcsPcfBZp6wg3sYvf3DlCToiomx2zMijc25kxCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKR0eXBlpWF4ZmVypHhhaWTOAJ+XPQ==';
+const SIGNED_SERVICE_TX_ID = getTransactionId(
+   Buffer.from(SIGNED_SERVICE_PAYMENT, 'base64'),
+);
+
+test('TestNet remains the default and the x402 requirement preserves network, asset, amount, and receiver', async () => {
+   assert.equal(resolveRoundWatchNetwork(undefined).name, 'testnet');
+   assert.equal(resolveRoundWatchNetwork('mainnet'), MAINNET_NETWORK_CONFIG);
    const store = new RoundWatchStore(':memory:');
-   const indexer = new FakeIndexer(500);
-   const facilitator = new FakeFacilitator(store, SPEC.idempotencyKey);
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [{ x402Version: 2, scheme: 'exact', network: ALGORAND_TESTNET }],
+               extensions: [], signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+      });
+      const response = await app.request('/spike/watch', {
+         method: 'POST', headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({ idempotencyKey: SPEC.idempotencyKey, expectedSender: PAYER,
+            expectedReceiver: RECEIVER, atomicAmount: SPEC.atomicAmount, invoiceNote: SPEC.invoiceNote }),
+      });
+      assert.equal(response.status, 402);
+      const encoded = response.headers.get('payment-required'); assert.ok(encoded);
+      const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+      assert.equal(required.network, ALGORAND_TESTNET);
+      assert.equal(required.payTo, RECEIVER);
+      assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
+      assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
+      assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
+   } finally { store.close(); }
+});
+
+test('paid x402 middleware persists signed purchase terms and activates from the exact service round', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new MiddlewareIndexer();
+   const facilitator = new MiddlewareFacilitator(store, 'middleware-paid');
    const app = createApp({
-      avmAddress: RECEIVER,
+      avmAddress: SERVICE_RECEIVER,
       facilitatorClient: facilitator,
       store,
       indexer,
+      requireSettlementIntent: true,
    });
 
    try {
-      const requestBody = JSON.stringify({
-         idempotencyKey: SPEC.idempotencyKey,
-         expectedSender: SPEC.expectedSender,
-         expectedReceiver: SPEC.expectedReceiver,
-         atomicAmount: SPEC.atomicAmount,
-         invoiceNote: SPEC.invoiceNote,
-      });
-      const unpaid = await app.request('/spike/watch', {
-         method: 'POST',
-         headers: { 'content-type': 'application/json' },
-         body: requestBody,
-      });
-
-      assert.equal(unpaid.status, 402);
-      assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
-
-      const paymentRequiredHeader = unpaid.headers.get('payment-required');
-      assert.ok(paymentRequiredHeader);
-      const required = decodePaymentRequiredHeader(paymentRequiredHeader);
-      assert.equal(required.accepts[0]?.network, ALGORAND_TESTNET);
-
-      const payload: PaymentPayload = {
-         x402Version: 2,
-         accepted: required.accepts[0]!,
-         payload: { testAuthorization: true },
-      };
-      const paymentHeader = encodePaymentSignatureHeader(payload);
+      const spec = { ...SPEC, idempotencyKey: 'middleware-paid' };
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
       const paid = await app.request('/spike/watch', {
          method: 'POST',
          headers: {
             'content-type': 'application/json',
             'payment-signature': paymentHeader,
          },
-         body: requestBody,
+         body,
       });
 
       assert.equal(paid.status, 200);
       assert.equal(facilitator.settleCalls, 1);
-      assert.deepEqual(facilitator.statesObservedAtSettle, [
-         'settlement_pending',
-      ]);
+      assert.deepEqual(facilitator.statesObservedAtSettle, ['settlement_pending']);
 
-      const active = store.getByIdempotencyKey(SPEC.idempotencyKey);
+      const active = store.getByIdempotencyKey(spec.idempotencyKey);
       assert.equal(active?.state, 'active');
-      assert.equal(active?.serviceTransaction, 'SERVICE_SETTLEMENT_TX');
-      assert.equal(active?.activationRound, 500);
+      assert.equal(active?.expectedServiceTransaction, SIGNED_SERVICE_TX_ID);
+      assert.equal(active?.expectedServicePayer, PAYER);
+      assert.equal(active?.serviceReceiver, SERVICE_RECEIVER);
+      assert.equal(active?.serviceAssetId, TESTNET_USDC_ASSET_ID);
+      assert.equal(active?.serviceAtomicAmount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
+      assert.equal(active?.serviceFirstValid, 100);
+      assert.equal(active?.serviceLastValid, 200);
+      assert.equal(active?.evidenceVersion, 1);
+      assert.equal(active?.activationRound, 150);
+      assert.equal(active?.scanAfterRound, 150);
 
       const duplicate = await app.request('/spike/watch', {
          method: 'POST',
@@ -120,161 +142,115 @@ test('a watch activates only after settlement and duplicate creation is rejected
             'content-type': 'application/json',
             'payment-signature': paymentHeader,
          },
-         body: requestBody,
+         body,
       });
 
       assert.equal(duplicate.status, 409);
-      assert.equal(facilitator.settleCalls, 1);
-      assert.equal(store.listActiveWatches().length, 1);
-
-      const unpaidDemo = await app.request('/demo');
-      assert.equal(unpaidDemo.status, 402);
+      assert.equal(facilitator.settleCalls, 1, 'duplicate must not settle again');
    } finally {
       store.close();
    }
 });
 
-test('failed activation-round lookup leaves a recoverable watch and reconciliation establishes the baseline', async () => {
+test('settled payment survives activation lookup failure and reconciles without a second settlement', async () => {
    const store = new RoundWatchStore(':memory:');
-   const indexer = new FailingRoundIndexer();
-   const facilitator = new FakeFacilitator(store, 'invoice-round-failure');
+   const indexer = new MiddlewareIndexer();
+   indexer.activationFailuresRemaining = 1;
+   const facilitator = new MiddlewareFacilitator(store, 'middleware-recovery');
    const app = createApp({
-      avmAddress: RECEIVER,
+      avmAddress: SERVICE_RECEIVER,
       facilitatorClient: facilitator,
       store,
       indexer,
+      requireSettlementIntent: true,
    });
 
    try {
-      const requestBody = JSON.stringify({
-         idempotencyKey: 'invoice-round-failure',
-         expectedSender: SPEC.expectedSender,
-         expectedReceiver: SPEC.expectedReceiver,
-         atomicAmount: SPEC.atomicAmount,
-         invoiceNote: SPEC.invoiceNote,
-      });
-      const unpaid = await app.request('/spike/watch', {
-         method: 'POST',
-         headers: { 'content-type': 'application/json' },
-         body: requestBody,
-      });
-      const requiredHeader = unpaid.headers.get('payment-required');
-      assert.ok(requiredHeader);
-      const required = decodePaymentRequiredHeader(requiredHeader);
-      const paymentHeader = encodePaymentSignatureHeader({
-         x402Version: 2,
-         accepted: required.accepts[0]!,
-         payload: { testAuthorization: true },
-      });
+      const spec = { ...SPEC, idempotencyKey: 'middleware-recovery' };
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
       const paid = await app.request('/spike/watch', {
          method: 'POST',
          headers: {
             'content-type': 'application/json',
             'payment-signature': paymentHeader,
          },
-         body: requestBody,
+         body,
       });
 
       assert.equal(paid.status, 500);
-      const pending = store.getByIdempotencyKey('invoice-round-failure');
+      assert.equal(facilitator.settleCalls, 1);
+
+      const pending = store.getByIdempotencyKey(spec.idempotencyKey);
       assert.equal(pending?.state, 'settlement_pending');
-      assert.equal(pending?.expectedServiceTransaction, 'SERVICE_SETTLEMENT_TX');
+      assert.equal(pending?.expectedServiceTransaction, SIGNED_SERVICE_TX_ID);
       assert.equal(pending?.scanAfterRound, undefined);
 
-      const reconciler = new SettlementReconciler(
-         store,
-         new StaticSettlementLookup({
-            transaction: 'SERVICE_SETTLEMENT_TX',
-            sender: SENDER,
-            receiver: RECEIVER,
-            assetId: TESTNET_USDC_ASSET_ID,
-            atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
-            round: 600,
-         }),
-         {
-            network: ALGORAND_TESTNET,
-            receiver: RECEIVER,
-            assetId: TESTNET_USDC_ASSET_ID,
-            atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
-            intervalMilliseconds: 5_000,
-         },
-      );
-
-      await reconciler.reconcileOnce();
-      const active = store.getWatch(pending!.id);
-      assert.equal(active?.state, 'active');
-      assert.equal(active?.activationRound, 600);
-      assert.equal(active?.scanAfterRound, 600);
-
-      indexer.round = 605;
-      indexer.match = { transaction: 'FUTURE_AFTER_RECOVERY', round: 604 };
-      await new RoundWatchPoller(store, indexer).runOnce();
-      assert.equal(store.getWatch(pending!.id)?.state, 'matched');
-      assert.equal(
-         store.getWatch(pending!.id)?.matchedTransaction,
-         'FUTURE_AFTER_RECOVERY',
-      );
-   } finally {
-      store.close();
-   }
-});
-
-test('an active watch without a cursor never advances silently', async () => {
-   const store = new RoundWatchStore(':memory:');
-   const indexer = new FakeIndexer(700);
-
-   try {
-      const prepared = store.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'cursorless-active-watch',
-      });
-      store.activateWatch(prepared.watch.id, {
-         transaction: 'CURSORLESS_SERVICE_TX',
+      const reconciler = new SettlementReconciler(store, indexer, {
          network: ALGORAND_TESTNET,
-         payer: SENDER,
+         intervalMilliseconds: 5_000,
+      });
+      await reconciler.reconcileOnce();
+
+      const recovered = store.getByIdempotencyKey(spec.idempotencyKey);
+      assert.equal(recovered?.state, 'active');
+      assert.equal(recovered?.activationRound, 150);
+      assert.equal(recovered?.scanAfterRound, 150);
+      assert.equal(facilitator.settleCalls, 1, 'recovery must not settle again');
+   } finally {
+      store.close();
+   }
+});
+
+test('route-level global and payer admission rejection occur before x402 settlement', async () => {
+   for (const scope of ['global', 'payer'] as const) {
+      const store = new RoundWatchStore(':memory:', {
+         maxOpenWatches: scope === 'global' ? 1 : 10,
+         maxOpenWatchesPerPayer: 1,
       });
 
-      await new RoundWatchPoller(store, indexer).runOnce();
-
-      assert.equal(store.getWatch(prepared.watch.id)?.scanAfterRound, undefined);
-      assert.equal(indexer.findMatchCalls, 0);
-   } finally {
-      store.close();
-   }
-});
-
-test('one watch lookup failure does not starve later watches or advance the failed cursor', async () => {
-   const store = new RoundWatchStore(':memory:');
-
-   try {
-      for (const [key, transaction] of [
-         ['poll-isolation-a', 'POLL_SERVICE_A'],
-         ['poll-isolation-b', 'POLL_SERVICE_B'],
-      ] as const) {
-         const prepared = store.prepareWatch({ ...SPEC, idempotencyKey: key });
-         store.activateWatch(
-            prepared.watch.id,
-            { transaction, network: ALGORAND_TESTNET, payer: SENDER },
-            100,
+      try {
+         store.prepareWatch(
+            { ...SPEC, idempotencyKey: `${scope}-existing` },
+            intent(`${scope.toUpperCase()}_EXISTING_TX`),
          );
+
+         const rejectedKey = `${scope}-route-rejected`;
+         const facilitator = new MiddlewareFacilitator(store, rejectedKey);
+         const app = createApp({
+            avmAddress: SERVICE_RECEIVER,
+            facilitatorClient: facilitator,
+            store,
+            indexer: new MiddlewareIndexer(),
+            requireSettlementIntent: true,
+         });
+         const spec = { ...SPEC, idempotencyKey: rejectedKey };
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         const response = await app.request('/spike/watch', {
+            method: 'POST',
+            headers: {
+               'content-type': 'application/json',
+               'payment-signature': paymentHeader,
+            },
+            body,
+         });
+         const responseBody = await response.json() as { code?: string };
+
+         assert.equal(response.status, 429);
+         assert.equal(
+            responseBody.code,
+            scope === 'global'
+               ? 'global_watch_capacity_exhausted'
+               : 'payer_watch_capacity_exhausted',
+         );
+         assert.equal(facilitator.settleCalls, 0);
+         assert.equal(store.getByIdempotencyKey(rejectedKey), undefined);
+      } finally {
+         store.close();
       }
-
-      const indexer = new FirstLookupFailsIndexer();
-      await new RoundWatchPoller(store, indexer).runOnce();
-
-      assert.equal(indexer.watchIds.length, 2);
-      const failed = store.getWatch(indexer.watchIds[0]!);
-      const processed = store.getWatch(indexer.watchIds[1]!);
-      assert.equal(failed?.state, 'active');
-      assert.equal(failed?.scanAfterRound, 100);
-      assert.equal(processed?.state, 'matched');
-      assert.equal(processed?.matchedTransaction, 'ISOLATED_MATCH');
-   } finally {
-      store.close();
    }
 });
 
-test('MainNet public base URL is required, HTTPS, and normalized', () => {
+test('MainNet public base URL remains required, HTTPS-only, loopback-safe, and normalized', () => {
    assert.throws(
       () => resolveRoundWatchPublicBaseUrl(undefined, 'mainnet'),
       /required on MainNet/,
@@ -301,490 +277,514 @@ test('MainNet public base URL is required, HTTPS, and normalized', () => {
    assert.equal(resolveRoundWatchPublicBaseUrl(undefined, 'testnet'), undefined);
 });
 
-test('SQLite restart recovers an active watch and the poller matches only a later transfer', async () => {
-   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-spike-'));
-   const databasePath = join(directory, 'roundwatch.sqlite');
-   let watchId: string;
+test('exact watch matching rejects every changed field and compares note bytes exactly', () => {
+   const watch = watchRecord({
+      activationRound: 100,
+      expiresAt: '2030-01-01T00:00:00.000Z',
+   });
+   const matching = invoiceTx(101, 1_800_000_000);
 
+   assert.equal(matchesWatch(matching, watch), true);
+   assert.equal(matchesWatch({ ...matching, sender: RECEIVER }, watch), false);
+   assert.equal(matchesWatch({ ...matching, receiver: PAYER }, watch), false);
+   assert.equal(matchesWatch({ ...matching, assetId: TESTNET_USDC_ASSET_ID + 1 }, watch), false);
+   assert.equal(matchesWatch({ ...matching, atomicAmount: '2500001' }, watch), false);
+   assert.equal(
+      matchesWatch({
+         ...matching,
+         note: Buffer.from('different-note', 'utf8').toString('base64'),
+      }, watch),
+      false,
+   );
+
+   const replacementWatch = watchRecord({
+      invoiceNote: '\uFFFD',
+      activationRound: 100,
+      expiresAt: '2030-01-01T00:00:00.000Z',
+   });
+   assert.equal(
+      matchesWatch({
+         ...matching,
+         note: Buffer.from([0xff]).toString('base64'),
+      }, replacementWatch),
+      false,
+      'invalid UTF-8 bytes must not match U+FFFD through replacement decoding',
+   );
+});
+
+test('evidence version 1 is never fabricated without immutable settlement intent', () => {
+   const store = new RoundWatchStore(':memory:');
    try {
-      const firstProcess = new RoundWatchStore(databasePath);
-      const prepared = firstProcess.prepareWatch(SPEC);
-      watchId = prepared.watch.id;
+      const withoutEvidence = store.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'evidence-version-zero',
+      }).watch;
+      const withEvidence = store.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'evidence-version-one',
+      }, intent('EVIDENCE_VERSION_ONE_TX')).watch;
 
-      assert.equal(prepared.watch.state, 'settlement_pending');
-      assert.equal(firstProcess.listActiveWatches().length, 0);
-
-      firstProcess.activateWatch(
-         watchId,
-         {
-            transaction: 'SERVICE_SETTLEMENT_TX',
-            network: ALGORAND_TESTNET,
-            payer: SENDER,
-         },
-         700,
-      );
-      firstProcess.close();
-
-      const restartedProcess = new RoundWatchStore(databasePath);
-
-      try {
-         assert.equal(restartedProcess.getWatch(watchId)?.state, 'active');
-         assert.equal(restartedProcess.listActiveWatches().length, 1);
-
-         const indexer = new FakeIndexer(702);
-         const poller = new RoundWatchPoller(restartedProcess, indexer);
-
-         await poller.runOnce();
-         assert.equal(restartedProcess.getWatch(watchId)?.state, 'active');
-         assert.equal(restartedProcess.getWatch(watchId)?.scanAfterRound, 702);
-
-         indexer.round = 705;
-         indexer.match = {
-            transaction: 'FUTURE_INVOICE_TX',
-            round: 704,
-         };
-         await poller.runOnce();
-
-         const matched = restartedProcess.getWatch(watchId);
-         assert.equal(matched?.state, 'matched');
-         assert.equal(matched?.matchedTransaction, 'FUTURE_INVOICE_TX');
-         assert.equal(matched?.matchedRound, 704);
-      } finally {
-         restartedProcess.close();
-      }
+      assert.equal(withoutEvidence.evidenceVersion, 0);
+      assert.equal(withEvidence.evidenceVersion, 1);
    } finally {
-      rmSync(directory, { recursive: true, force: true });
+      store.close();
    }
 });
 
-test('Algorand Indexer matching checks sender, receiver, ASA, amount, and note', async () => {
-   const correctNote = Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64');
-   const mockFetch: typeof fetch = async input => {
-      const url = new URL(String(input));
-      assert.equal(url.pathname, `/v2/assets/${TESTNET_USDC_ASSET_ID}/transactions`);
-      assert.equal(url.searchParams.get('address'), SENDER);
-      assert.equal(url.searchParams.get('address-role'), 'sender');
-      assert.equal(url.searchParams.get('min-round'), '801');
-      assert.equal(url.searchParams.get('max-round'), '810');
+test('proof-compatible active watch without a cursor remains unresolved and is not scanned', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeIndexer(101);
+   try {
+      const watch = store.prepareWatch({
+         ...SPEC,
+         idempotencyKey: 'cursorless-proof-watch',
+      }, intent('CURSORLESS_PROOF_TX')).watch;
+      store.activateWatch(
+         watch.id,
+         {
+            transaction: 'CURSORLESS_PROOF_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+      );
 
-      return Response.json({
-         transactions: [
-            assetTransferTransaction({
-               id: 'WRONG_RECEIVER',
-               receiver: WRONG_RECEIVER,
-               note: correctNote,
-            }),
-            assetTransferTransaction({
-               id: 'WRONG_AMOUNT',
-               amount: 1,
-               note: correctNote,
-            }),
-            assetTransferTransaction({
-               id: 'MATCHING_TX',
-               note: correctNote,
-            }),
-         ],
-      });
+      await new RoundWatchPoller(store, indexer).runOnce();
+
+      assert.equal(store.getWatch(watch.id)?.state, 'active');
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, undefined);
+      assert.equal(indexer.pageCalls.length, 0);
+   } finally {
+      store.close();
+   }
+});
+
+test('creation deadline is stable and wall-clock reads never terminalize a watch', () => {
+   let now = new Date('2026-09-18T10:00:00.123Z');
+   const store = new RoundWatchStore(':memory:', { watchTtlMilliseconds: 1_000, now: () => now });
+   try {
+      const prepared = store.prepareWatch(SPEC, intent());
+      assert.equal(prepared.watch.expiresAt, '2026-09-18T10:00:01.123Z');
+      store.activateWatch(prepared.watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      now = new Date('2026-09-18T10:01:00.000Z');
+      assert.equal(store.getWatch(prepared.watch.id)?.state, 'active');
+      assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey)?.state, 'active');
+   } finally { store.close(); }
+});
+
+test('chain time is exclusive at the deadline and fractional milliseconds are explicit', () => {
+   const watch = watchRecord({ expiresAt: '2026-09-18T10:00:01.123Z', activationRound: 100 });
+   assert.equal(matchesWatch(invoiceTx(101, 1_789_722_000), watch), true);
+   // Indexer timestamps have second precision: 10:00:01.000 remains before .123.
+   assert.equal(matchesWatch(invoiceTx(101, Date.parse('2026-09-18T10:00:01Z') / 1_000), watch), true);
+   const exact = watchRecord({ expiresAt: '2026-09-18T10:00:01.000Z', activationRound: 100 });
+   assert.equal(matchesWatch(invoiceTx(101, Date.parse(exact.expiresAt!) / 1_000), exact), false);
+   assert.equal(matchesWatch(invoiceTx(101, Date.parse(exact.expiresAt!) / 1_000 + 1), exact), false);
+   assert.equal(matchesWatch(invoiceTx(100, 1), watch), false, 'same settlement round is excluded');
+});
+
+test('an eligible invoice is found after local deadline and a scan spanning the deadline may match', async () => {
+   let now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { watchTtlMilliseconds: 2_000, now: () => now });
+   const indexer = new FakeIndexer(105);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      now = new Date('2026-09-18T10:00:10Z');
+      indexer.block = { round: 105, timestamp: Date.parse('2026-09-18T10:00:03Z') / 1_000 };
+      indexer.pages.push({ transactions: [invoiceTx(101, Date.parse('2026-09-18T10:00:01Z') / 1_000)], currentRound: 105 });
+      await new RoundWatchPoller(store, indexer, 1, 100, () => now).runOnce();
+      assert.equal(store.getWatch(watch.id)?.state, 'matched');
+      assert.equal(store.getWatch(watch.id)?.closingRound, 105);
+   } finally { store.close(); }
+});
+
+test('closing checkpoint is fixed and complete validated coverage alone expires', async () => {
+   let now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { watchTtlMilliseconds: 1_000, now: () => now });
+   const indexer = new FakeIndexer(110);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      now = new Date('2026-09-18T10:00:02Z');
+      indexer.block = { round: 110, timestamp: Date.parse('2026-09-18T10:00:01Z') / 1_000 };
+      indexer.pages.push({ transactions: [], currentRound: 110 });
+      const poller = new RoundWatchPoller(store, indexer, 1, 100, () => now);
+      await poller.runOnce();
+      assert.equal(store.getWatch(watch.id)?.state, 'expired');
+      assert.equal(store.getWatch(watch.id)?.closingRound, 110);
+      indexer.round = 999;
+      assert.equal(store.setClosingRound(watch.id, 999), 110);
+   } finally { store.close(); }
+});
+
+test('closing checkpoint survives restart and provider advancement', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-closing-'));
+   const path = join(directory, 'watch.sqlite');
+   try {
+      const first = new RoundWatchStore(path);
+      const watch = first.prepareWatch(SPEC, intent()).watch;
+      first.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      assert.equal(first.setClosingRound(watch.id, 110), 110);
+      first.close();
+      const restarted = new RoundWatchStore(path);
+      assert.equal(restarted.getWatch(watch.id)?.closingRound, 110);
+      assert.equal(restarted.setClosingRound(watch.id, 999), 110);
+      restarted.close();
+   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('low coverage, pagination failure, and repeated tokens cannot advance or expire', async () => {
+   let now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { watchTtlMilliseconds: 1_000, now: () => now });
+   const indexer = new FakeIndexer(105);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      now = new Date('2026-09-18T10:00:02Z');
+      indexer.block = { round: 105, timestamp: Date.parse('2026-09-18T10:00:02Z') / 1_000 };
+      indexer.pages.push({ transactions: [], currentRound: 104, nextToken: 'more' });
+      const poller = new RoundWatchPoller(store, indexer, 1, 100, () => now);
+      await poller.runOnce();
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 100);
+      assert.equal(store.getWatch(watch.id)?.state, 'active');
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'same' });
+      await poller.runOnce();
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'same' });
+      await poller.runOnce();
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 100);
+   } finally { store.close(); }
+});
+
+test('restart mid-pagination replays the bounded window from the durable cursor', async () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-page-'));
+   const path = join(directory, 'watch.sqlite');
+   try {
+      const first = new RoundWatchStore(path);
+      const watch = first.prepareWatch(SPEC, intent()).watch;
+      first.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      const firstIndexer = new FakeIndexer(105);
+      firstIndexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'page-2' });
+      await new RoundWatchPoller(first, firstIndexer).runOnce();
+      assert.equal(first.getWatch(watch.id)?.scanAfterRound, 100);
+      first.close();
+      const restarted = new RoundWatchStore(path);
+      const secondIndexer = new FakeIndexer(105);
+      secondIndexer.pages.push({ transactions: [invoiceTx(102, 1)], currentRound: 105 });
+      await new RoundWatchPoller(restarted, secondIndexer).runOnce();
+      assert.equal(secondIndexer.pageCalls[0]?.nextToken, undefined);
+      assert.equal(restarted.getWatch(watch.id)?.state, 'matched');
+      restarted.close();
+   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('cursor updates are monotonic and stale competing work cannot overwrite progress', () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      assert.equal(store.advanceScanRound(watch.id, 100, 110), true);
+      assert.equal(store.advanceScanRound(watch.id, 100, 105), false);
+      assert.equal(store.advanceScanRound(watch.id, 110, 109), false);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 110);
+   } finally { store.close(); }
+});
+
+test('Indexer page validation rejects malformed fields, bounds, JSON, and inadequate watermark', async () => {
+   const bodies: Array<Response> = [
+      Response.json({ 'current-round': 10 }),
+      Response.json({ transactions: 'wrong', 'current-round': 10 }),
+      Response.json({ transactions: [{ ...rawTx(11), 'confirmed-round': 99 }], 'current-round': 99 }),
+      Response.json({ transactions: [rawTx(11)], 'current-round': 20, 'next-token': 7 }),
+      Response.json({ transactions: [{ ...rawTx(11), 'round-time': 'bad' }], 'current-round': 20 }),
+      new Response('{', { status: 200, headers: { 'content-type': 'application/json' } }),
+   ];
+   const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 2 });
+   const indexer = new AlgorandIndexerClient('https://indexer.invalid', dispatcher, async () => bodies.shift()!);
+   const watch = watchRecord({});
+   await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /missing transactions/);
+   await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /not an array/);
+   await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /outside/);
+   await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /next-token/);
+   await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /round-time/);
+   await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /valid JSON/);
+});
+
+test('Indexer rejects responses that violate requested filters and disables redirects', async () => {
+   const wrongSender = {
+      ...rawTx(11),
+      sender: RECEIVER,
+   };
+   const wrongAsset = {
+      ...rawTx(11),
+      'asset-transfer-transaction': {
+         receiver: RECEIVER,
+         'asset-id': TESTNET_USDC_ASSET_ID + 1,
+         amount: 1,
+      },
+   };
+   const wrongTransactionId = {
+      ...rawTx(11),
+      id: 'OTHER_TRANSACTION',
+   };
+   const bodies = [
+      Response.json({ transactions: [wrongSender], 'current-round': 20 }),
+      Response.json({ transactions: [wrongAsset], 'current-round': 20 }),
+      Response.json({ transactions: [wrongTransactionId], 'current-round': 20 }),
+   ];
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 1_000,
+      burst: 10,
+      concurrency: 2,
+   });
+   const mockFetch: typeof fetch = async (_input, init) => {
+      assert.equal(init?.redirect, 'error');
+      return bodies.shift()!;
    };
    const indexer = new AlgorandIndexerClient(
       'https://indexer.invalid',
+      dispatcher,
       mockFetch,
    );
 
-   const match = await indexer.findMatch(
-      {
-         id: 'watch-id',
-         state: 'active',
-         ...SPEC,
-         activationRound: 800,
-         scanAfterRound: 800,
-         createdAt: new Date().toISOString(),
-      },
-      801,
-      810,
+   await assert.rejects(
+      indexer.searchWatchPage(watchRecord({}), 10, 20),
+      /sender and asset filters/,
    );
-
-   assert.deepEqual(match, { transaction: 'MATCHING_TX', round: 805 });
+   await assert.rejects(
+      indexer.searchWatchPage(watchRecord({}), 10, 20),
+      /sender and asset filters/,
+   );
+   await assert.rejects(
+      indexer.searchTransactionPage('SERVICE'),
+      /requested transaction ID/,
+   );
 });
 
-test('an active watch expires, remains readable, stops polling, and cannot reactivate', async () => {
-   let now = new Date('2026-09-16T12:00:00.000Z');
-   const store = new RoundWatchStore(':memory:', {
-      watchTtlMilliseconds: 1_000,
-      now: () => now,
+test('dispatcher does not mint tokens when its clock moves backwards', async () => {
+   let clock = 1_000;
+   let starts = 0;
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 100,
+      burst: 1,
+      concurrency: 1,
+      now: () => clock,
    });
-   const indexer = new FakeIndexer(900);
 
+   await dispatcher.dispatch('health', async () => {
+      starts += 1;
+   });
+   assert.equal(starts, 1);
+
+   clock = 900;
+   const pending = dispatcher.dispatch('health', async () => {
+      starts += 1;
+   });
+
+   await new Promise(resolve => setTimeout(resolve, 20));
+   assert.equal(starts, 1);
+
+   clock = 1_000;
+   await new Promise(resolve => setTimeout(resolve, 20));
+   assert.equal(starts, 1);
+
+   clock = 1_010;
+   await new Promise(resolve => setTimeout(resolve, 20));
+   assert.equal(starts, 2);
+   await pending;
+});
+
+test('shared dispatcher caps aggregate concurrency and finite restart burst', async () => {
+   const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 20, burst: 2, concurrency: 2 });
+   let active = 0; let peak = 0; const starts: number[] = []; const began = Date.now();
+   const work = Array.from({ length: 6 }, (_, i) => dispatcher.dispatch(i % 2 ? 'scan-page' : 'reconciliation', async () => {
+      starts.push(Date.now() - began); active += 1; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 15)); active -= 1;
+   }));
+   await Promise.all(work);
+   assert.ok(peak <= 2);
+   assert.equal(starts.filter(value => value < 20).length, 2);
+   assert.equal(dispatcher.snapshot().requests['scan-page'], 3);
+   assert.equal(dispatcher.snapshot().requests.reconciliation, 3);
+});
+
+test('health, activation, checkpoint, scan pages, and absence pages all consume shared capacity', async () => {
+   const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 2 });
+   const client = new AlgorandIndexerClient('https://indexer.invalid', dispatcher, async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/health') return Response.json({ round: 20 });
+      if (url.pathname === '/v2/blocks/20') return Response.json({ round: 20, timestamp: 1 });
+      if (url.pathname === '/v2/transactions/SERVICE') return Response.json({ transaction: { ...rawTx(10), id: 'SERVICE' } });
+      return Response.json({ transactions: [], 'current-round': 20 });
+   });
+   await client.getCurrentRound('health');
+   await client.lookupAssetTransfer('SERVICE', 'activation');
+   await client.getBlock(20);
+   await client.searchWatchPage(watchRecord({}), 10, 20);
+   await client.searchTransactionPage('SERVICE');
+   assert.deepEqual(dispatcher.snapshot().requests, {
+      health: 1, activation: 1, checkpoint: 1, 'scan-page': 1, 'absence-proof': 1,
+   });
+});
+
+test('each pagination page consumes a separate dispatcher credit', async () => {
+   const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+   let calls = 0;
+   const client = new AlgorandIndexerClient('https://indexer.invalid', dispatcher, async () => {
+      calls += 1;
+      return Response.json({ transactions: [], 'current-round': 20, ...(calls === 1 ? { 'next-token': 'p2' } : {}) });
+   });
+   const first = await client.searchWatchPage(watchRecord({}), 10, 20);
+   assert.equal(first.nextToken, 'p2');
+   await client.searchWatchPage(watchRecord({}), 10, 20, first.nextToken);
+   assert.equal(dispatcher.snapshot().requests['scan-page'], 2);
+});
+
+test('50 watches each receive at most one page turn in one fair sweep', async () => {
+   const store = new RoundWatchStore(':memory:', { maxOpenWatches: 50, maxOpenWatchesPerPayer: 50 });
+   const indexer = new FakeIndexer(101);
    try {
-      const prepared = store.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'expiry-active-watch',
-      });
-      store.activateWatch(
-         prepared.watch.id,
-         { transaction: 'EXPIRY_SERVICE_TX', network: ALGORAND_TESTNET },
-         800,
-      );
+      for (let i = 0; i < 50; i += 1) {
+         const tx = `SERVICE_${i}`;
+         const watch = store.prepareWatch({ ...SPEC, idempotencyKey: `load-watch-${i}` }, intent(tx)).watch;
+         store.activateWatch(watch.id, { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      }
 
+      // The first watch has another page. It must yield after that first page
+      // while every later watch still receives its own turn in the same sweep.
+      indexer.pages.push({ transactions: [], currentRound: 101, nextToken: 'busy-page-2' });
+      for (let i = 1; i < 50; i += 1) {
+         indexer.pages.push({ transactions: [], currentRound: 101 });
+      }
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+
+      assert.equal(indexer.pageCalls.length, 50);
       assert.equal(
-         store.getWatch(prepared.watch.id)?.expiresAt,
-         '2026-09-16T12:00:01.000Z',
+         store.listActiveWatches().filter(watch => watch.scanAfterRound === 101).length,
+         49,
+      );
+      assert.equal(
+         store.listActiveWatches().filter(watch => watch.scanAfterRound === 100).length,
+         1,
       );
 
-      now = new Date('2026-09-16T12:00:01.001Z');
+      // Only the unfinished continuation needs another transaction page.
+      indexer.pages.push({ transactions: [], currentRound: 101 });
+      await poller.runOnce();
+
+      assert.equal(indexer.pageCalls.length, 51);
+      assert.equal(indexer.pageCalls.at(-1)?.nextToken, 'busy-page-2');
+      assert.equal(
+         store.listActiveWatches().every(watch => watch.scanAfterRound === 101),
+         true,
+      );
+   } finally { store.close(); }
+});
+
+test('one watch page failure does not block later watches in the same fair sweep', async () => {
+   const store = new RoundWatchStore(':memory:', { maxOpenWatches: 2, maxOpenWatchesPerPayer: 2 });
+   const indexer = new FakeIndexer(101);
+   try {
+      for (let i = 0; i < 2; i += 1) {
+         const tx = `FAILURE_ISOLATION_SERVICE_${i}`;
+         const watch = store.prepareWatch(
+            { ...SPEC, idempotencyKey: `failure-isolation-${i}` },
+            intent(tx),
+         ).watch;
+         store.activateWatch(
+            watch.id,
+            { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+            100,
+         );
+      }
+
+      indexer.failPageCalls.add(0);
+      indexer.pages.push({ transactions: [], currentRound: 101 });
+
       await new RoundWatchPoller(store, indexer).runOnce();
 
-      assert.equal(indexer.findMatchCalls, 0);
-      assert.equal(store.getWatch(prepared.watch.id)?.state, 'expired');
-      assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(
+         store.listActiveWatches().filter(watch => watch.scanAfterRound === 100).length,
+         1,
+      );
+      assert.equal(
+         store.listActiveWatches().filter(watch => watch.scanAfterRound === 101).length,
+         1,
+      );
+   } finally { store.close(); }
+});
+
+test('capacity and transaction uniqueness reject before creating another obligation', () => {
+   const store = new RoundWatchStore(':memory:', { maxOpenWatches: 1, maxOpenWatchesPerPayer: 1 });
+   try {
+      const first = store.prepareWatch(SPEC, intent());
+      assert.throws(() => store.prepareWatch({ ...SPEC, idempotencyKey: 'invoice-0002' }, intent('OTHER')), WatchCapacityError);
+      assert.equal(store.prepareWatch(SPEC, intent()).watch.id, first.watch.id);
+   } finally { store.close(); }
+});
+
+test('one signed service transaction cannot reserve watches under different idempotency keys', () => {
+   const store = new RoundWatchStore(':memory:', { maxOpenWatches: 10, maxOpenWatchesPerPayer: 10 });
+   try {
+      store.prepareWatch(SPEC, intent('UNIQUE_SERVICE'));
       assert.throws(
-         () =>
-            store.activateWatch(
-               prepared.watch.id,
-               { transaction: 'EXPIRY_SERVICE_TX', network: ALGORAND_TESTNET },
-               901,
-            ),
-         /expired/,
+         () => store.prepareWatch({ ...SPEC, idempotencyKey: 'different-key' }, intent('UNIQUE_SERVICE')),
+         /UNIQUE constraint failed/,
       );
-   } finally {
-      store.close();
-   }
+      assert.equal(store.listSettlementReconciliationCandidates().length, 1);
+   } finally { store.close(); }
 });
 
-test('a matched watch remains matched after its expiry time', () => {
-   let now = new Date('2026-09-16T12:10:00.000Z');
-   const store = new RoundWatchStore(':memory:', {
-      watchTtlMilliseconds: 1_000,
-      now: () => now,
-   });
-
+test('concurrent admission attempts cannot exceed the transactional global limit', async () => {
+   const store = new RoundWatchStore(':memory:', { maxOpenWatches: 3, maxOpenWatchesPerPayer: 10 });
    try {
-      const prepared = store.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'expiry-matched-watch',
-      });
-      store.activateWatch(
-         prepared.watch.id,
-         { transaction: 'MATCHED_SERVICE_TX', network: ALGORAND_TESTNET },
-         900,
-      );
-      store.markMatched(prepared.watch.id, 'MATCHED_INVOICE_TX', 901);
-
-      now = new Date('2026-09-16T12:10:01.001Z');
-      store.expireOpenWatches();
-
-      const matched = store.getWatch(prepared.watch.id);
-      assert.equal(matched?.state, 'matched');
-      assert.equal(matched?.matchedTransaction, 'MATCHED_INVOICE_TX');
-   } finally {
-      store.close();
-   }
+      const attempts = await Promise.allSettled(Array.from({ length: 10 }, (_, i) =>
+         Promise.resolve().then(() => store.prepareWatch(
+            { ...SPEC, idempotencyKey: `concurrent-${i}` }, intent(`CONCURRENT_${i}`),
+         )),
+      ));
+      assert.equal(attempts.filter(result => result.status === 'fulfilled').length, 3);
+      assert.equal(store.listSettlementReconciliationCandidates().length, 3);
+   } finally { store.close(); }
 });
 
-test('persisted expiry survives a SQLite restart', () => {
-   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-expiry-'));
-   const databasePath = join(directory, 'roundwatch.sqlite');
-   let now = new Date('2026-09-16T12:20:00.000Z');
-   let watchId: string;
-
-   try {
-      const first = new RoundWatchStore(databasePath, {
-         watchTtlMilliseconds: 1_000,
-         now: () => now,
-      });
-      const prepared = first.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'restart-expiry-watch',
-      });
-      watchId = prepared.watch.id;
-      first.activateWatch(
-         watchId,
-         { transaction: 'RESTART_EXPIRY_TX', network: ALGORAND_TESTNET },
-         950,
-      );
-      first.close();
-
-      now = new Date('2026-09-16T12:20:01.001Z');
-      const restarted = new RoundWatchStore(databasePath, {
-         watchTtlMilliseconds: 1_000,
-         now: () => now,
-      });
-
-      try {
-         assert.equal(restarted.getWatch(watchId)?.state, 'expired');
-         assert.equal(restarted.listActiveWatches().length, 0);
-      } finally {
-         restarted.close();
-      }
-   } finally {
-      rmSync(directory, { recursive: true, force: true });
-   }
-});
-
-test('global capacity rejects before settlement and does not insert an obligation', async () => {
-   const store = new RoundWatchStore(':memory:', {
-      maxOpenWatches: 1,
-      maxOpenWatchesPerPayer: 1,
-   });
-   store.prepareWatch({ ...SPEC, idempotencyKey: 'capacity-existing' });
-   const facilitator = new FakeFacilitator(store, 'capacity-rejected');
-   const app = createApp({
-      avmAddress: RECEIVER,
-      facilitatorClient: facilitator,
-      store,
-      indexer: new FakeIndexer(1_000),
-   });
-
-   try {
-      const response = await sendSyntheticPaidWatch(app, {
-         ...SPEC,
-         idempotencyKey: 'capacity-rejected',
-      });
-      const body = await response.json() as { code?: string };
-
-      assert.equal(response.status, 429);
-      assert.equal(body.code, 'global_watch_capacity_exhausted');
-      assert.equal(facilitator.settleCalls, 0);
-      assert.equal(store.getByIdempotencyKey('capacity-rejected'), undefined);
-   } finally {
-      store.close();
-   }
-});
-
-test('per-payer capacity is enforced from persisted settlement identity', () => {
-   const store = new RoundWatchStore(':memory:', {
-      maxOpenWatches: 10,
-      maxOpenWatchesPerPayer: 1,
-   });
-
-   try {
-      store.prepareWatch(
-         { ...SPEC, idempotencyKey: 'payer-capacity-a' },
-         {
-            expectedTransaction: 'PAYER_CAPACITY_TX_A',
-            network: ALGORAND_TESTNET,
-            payer: SENDER,
-         },
-      );
-
-      assert.throws(
-         () =>
-            store.prepareWatch(
-               { ...SPEC, idempotencyKey: 'payer-capacity-b' },
-               {
-                  expectedTransaction: 'PAYER_CAPACITY_TX_B',
-                  network: ALGORAND_TESTNET,
-                  payer: SENDER,
-               },
-            ),
-         (error: unknown) =>
-            error instanceof WatchCapacityError && error.scope === 'payer',
-      );
-
-      assert.equal(store.getByIdempotencyKey('payer-capacity-b'), undefined);
-   } finally {
-      store.close();
-   }
-});
-
-test('per-payer capacity response prevents x402 settlement', async () => {
-   const store = new PayerCapacityRejectingStore(':memory:');
-   const facilitator = new FakeFacilitator(store, 'payer-route-rejected');
-   const app = createApp({
-      avmAddress: RECEIVER,
-      facilitatorClient: facilitator,
-      store,
-      indexer: new FakeIndexer(1_100),
-   });
-
-   try {
-      const response = await sendSyntheticPaidWatch(app, {
-         ...SPEC,
-         idempotencyKey: 'payer-route-rejected',
-      });
-      const body = await response.json() as { code?: string };
-
-      assert.equal(response.status, 429);
-      assert.equal(body.code, 'payer_watch_capacity_exhausted');
-      assert.equal(facilitator.settleCalls, 0);
-   } finally {
-      store.close();
-   }
-});
-
-test('expired obligations release global and per-payer capacity', () => {
-   let now = new Date('2026-09-16T12:30:00.000Z');
-   const store = new RoundWatchStore(':memory:', {
-      watchTtlMilliseconds: 1_000,
-      maxOpenWatches: 1,
-      maxOpenWatchesPerPayer: 1,
-      now: () => now,
-   });
-
-   try {
-      const first = store.prepareWatch(
-         { ...SPEC, idempotencyKey: 'capacity-expiry-a' },
-         {
-            expectedTransaction: 'CAPACITY_EXPIRY_TX_A',
-            network: ALGORAND_TESTNET,
-            payer: SENDER,
-         },
-      );
-
-      now = new Date('2026-09-16T12:30:01.001Z');
-      const second = store.prepareWatch(
-         { ...SPEC, idempotencyKey: 'capacity-expiry-b' },
-         {
-            expectedTransaction: 'CAPACITY_EXPIRY_TX_B',
-            network: ALGORAND_TESTNET,
-            payer: SENDER,
-         },
-      );
-
-      assert.equal(store.getWatch(first.watch.id)?.state, 'expired');
-      assert.equal(second.created, true);
-      assert.equal(second.watch.state, 'settlement_pending');
-   } finally {
-      store.close();
-   }
-});
-
-test('only non-terminal settlement_unknown obligations count against capacity', () => {
-   const retryableStore = new RoundWatchStore(':memory:', {
-      maxOpenWatches: 1,
-   });
-
-   try {
-      const retryable = retryableStore.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'unknown-retryable',
-      });
-      retryableStore.markSettlementUnknown(retryable.watch.id);
-      assert.throws(
-         () =>
-            retryableStore.prepareWatch({
-               ...SPEC,
-               idempotencyKey: 'unknown-blocked',
-            }),
-         (error: unknown) =>
-            error instanceof WatchCapacityError && error.scope === 'global',
-      );
-   } finally {
-      retryableStore.close();
-   }
-
-   const terminalStore = new RoundWatchStore(':memory:', {
-      maxOpenWatches: 1,
-   });
-
-   try {
-      const terminal = terminalStore.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'unknown-terminal',
-      });
-      terminalStore.markSettlementInvalid(terminal.watch.id);
-      const next = terminalStore.prepareWatch({
-         ...SPEC,
-         idempotencyKey: 'unknown-terminal-released',
-      });
-
-      assert.equal(next.created, true);
-   } finally {
-      terminalStore.close();
-   }
-});
-
-test('legacy SQLite schema migrates with a full TTL grace for unfinished rows', () => {
+test('legacy migration is idempotent and does not fabricate proof or alter matched state', () => {
    const directory = mkdtempSync(join(tmpdir(), 'roundwatch-legacy-'));
-   const databasePath = join(directory, 'roundwatch.sqlite');
-   const legacy = new DatabaseSync(databasePath);
-   const now = new Date('2026-09-16T13:00:00.000Z');
-
+   const path = join(directory, 'legacy.sqlite');
    try {
-      legacy.exec(`
-         CREATE TABLE roundwatch_watches (
-            id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            state TEXT NOT NULL CHECK (
-               state IN (
-                  'settlement_pending',
-                  'active',
-                  'matched',
-                  'settlement_unknown'
-               )
-            ),
-            expected_sender TEXT NOT NULL,
-            expected_receiver TEXT NOT NULL,
-            asset_id INTEGER NOT NULL,
-            atomic_amount TEXT NOT NULL,
-            invoice_note TEXT,
-            service_transaction TEXT UNIQUE,
-            service_network TEXT,
-            service_payer TEXT,
-            activation_round INTEGER,
-            activated_at TEXT,
-            scan_after_round INTEGER,
-            created_at TEXT NOT NULL,
-            matched_transaction TEXT,
-            matched_round INTEGER
-         );
-
-         INSERT INTO roundwatch_watches (
-            id, idempotency_key, state, expected_sender, expected_receiver,
-            asset_id, atomic_amount, service_transaction, service_network,
-            activation_round, activated_at, scan_after_round, created_at
-         ) VALUES (
-            'legacy-active', 'legacy-active-key', 'active',
-            '${SENDER}', '${RECEIVER}', ${TESTNET_USDC_ASSET_ID}, '1',
-            'LEGACY_SERVICE_TX', '${ALGORAND_TESTNET}', 100,
-            '2026-09-15T00:00:00.000Z', 100, '2026-09-15T00:00:00.000Z'
-         );
-
-         INSERT INTO roundwatch_watches (
-            id, idempotency_key, state, expected_sender, expected_receiver,
-            asset_id, atomic_amount, service_transaction, service_network,
-            activation_round, activated_at, scan_after_round, created_at,
-            matched_transaction, matched_round
-         ) VALUES (
-            'legacy-matched', 'legacy-matched-key', 'matched',
-            '${SENDER}', '${RECEIVER}', ${TESTNET_USDC_ASSET_ID}, '1',
-            'LEGACY_MATCHED_SERVICE_TX', '${ALGORAND_TESTNET}', 100,
-            '2026-09-15T00:00:00.000Z', 101, '2026-09-15T00:00:00.000Z',
-            'LEGACY_INVOICE_TX', 101
-         );
-      `);
-   } finally {
-      legacy.close();
-   }
-
-   try {
-      const store = new RoundWatchStore(databasePath, {
-         watchTtlMilliseconds: 1_800_000,
-         now: () => now,
-      });
-
-      try {
-         const active = store.getWatch('legacy-active');
-         const matched = store.getWatch('legacy-matched');
-
-         assert.equal(active?.state, 'active');
-         assert.equal(active?.expiresAt, '2026-09-16T13:30:00.000Z');
-         assert.equal(matched?.state, 'matched');
-         assert.equal(matched?.expiresAt, undefined);
-         assert.equal(matched?.matchedTransaction, 'LEGACY_INVOICE_TX');
-      } finally {
+      const db = new DatabaseSync(path);
+      db.exec(`CREATE TABLE roundwatch_watches (
+         id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
+         expected_sender TEXT NOT NULL, expected_receiver TEXT NOT NULL, asset_id INTEGER NOT NULL,
+         atomic_amount TEXT NOT NULL, invoice_note TEXT, service_transaction TEXT UNIQUE,
+         service_network TEXT, service_payer TEXT, activation_round INTEGER, activated_at TEXT,
+         scan_after_round INTEGER, created_at TEXT NOT NULL, matched_transaction TEXT, matched_round INTEGER
+      );`);
+      db.prepare(`INSERT INTO roundwatch_watches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+         'legacy-match', 'legacy-key', 'matched', PAYER, RECEIVER, TESTNET_USDC_ASSET_ID, '1', null,
+         'service', ALGORAND_TESTNET, PAYER, 10, '2026-01-01T00:00:00Z', 10,
+         '2026-01-01T00:00:00Z', 'invoice', 11,
+      );
+      db.close();
+      for (let i = 0; i < 2; i += 1) {
+         const store = new RoundWatchStore(path);
+         const legacy = store.getWatch('legacy-match');
+         assert.equal(legacy?.state, 'matched');
+         assert.equal(legacy?.evidenceVersion, 0);
+         assert.equal(legacy?.expiresAt, undefined);
+         assert.equal(legacy?.closingRound, undefined);
          store.close();
       }
-   } finally {
-      rmSync(directory, { recursive: true, force: true });
-   }
+   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-async function sendSyntheticPaidWatch(
+async function createSyntheticPaidRequest(
    app: ReturnType<typeof createApp>,
    spec: WatchSpec,
-): Promise<Response> {
-   const requestBody = JSON.stringify({
+): Promise<{ paymentHeader: string; body: string }> {
+   const body = JSON.stringify({
       idempotencyKey: spec.idempotencyKey,
       expectedSender: spec.expectedSender,
       expectedReceiver: spec.expectedReceiver,
@@ -794,35 +794,49 @@ async function sendSyntheticPaidWatch(
    const unpaid = await app.request('/spike/watch', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: requestBody,
+      body,
    });
-   const requiredHeader = unpaid.headers.get('payment-required');
+
    assert.equal(unpaid.status, 402);
-   assert.ok(requiredHeader);
-   const required = decodePaymentRequiredHeader(requiredHeader);
-   const paymentHeader = encodePaymentSignatureHeader({
+   const encoded = unpaid.headers.get('payment-required');
+   assert.ok(encoded);
+   const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+   const payload: PaymentPayload = {
       x402Version: 2,
-      accepted: required.accepts[0]!,
-      payload: { testAuthorization: true },
-   });
-
-   return app.request('/spike/watch', {
-      method: 'POST',
-      headers: {
-         'content-type': 'application/json',
-         'payment-signature': paymentHeader,
+      accepted: required,
+      payload: {
+         paymentGroup: [SIGNED_SERVICE_PAYMENT],
+         paymentIndex: 0,
       },
-      body: requestBody,
-   });
+   };
+
+   return {
+      paymentHeader: encodePaymentSignatureHeader(payload),
+      body,
+   };
 }
 
-class PayerCapacityRejectingStore extends RoundWatchStore {
-   override prepareWatch(): { watch: WatchRecord; created: boolean } {
-      throw new WatchCapacityError('payer');
+function paymentTransactionId(payload: PaymentPayload): string {
+   const exact = payload.payload as unknown as {
+      paymentGroup?: unknown;
+      paymentIndex?: unknown;
+   };
+   if (
+      !Array.isArray(exact.paymentGroup) ||
+      !exact.paymentGroup.every(item => typeof item === 'string') ||
+      !Number.isSafeInteger(exact.paymentIndex) ||
+      (exact.paymentIndex as number) < 0 ||
+      (exact.paymentIndex as number) >= exact.paymentGroup.length
+   ) {
+      throw new Error('synthetic facilitator received malformed payment payload');
    }
+
+   return getTransactionId(
+      Buffer.from(exact.paymentGroup[exact.paymentIndex as number] as string, 'base64'),
+   );
 }
 
-class FakeFacilitator implements FacilitatorClient {
+class MiddlewareFacilitator implements FacilitatorClient {
    settleCalls = 0;
    readonly statesObservedAtSettle: Array<WatchRecord['state'] | undefined> = [];
 
@@ -835,11 +849,11 @@ class FakeFacilitator implements FacilitatorClient {
       _paymentPayload: PaymentPayload,
       _paymentRequirements: PaymentRequirements,
    ): Promise<VerifyResponse> {
-      return { isValid: true, payer: SENDER };
+      return { isValid: true, payer: PAYER };
    }
 
    async settle(
-      _paymentPayload: PaymentPayload,
+      paymentPayload: PaymentPayload,
       _paymentRequirements: PaymentRequirements,
    ): Promise<SettleResponse> {
       this.settleCalls += 1;
@@ -849,8 +863,8 @@ class FakeFacilitator implements FacilitatorClient {
 
       return {
          success: true,
-         payer: SENDER,
-         transaction: 'SERVICE_SETTLEMENT_TX',
+         payer: PAYER,
+         transaction: paymentTransactionId(paymentPayload),
          network: ALGORAND_TESTNET,
       };
    }
@@ -870,84 +884,78 @@ class FakeFacilitator implements FacilitatorClient {
    }
 }
 
+class MiddlewareIndexer implements RoundWatchIndexer {
+   activationFailuresRemaining = 0;
+   readonly lookupPurposes: string[] = [];
+
+   async getCurrentRound(): Promise<number> {
+      return 201;
+   }
+
+   async lookupAssetTransfer(
+      transactionId: string,
+      purpose = 'reconciliation',
+   ) {
+      this.lookupPurposes.push(purpose);
+      if (purpose === 'activation' && this.activationFailuresRemaining > 0) {
+         this.activationFailuresRemaining -= 1;
+         throw new Error('synthetic activation lookup failure');
+      }
+
+      return {
+         transaction: transactionId,
+         sender: PAYER,
+         receiver: SERVICE_RECEIVER,
+         assetId: TESTNET_USDC_ASSET_ID,
+         atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+         round: 150,
+      };
+   }
+
+   async getBlock(round: number): Promise<IndexedBlock> {
+      return { round, timestamp: 1_800_000_000 };
+   }
+
+   async searchWatchPage(): Promise<TransactionPage> {
+      return { transactions: [], currentRound: 201 };
+   }
+
+   async searchTransactionPage(): Promise<TransactionIdPage> {
+      return { transactions: [], currentRound: 201 };
+   }
+}
+
 class FakeIndexer implements RoundWatchIndexer {
-   match?: WatchMatch;
-   findMatchCalls = 0;
-
-   constructor(public round: number) {}
-
-   async getCurrentRound(): Promise<number> {
-      return this.round;
+   pages: TransactionPage[] = [];
+   pageCalls: Array<{ min: number; max: number; nextToken?: string }> = [];
+   failPageCalls = new Set<number>();
+   block: IndexedBlock;
+   constructor(public round: number) { this.block = { round, timestamp: 0 }; }
+   async getCurrentRound(): Promise<number> { return this.round; }
+   async lookupAssetTransfer(): Promise<undefined> { return undefined; }
+   async getBlock(): Promise<IndexedBlock> { return this.block; }
+   async searchWatchPage(_watch: WatchRecord, min: number, max: number, nextToken?: string): Promise<TransactionPage> {
+      const callIndex = this.pageCalls.length;
+      this.pageCalls.push({ min, max, ...(nextToken ? { nextToken } : {}) });
+      if (this.failPageCalls.has(callIndex)) throw new Error('synthetic page failure');
+      const page = this.pages.shift(); if (!page) throw new Error('no fake page'); return page;
    }
-
-   async findMatch(
-      _watch: WatchRecord,
-      _minRound: number,
-      _maxRound: number,
-   ): Promise<WatchMatch | undefined> {
-      this.findMatchCalls += 1;
-      return this.match;
-   }
+   async searchTransactionPage(): Promise<TransactionIdPage> { return { transactions: [], currentRound: this.round }; }
 }
 
-class FailingRoundIndexer extends FakeIndexer {
-   private shouldFail = true;
-
-   constructor() {
-      super(0);
-   }
-
-   override async getCurrentRound(): Promise<number> {
-      if (this.shouldFail) {
-         this.shouldFail = false;
-         throw new Error('Indexer round unavailable');
-      }
-
-      return this.round;
-   }
-}
-
-class StaticSettlementLookup implements SettlementLookupIndexer {
-   constructor(private readonly transfer: IndexedAssetTransfer) {}
-
-   async lookupAssetTransfer(): Promise<IndexedAssetTransfer> {
-      return this.transfer;
-   }
-}
-
-class FirstLookupFailsIndexer implements RoundWatchIndexer {
-   readonly watchIds: string[] = [];
-
-   async getCurrentRound(): Promise<number> {
-      return 105;
-   }
-
-   async findMatch(watch: WatchRecord): Promise<WatchMatch | undefined> {
-      this.watchIds.push(watch.id);
-
-      if (this.watchIds.length === 1) {
-         throw new Error('Synthetic per-watch lookup failure');
-      }
-
-      return { transaction: 'ISOLATED_MATCH', round: 104 };
-   }
-}
-
-function assetTransferTransaction(options: {
-   id: string;
-   receiver?: string;
-   amount?: number;
-   note: string;
-}): Record<string, unknown> {
+function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
    return {
-      id: options.id,
-      sender: SENDER,
-      note: options.note,
-      'confirmed-round': 805,
-      'asset-transfer-transaction': {
-         amount: options.amount ?? Number(SPEC.atomicAmount),
-         receiver: options.receiver ?? RECEIVER,
-         'asset-id': TESTNET_USDC_ASSET_ID,
-      },
+      ...SPEC, id: 'watch', state: 'active', activationRound: 100, scanAfterRound: 100,
+      createdAt: '2026-09-18T09:30:00Z', expiresAt: '2026-09-18T10:00:00Z',
+      evidenceVersion: 1, reconciliationAttempts: 0, ...overrides,
    };
+}
+function invoiceTx(round: number, roundTime: number): IndexedWatchTransaction {
+   return { transaction: `INVOICE_${round}`, sender: PAYER, receiver: RECEIVER,
+      assetId: TESTNET_USDC_ASSET_ID, atomicAmount: SPEC.atomicAmount, round, roundTime,
+      note: Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64') };
+}
+function rawTx(round: number): Record<string, unknown> {
+   return { id: 'TX', sender: PAYER, 'confirmed-round': round, 'round-time': 1,
+      'asset-transfer-transaction': { receiver: RECEIVER, 'asset-id': TESTNET_USDC_ASSET_ID, amount: 1 } };
 }
