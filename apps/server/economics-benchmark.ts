@@ -149,71 +149,81 @@ const PROFILES = selectProfiles(
 );
 const results: ScenarioResult[] = [];
 
-console.log(
-   [
-      'RoundWatch Economics Benchmark v2',
-      `query variants: ${QUERY_VARIANTS.join(', ')}`,
-      `profiles: ${PROFILES.map(profile => profile.name).join(', ')}`,
-      'A=sender; B=sender+amount; C=B+note-prefix when present; D=receiver+amount+note-prefix when present',
-      `target coverage: ${TARGET_ROUNDS} rounds / watch`,
-      `scan window: ${ROUND_WINDOW} rounds`,
-      `synthetic dispatcher: ${SYNTHETIC_RPS}/s burst=${SYNTHETIC_BURST} concurrency=${DISPATCH_CONCURRENCY}`,
-      'This is a structural-work benchmark, not a production latency/SLA benchmark.',
-   ].join('\n'),
-);
+// The production dispatcher intentionally unrefs its refill timer so an idle
+// server can shut down cleanly. A standalone benchmark has no HTTP server or
+// other ref'ed handle, so Node may otherwise exit while top-level await is
+// waiting for the next rate-limit token.
+const benchmarkKeepAlive = setInterval(() => {}, 60_000);
 
-for (const queryVariant of QUERY_VARIANTS) {
-   for (const profile of PROFILES) {
-      for (const activeWatches of ACTIVE_WATCH_COUNTS) {
-         const result = await runScenario(
-            queryVariant,
-            profile,
-            activeWatches,
-         );
-         results.push(result);
-         console.log(
-            `BENCH_RESULT ${JSON.stringify(result)}`,
-         );
+try {
+   console.log(
+      [
+         'RoundWatch Economics Benchmark v2',
+         `query variants: ${QUERY_VARIANTS.join(', ')}`,
+         `profiles: ${PROFILES.map(profile => profile.name).join(', ')}`,
+         'A=sender; B=sender+amount; C=B+note-prefix when present; D=receiver+amount+note-prefix when present',
+         `target coverage: ${TARGET_ROUNDS} rounds / watch`,
+         `scan window: ${ROUND_WINDOW} rounds`,
+         `synthetic dispatcher: ${SYNTHETIC_RPS}/s burst=${SYNTHETIC_BURST} concurrency=${DISPATCH_CONCURRENCY}`,
+         'This is a structural-work benchmark, not a production latency/SLA benchmark.',
+      ].join('\n'),
+   );
+
+   for (const queryVariant of QUERY_VARIANTS) {
+      for (const profile of PROFILES) {
+         for (const activeWatches of ACTIVE_WATCH_COUNTS) {
+            const result = await runScenario(
+               queryVariant,
+               profile,
+               activeWatches,
+            );
+            results.push(result);
+            console.log(
+               `BENCH_RESULT ${JSON.stringify(result)}`,
+            );
+         }
       }
    }
+
+   console.table(
+      results.map(result => ({
+         variant: result.queryVariant,
+         profile: result.profile,
+         watches: result.activeWatches,
+         sweeps: result.sweeps,
+         'req/watch': round(result.requestsPerWatch.mean),
+         'pages/watch': round(result.pagesPerWatch.mean),
+         'tx/watch': round(result.transactionsReturnedPerWatch.mean),
+         'MB/watch': round(
+            result.responseBytesPerWatch.mean / (1024 * 1024),
+            3,
+         ),
+         'covered/watch': round(result.roundsCoveredPerWatch.mean),
+         'elapsed ms': round(result.elapsedMs),
+         'CPU ms': round(result.cpuUserMs + result.cpuSystemMs),
+         'peak RSS MB': round(result.peakRssBytes / (1024 * 1024), 1),
+      })),
+   );
+
+   console.log(
+      'BENCH_SUMMARY ' +
+         JSON.stringify({
+            queryVariants: QUERY_VARIANTS,
+            targetRounds: TARGET_ROUNDS,
+            roundWindow: ROUND_WINDOW,
+            quietTransactionsPerWindow: QUIET_TX_PER_WINDOW,
+            hotTransactionsPerWindow: HOT_TX_PER_WINDOW,
+            syntheticDispatcher: {
+               requestsPerSecond: SYNTHETIC_RPS,
+               burst: SYNTHETIC_BURST,
+               concurrency: DISPATCH_CONCURRENCY,
+            },
+            results,
+         }),
+   );
+} finally {
+   clearInterval(benchmarkKeepAlive);
 }
-
-console.table(
-   results.map(result => ({
-      variant: result.queryVariant,
-      profile: result.profile,
-      watches: result.activeWatches,
-      sweeps: result.sweeps,
-      'req/watch': round(result.requestsPerWatch.mean),
-      'pages/watch': round(result.pagesPerWatch.mean),
-      'tx/watch': round(result.transactionsReturnedPerWatch.mean),
-      'MB/watch': round(
-         result.responseBytesPerWatch.mean / (1024 * 1024),
-         3,
-      ),
-      'covered/watch': round(result.roundsCoveredPerWatch.mean),
-      'elapsed ms': round(result.elapsedMs),
-      'CPU ms': round(result.cpuUserMs + result.cpuSystemMs),
-      'peak RSS MB': round(result.peakRssBytes / (1024 * 1024), 1),
-   })),
-);
-
-console.log(
-   'BENCH_SUMMARY ' +
-      JSON.stringify({
-         queryVariants: QUERY_VARIANTS,
-         targetRounds: TARGET_ROUNDS,
-         roundWindow: ROUND_WINDOW,
-         quietTransactionsPerWindow: QUIET_TX_PER_WINDOW,
-         hotTransactionsPerWindow: HOT_TX_PER_WINDOW,
-         syntheticDispatcher: {
-            requestsPerSecond: SYNTHETIC_RPS,
-            burst: SYNTHETIC_BURST,
-            concurrency: DISPATCH_CONCURRENCY,
-         },
-         results,
-      }),
-);
 
 async function runScenario(
    queryVariant: ScanQueryVariant,
