@@ -7,7 +7,10 @@ import {
    ALGORAND_TESTNET,
    TESTNET_USDC_ASSET_ID,
 } from './app.js';
-import { AlgorandIndexerClient } from './roundwatch-indexer.js';
+import {
+   AlgorandIndexerClient,
+   type ScanQueryVariant,
+} from './roundwatch-indexer.js';
 import {
    INDEXER_REQUEST_PURPOSES,
    RoundWatchEconomicsMetrics,
@@ -32,6 +35,7 @@ interface BenchmarkProfile {
 }
 
 interface ScenarioResult {
+   queryVariant: ScanQueryVariant;
    profile: string;
    activity: ActivityProfile;
    withNote: boolean;
@@ -102,6 +106,9 @@ const DISPATCH_CONCURRENCY = positiveInteger(
 const ACTIVE_WATCH_COUNTS = parseWatchCounts(
    process.env.ROUNDWATCH_BENCH_WATCH_COUNTS ?? '1,5,20,50',
 );
+const QUERY_VARIANTS = parseQueryVariants(
+   process.env.ROUNDWATCH_BENCH_QUERY_VARIANTS ?? 'A,B,C,D',
+);
 
 if (TARGET_ROUNDS % ROUND_WINDOW !== 0) {
    throw new Error(
@@ -140,8 +147,9 @@ const results: ScenarioResult[] = [];
 
 console.log(
    [
-      'RoundWatch Economics Benchmark v1',
-      'query variant: A (current sender + asset + round range)',
+      'RoundWatch Economics Benchmark v2',
+      `query variants: ${QUERY_VARIANTS.join(', ')}`,
+      'A=sender; B=sender+amount; C=B+note-prefix when present; D=receiver+amount+note-prefix when present',
       `target coverage: ${TARGET_ROUNDS} rounds / watch`,
       `scan window: ${ROUND_WINDOW} rounds`,
       `synthetic dispatcher: ${SYNTHETIC_RPS}/s burst=${SYNTHETIC_BURST} concurrency=${DISPATCH_CONCURRENCY}`,
@@ -149,18 +157,25 @@ console.log(
    ].join('\n'),
 );
 
-for (const profile of PROFILES) {
-   for (const activeWatches of ACTIVE_WATCH_COUNTS) {
-      const result = await runScenario(profile, activeWatches);
-      results.push(result);
-      console.log(
-         `BENCH_RESULT ${JSON.stringify(result)}`,
-      );
+for (const queryVariant of QUERY_VARIANTS) {
+   for (const profile of PROFILES) {
+      for (const activeWatches of ACTIVE_WATCH_COUNTS) {
+         const result = await runScenario(
+            queryVariant,
+            profile,
+            activeWatches,
+         );
+         results.push(result);
+         console.log(
+            `BENCH_RESULT ${JSON.stringify(result)}`,
+         );
+      }
    }
 }
 
 console.table(
    results.map(result => ({
+      variant: result.queryVariant,
       profile: result.profile,
       watches: result.activeWatches,
       sweeps: result.sweeps,
@@ -181,7 +196,7 @@ console.table(
 console.log(
    'BENCH_SUMMARY ' +
       JSON.stringify({
-         queryVariant: 'A',
+         queryVariants: QUERY_VARIANTS,
          targetRounds: TARGET_ROUNDS,
          roundWindow: ROUND_WINDOW,
          quietTransactionsPerWindow: QUIET_TX_PER_WINDOW,
@@ -196,6 +211,7 @@ console.log(
 );
 
 async function runScenario(
+   queryVariant: ScanQueryVariant,
    profile: BenchmarkProfile,
    activeWatches: number,
 ): Promise<ScenarioResult> {
@@ -218,6 +234,7 @@ async function runScenario(
       fakeFetch,
       10_000,
       metrics,
+      queryVariant,
    );
    const store = new RoundWatchStore(databasePath, {
       maxOpenWatches: Math.max(50, activeWatches),
@@ -244,11 +261,11 @@ async function runScenario(
    try {
       for (let index = 0; index < activeWatches; index += 1) {
          const idempotencyKey =
-            `bench-${profile.name}-${activeWatches}-${String(index).padStart(3, '0')}`;
+            `bench-${queryVariant}-${profile.name}-${activeWatches}-${String(index).padStart(3, '0')}`;
          const expectedServiceTransaction =
-            `SERVICE_${profile.name}_${activeWatches}_${index}`;
+            `SERVICE_${queryVariant}_${profile.name}_${activeWatches}_${index}`;
          const servicePayer =
-            `BENCH_SERVICE_PAYER_${profile.name}_${activeWatches}_${index}`;
+            `BENCH_SERVICE_PAYER_${queryVariant}_${profile.name}_${activeWatches}_${index}`;
 
          const spec: WatchSpec = {
             idempotencyKey,
@@ -308,7 +325,7 @@ async function runScenario(
          while (!coverageComplete(store, watchIds, tip)) {
             if (sweeps >= maxSweeps) {
                throw new Error(
-                  `Benchmark exceeded max sweeps (${maxSweeps}) for ${profile.name}`,
+                  `Benchmark exceeded max sweeps (${maxSweeps}) for ${queryVariant}/${profile.name}`,
                );
             }
 
@@ -357,6 +374,7 @@ async function runScenario(
       );
 
       return {
+         queryVariant,
          profile: profile.name,
          activity: profile.activity,
          withNote: profile.withNote,
@@ -410,36 +428,57 @@ function createSyntheticIndexerFetch(
          const maxRound = requiredIntegerQuery(url, 'max-round');
          const limit = requiredIntegerQuery(url, 'limit');
          const offset = optionalIntegerQuery(url, 'next') ?? 0;
-         const total = profile.transactionsPerWindow;
-         const end = Math.min(total, offset + limit);
-         const transactions = [];
+         const allTransactions = [];
 
-         for (let index = offset; index < end; index += 1) {
+         for (
+            let index = 0;
+            index < profile.transactionsPerWindow;
+            index += 1
+         ) {
             const round =
                minRound + (index % (maxRound - minRound + 1));
-            transactions.push({
+            const exactAmount = index % 10 === 0;
+            const amountOrdinal = Math.floor(index / 10);
+            const exactReceiver =
+               ((amountOrdinal * 7 + 1) % 20) < 5;
+            const noteBucket = amountOrdinal % 97;
+            const noteText = exactAmount
+               ? `bench-invoice-${noteBucket}:noise`
+               : `noise-${profile.name}-${index}`;
+
+            allTransactions.push({
                id: `BENCH_TX_${minRound}_${maxRound}_${index}`,
                sender: EXPECTED_SENDER,
-               note: Buffer.from(
-                  `noise-${profile.name}-${index}`,
-                  'utf8',
-               ).toString('base64'),
+               note: Buffer.from(noteText, 'utf8').toString('base64'),
                'confirmed-round': round,
+               // Deliberately outside the watch eligibility deadline so
+               // server-filter candidates never become an exact match.
                'round-time': Math.floor(
-                  new Date('2026-09-19T12:01:00.000Z').getTime() / 1_000,
+                  new Date('2026-09-19T13:00:00.000Z').getTime() / 1_000,
                ),
                'asset-transfer-transaction': {
-                  amount: 999_999,
-                  receiver: NON_MATCHING_RECEIVER,
+                  amount: exactAmount ? 1 : 999_999,
+                  receiver: exactReceiver
+                     ? EXPECTED_RECEIVER
+                     : NON_MATCHING_RECEIVER,
                   'asset-id': TESTNET_USDC_ASSET_ID,
                },
             });
          }
 
+         const filtered = applySyntheticQueryFilters(
+            allTransactions,
+            url,
+         );
+         const end = Math.min(filtered.length, offset + limit);
+         const transactions = filtered.slice(offset, end);
+
          return jsonResponse({
             transactions,
             'current-round': tip,
-            ...(end < total ? { 'next-token': String(end) } : {}),
+            ...(end < filtered.length
+               ? { 'next-token': String(end) }
+               : {}),
          });
       }
 
@@ -451,6 +490,90 @@ function createSyntheticIndexerFetch(
          },
       );
    };
+}
+
+interface SyntheticTransaction {
+   id: string;
+   sender: string;
+   note: string;
+   'confirmed-round': number;
+   'round-time': number;
+   'asset-transfer-transaction': {
+      amount: number;
+      receiver: string;
+      'asset-id': number;
+   };
+}
+
+function applySyntheticQueryFilters(
+   transactions: SyntheticTransaction[],
+   url: URL,
+): SyntheticTransaction[] {
+   const address = url.searchParams.get('address');
+   const role = url.searchParams.get('address-role');
+   const greaterThan = optionalBigIntQuery(
+      url,
+      'currency-greater-than',
+   );
+   const lessThan = optionalBigIntQuery(
+      url,
+      'currency-less-than',
+   );
+   const encodedPrefix = url.searchParams.get('note-prefix');
+   const prefix = encodedPrefix === null
+      ? undefined
+      : Buffer.from(encodedPrefix, 'base64');
+
+   return transactions.filter(transaction => {
+      const transfer = transaction['asset-transfer-transaction'];
+
+      if (
+         role === 'sender' &&
+         address !== null &&
+         transaction.sender !== address
+      ) {
+         return false;
+      }
+      if (
+         role === 'receiver' &&
+         address !== null &&
+         transfer.receiver !== address
+      ) {
+         return false;
+      }
+
+      const amount = BigInt(transfer.amount);
+      if (greaterThan !== undefined && amount <= greaterThan) {
+         return false;
+      }
+      if (lessThan !== undefined && amount >= lessThan) {
+         return false;
+      }
+
+      if (prefix !== undefined) {
+         const note = Buffer.from(transaction.note, 'base64');
+         if (
+            note.length < prefix.length ||
+            !note.subarray(0, prefix.length).equals(prefix)
+         ) {
+            return false;
+         }
+      }
+
+      return true;
+   });
+}
+
+function optionalBigIntQuery(
+   url: URL,
+   name: string,
+): bigint | undefined {
+   const raw = url.searchParams.get(name);
+   if (raw === null) return undefined;
+   if (!/^\d+$/.test(raw)) {
+      throw new Error(`Synthetic Indexer query ${name} is invalid`);
+   }
+   return BigInt(raw);
 }
 
 function coverageComplete(
@@ -576,6 +699,35 @@ function parseWatchCounts(value: string): number[] {
       throw new Error('ROUNDWATCH_BENCH_WATCH_COUNTS must not be empty');
    }
    return counts;
+}
+
+function parseQueryVariants(value: string): ScanQueryVariant[] {
+   const variants = value.split(',').map(item => item.trim().toUpperCase());
+   const result: ScanQueryVariant[] = [];
+
+   for (const variant of variants) {
+      if (
+         variant !== 'A' &&
+         variant !== 'B' &&
+         variant !== 'C' &&
+         variant !== 'D'
+      ) {
+         throw new Error(
+            'ROUNDWATCH_BENCH_QUERY_VARIANTS must contain only A,B,C,D',
+         );
+      }
+      if (!result.includes(variant)) {
+         result.push(variant);
+      }
+   }
+
+   if (result.length === 0) {
+      throw new Error(
+         'ROUNDWATCH_BENCH_QUERY_VARIANTS must not be empty',
+      );
+   }
+
+   return result;
 }
 
 function envNumber(name: string, fallback: number): number {
