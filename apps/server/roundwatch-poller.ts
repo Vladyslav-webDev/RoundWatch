@@ -1,5 +1,6 @@
 import { matchesWatch, type RoundWatchIndexer } from './roundwatch-indexer.js';
-import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
+import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
 
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
 
@@ -23,6 +24,7 @@ export class RoundWatchPoller {
       private readonly intervalMilliseconds = 5_000,
       private readonly roundWindow = DEFAULT_SCAN_ROUND_WINDOW,
       private readonly now: () => Date = () => new Date(),
+      private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
    ) {
       if (!Number.isSafeInteger(roundWindow) || roundWindow <= 0) {
          throw new Error('roundWindow must be a finite positive integer');
@@ -80,8 +82,9 @@ export class RoundWatchPoller {
 
       let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
       if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
-         const tip = await this.indexer.getCurrentRound('checkpoint');
-         const block = await this.indexer.getBlock(tip);
+         this.recordMetric(() => this.economicsMetrics?.recordClosingRequest(watch.id));
+         const tip = await this.indexer.getCurrentRound('checkpoint', watch.id);
+         const block = await this.indexer.getBlock(tip, watch.id);
          if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
             this.store.setClosingRound(watch.id, block.round);
             watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
@@ -91,6 +94,7 @@ export class RoundWatchPoller {
 
       if (watch.closingRound !== undefined && watch.scanAfterRound >= watch.closingRound) {
          this.store.markExpired(watch.id, watch.scanAfterRound, watch.closingRound);
+         this.finishMetric(watch, 'expired');
          return;
       }
 
@@ -100,7 +104,7 @@ export class RoundWatchPoller {
          session = undefined;
       }
       if (!session) {
-         const tip = await this.indexer.getCurrentRound('health');
+         const tip = await this.indexer.getCurrentRound('health', watch.id);
          const maxRound = Math.min(
             watch.scanAfterRound + this.roundWindow,
             tip,
@@ -121,13 +125,23 @@ export class RoundWatchPoller {
          session.maxRound,
          session.nextToken,
       );
+      let transactionsExamined = 0;
+      const match = page.transactions.find(transaction => {
+         transactionsExamined += 1;
+         return matchesWatch(transaction, watch);
+      });
+      this.recordMetric(() => this.economicsMetrics?.recordScanPage(watch.id, {
+         transactionsReturned: page.transactions.length,
+         transactionsExamined,
+      }));
+
       if (page.currentRound < session.maxRound) {
          throw new Error(`Indexer coverage ${page.currentRound} is below requested round ${session.maxRound}`);
       }
-      const match = page.transactions.find(transaction => matchesWatch(transaction, watch));
       if (match) {
          this.store.markMatched(watch.id, match.transaction, match.round);
          this.sessions.delete(watch.id);
+         this.finishMetric(watch, 'matched');
          console.log(`RoundWatch matched watch ${watch.id} in round ${match.round}`);
          return;
       }
@@ -143,11 +157,50 @@ export class RoundWatchPoller {
       const advanced = this.store.advanceScanRound(watch.id, watch.scanAfterRound, session.maxRound);
       this.sessions.delete(watch.id);
       if (!advanced) return;
+      this.recordMetric(() => this.economicsMetrics?.recordCoverage(
+         watch.id,
+         session.maxRound - watch.scanAfterRound,
+      ));
       console.log(`RoundWatch scan progress watch=${watch.id} coveredThrough=${session.maxRound}`);
       const updated = this.store.getWatch(watch.id);
       if (updated?.closingRound !== undefined && updated.scanAfterRound !== undefined && updated.scanAfterRound === updated.closingRound) {
          this.store.markExpired(updated.id, updated.scanAfterRound, updated.closingRound);
+         this.finishMetric(updated, 'expired');
          console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`);
+      }
+   }
+
+   private finishMetric(watch: WatchRecord, finalState: WatchState): void {
+      if (!this.economicsMetrics) return;
+
+      const now = this.now().getTime();
+      const createdAt = Date.parse(watch.createdAt);
+      const activatedAt = watch.activatedAt ? Date.parse(watch.activatedAt) : NaN;
+
+      this.recordMetric(() => this.economicsMetrics?.recordLifecycle(watch.id, {
+         finalState,
+         ...(Number.isFinite(activatedAt)
+            ? { activeDurationMs: Math.max(0, now - activatedAt) }
+            : {}),
+         ...(Number.isFinite(createdAt)
+            ? { timeToTerminalMs: Math.max(0, now - createdAt) }
+            : {}),
+      }));
+
+      const snapshot = this.economicsMetrics.finishWatch(watch.id);
+      if (snapshot) {
+         console.info(`RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`);
+      }
+   }
+
+   private recordMetric(operation: () => void): void {
+      try {
+         operation();
+      } catch (error) {
+         console.warn(
+            'RoundWatch economics poll metric failed:',
+            error instanceof Error ? error.message : 'Unknown metrics error',
+         );
       }
    }
 
