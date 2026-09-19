@@ -39,9 +39,9 @@ test('watch metrics aggregate per-purpose work without exporting the watch id', 
    assert.equal(snapshot.indexer.health.successes, 1);
    assert.equal(snapshot.indexer.health.responseBytes, 120);
    assert.equal(snapshot.indexer.health.queueWait.totalMs, 4);
-   assert.equal(snapshot.indexer.scanPage.attempts, 1);
-   assert.equal(snapshot.indexer.scanPage.failures, 1);
-   assert.equal(snapshot.indexer.scanPage.timeouts, 1);
+   assert.equal(snapshot.indexer['scan-page'].attempts, 1);
+   assert.equal(snapshot.indexer['scan-page'].failures, 1);
+   assert.equal(snapshot.indexer['scan-page'].timeouts, 1);
    assert.equal(snapshot.scanPages, 1);
    assert.equal(snapshot.transactionsReturned, 7);
    assert.equal(snapshot.transactionsExamined, 3);
