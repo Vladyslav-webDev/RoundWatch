@@ -596,6 +596,50 @@ function createSyntheticIndexerFetch(
          const maxRound = requiredIntegerQuery(url, 'max-round');
          const limit = requiredIntegerQuery(url, 'limit');
          const offset = optionalIntegerQuery(url, 'next') ?? 0;
+         if (profile.adversarialFilterCollision) {
+            const sample = buildSyntheticTransaction(
+               profile,
+               url,
+               minRound,
+               maxRound,
+               0,
+            );
+            const allPass =
+               applySyntheticQueryFilters([sample], url).length === 1;
+
+            if (!allPass) {
+               return jsonResponse({
+                  transactions: [],
+                  'current-round': tip,
+               });
+            }
+
+            const end = Math.min(
+               profile.transactionsPerWindow,
+               offset + limit,
+            );
+            const transactions = [];
+            for (let index = offset; index < end; index += 1) {
+               const transaction = buildSyntheticTransaction(
+                  profile,
+                  url,
+                  minRound,
+                  maxRound,
+                  index,
+               );
+               transactions.push(transaction);
+               uniqueTransactionsServed.add(transaction.id);
+            }
+
+            return jsonResponse({
+               transactions,
+               'current-round': tip,
+               ...(end < profile.transactionsPerWindow
+                  ? { 'next-token': String(end) }
+                  : {}),
+            });
+         }
+
          const allTransactions = [];
 
          for (
@@ -603,58 +647,15 @@ function createSyntheticIndexerFetch(
             index < profile.transactionsPerWindow;
             index += 1
          ) {
-            const round =
-               minRound + (index % (maxRound - minRound + 1));
-            const exactAmount = index % 10 === 0;
-            const amountOrdinal = Math.floor(index / 10);
-            const exactReceiver =
-               ((amountOrdinal * 7 + 1) % 20) < 5;
-            const noteBucket = amountOrdinal % 97;
-            const requestedNotePrefix = url.searchParams.get('note-prefix');
-            const collisionNote =
-               requestedNotePrefix === null
-                  ? 'bench-adversarial-collision'
-                  : Buffer.from(requestedNotePrefix, 'base64').toString('utf8');
-            const noteText = profile.adversarialFilterCollision
-               ? collisionNote
-               : exactAmount
-                  ? `bench-invoice-${noteBucket}:noise`
-                  : `noise-${index}`;
-
-            const collisionStreamKey =
-               profile.adversarialFilterCollision
-                  ? Buffer.from(
-                       requestedNotePrefix ?? 'no-note',
-                       'utf8',
-                    ).toString('hex')
-                  : 'global';
-
-            allTransactions.push({
-               id: `BENCH_TX_${collisionStreamKey}_${minRound}_${maxRound}_${index}`,
-               sender: EXPECTED_SENDER,
-               note: Buffer.from(noteText, 'utf8').toString('base64'),
-               'confirmed-round': round,
-               'round-time': Math.floor(
-                  new Date(
-                     profile.adversarialFilterCollision
-                        ? '2026-09-19T12:15:00.000Z'
-                        : '2026-09-19T13:00:00.000Z',
-                  ).getTime() / 1_000,
+            allTransactions.push(
+               buildSyntheticTransaction(
+                  profile,
+                  url,
+                  minRound,
+                  maxRound,
+                  index,
                ),
-               'asset-transfer-transaction': {
-                  amount: profile.adversarialFilterCollision
-                     ? 1
-                     : exactAmount
-                        ? 1
-                        : 999_999,
-                  receiver: profile.adversarialFilterCollision
-                     ? NON_MATCHING_RECEIVER
-                     : exactReceiver
-                        ? EXPECTED_RECEIVER
-                        : NON_MATCHING_RECEIVER,
-                  'asset-id': TESTNET_USDC_ASSET_ID,
-               },
-            });
+            );
          }
 
          const filtered = applySyntheticQueryFilters(
@@ -688,6 +689,67 @@ function createSyntheticIndexerFetch(
    return {
       fetch: syntheticFetch,
       uniqueTransactionsServed,
+   };
+}
+
+function buildSyntheticTransaction(
+   profile: BenchmarkProfile,
+   url: URL,
+   minRound: number,
+   maxRound: number,
+   index: number,
+): SyntheticTransaction {
+   const round =
+      minRound + (index % (maxRound - minRound + 1));
+   const exactAmount = index % 10 === 0;
+   const amountOrdinal = Math.floor(index / 10);
+   const exactReceiver =
+      ((amountOrdinal * 7 + 1) % 20) < 5;
+   const noteBucket = amountOrdinal % 97;
+   const requestedNotePrefix = url.searchParams.get('note-prefix');
+   const collisionNote =
+      requestedNotePrefix === null
+         ? 'bench-adversarial-collision'
+         : Buffer.from(requestedNotePrefix, 'base64').toString('utf8');
+   const noteText = profile.adversarialFilterCollision
+      ? collisionNote
+      : exactAmount
+         ? `bench-invoice-${noteBucket}:noise`
+         : `noise-${index}`;
+
+   const collisionStreamKey =
+      profile.adversarialFilterCollision
+         ? Buffer.from(
+              requestedNotePrefix ?? 'no-note',
+              'utf8',
+           ).toString('hex')
+         : 'global';
+
+   return {
+      id: `BENCH_TX_${collisionStreamKey}_${minRound}_${maxRound}_${index}`,
+      sender: EXPECTED_SENDER,
+      note: Buffer.from(noteText, 'utf8').toString('base64'),
+      'confirmed-round': round,
+      'round-time': Math.floor(
+         new Date(
+            profile.adversarialFilterCollision
+               ? '2026-09-19T12:15:00.000Z'
+               : '2026-09-19T13:00:00.000Z',
+         ).getTime() / 1_000,
+      ),
+      'asset-transfer-transaction': {
+         amount: profile.adversarialFilterCollision
+            ? 1
+            : exactAmount
+               ? 1
+               : 999_999,
+         receiver: profile.adversarialFilterCollision
+            ? NON_MATCHING_RECEIVER
+            : exactReceiver
+               ? EXPECTED_RECEIVER
+               : NON_MATCHING_RECEIVER,
+         'asset-id': TESTNET_USDC_ASSET_ID,
+      },
    };
 }
 
