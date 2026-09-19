@@ -869,6 +869,109 @@ test('each pagination page consumes a separate dispatcher credit', async () => {
    assert.equal(dispatcher.snapshot().requests['scan-page'], 2);
 });
 
+test('identical scan pages are fetched once and reused within a poll sweep', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 2,
+      maxOpenWatchesPerPayer: 2,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   try {
+      for (let i = 0; i < 2; i += 1) {
+         const tx = `SHARED_PAGE_SERVICE_${i}`;
+         const watch = store.prepareWatch(
+            { ...SPEC, idempotencyKey: `shared-page-${i}` },
+            intent(tx),
+         ).watch;
+         store.activateWatch(
+            watch.id,
+            { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+            100,
+         );
+      }
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+      assert.equal(
+         store.listActiveWatches().every(watch => watch.scanAfterRound === 100),
+         true,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+      await poller.runOnce();
+
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(indexer.pageCalls.at(-1)?.nextToken, 'page-2');
+      assert.equal(
+         store.listActiveWatches().every(watch => watch.scanAfterRound === 101),
+         true,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('watch-page query identity follows the actual server-side filters', () => {
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 1_000,
+      burst: 10,
+      concurrency: 1,
+   });
+   const cIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      dispatcher,
+      async () => Response.json({ transactions: [], 'current-round': 20 }),
+      1_000,
+      undefined,
+      'C',
+   );
+   const dIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      dispatcher,
+      async () => Response.json({ transactions: [], 'current-round': 20 }),
+      1_000,
+      undefined,
+      'D',
+   );
+
+   const base = watchRecord({});
+   const otherReceiver = watchRecord({
+      id: 'other-receiver',
+      expectedReceiver:
+         'AEBAGBAFAYDQQCIKBMGA2DQPCAIREEYUCULBOGAZDINRYHI6D4QCC5T6YA',
+   });
+   const otherNote = watchRecord({
+      id: 'other-note',
+      invoiceNote: 'different-note',
+   });
+
+   assert.equal(
+      cIndexer.watchPageQueryKey(base, 101, 200),
+      cIndexer.watchPageQueryKey(otherReceiver, 101, 200),
+   );
+   assert.notEqual(
+      cIndexer.watchPageQueryKey(base, 101, 200),
+      cIndexer.watchPageQueryKey(otherNote, 101, 200),
+   );
+   assert.notEqual(
+      dIndexer.watchPageQueryKey(base, 101, 200),
+      dIndexer.watchPageQueryKey(otherReceiver, 101, 200),
+   );
+});
+
 test('50 watches each receive at most one page turn in one fair sweep', async () => {
    const store = new RoundWatchStore(':memory:', { maxOpenWatches: 50, maxOpenWatchesPerPayer: 50 });
    const indexer = new FakeIndexer(101);
@@ -1185,6 +1288,17 @@ class FakeIndexer implements RoundWatchIndexer {
       const page = this.pages.shift(); if (!page) throw new Error('no fake page'); return page;
    }
    async searchTransactionPage(): Promise<TransactionIdPage> { return { transactions: [], currentRound: this.round }; }
+}
+
+class SharedPageFakeIndexer extends FakeIndexer {
+   watchPageQueryKey(
+      _watch: WatchRecord,
+      min: number,
+      max: number,
+      nextToken?: string,
+   ): string {
+      return `${min}:${max}:${nextToken ?? ''}`;
+   }
 }
 
 function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
