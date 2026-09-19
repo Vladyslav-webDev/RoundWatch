@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 
 test('watch metrics aggregate per-purpose work without exporting the watch id', () => {
    const metrics = new RoundWatchEconomicsMetrics();
@@ -110,4 +112,41 @@ test('free request metrics aggregate status, bytes, and latency separately from 
    assert.deepEqual(unpaid.statuses, { '402': 1 });
 
    assert.equal(metrics.snapshotWatch('watch-does-not-exist'), undefined);
+});
+
+test('Indexer client attributes dispatcher timing and response bytes to one watch', async () => {
+   const metrics = new RoundWatchEconomicsMetrics();
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 1_000,
+      burst: 10,
+      concurrency: 1,
+   });
+   const body = JSON.stringify({ round: 321 });
+   const fakeFetch: typeof fetch = async () =>
+      new Response(body, {
+         status: 200,
+         headers: { 'content-type': 'application/json' },
+      });
+
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.example.test',
+      dispatcher,
+      fakeFetch,
+      1_000,
+      metrics,
+   );
+
+   assert.equal(await indexer.getCurrentRound('health', 'watch-indexer'), 321);
+
+   const snapshot = metrics.snapshotWatch('watch-indexer');
+   assert.ok(snapshot);
+   assert.equal(snapshot.indexer.health.attempts, 1);
+   assert.equal(snapshot.indexer.health.successes, 1);
+   assert.equal(snapshot.indexer.health.failures, 0);
+   assert.equal(
+      snapshot.indexer.health.responseBytes,
+      Buffer.byteLength(body, 'utf8'),
+   );
+   assert.equal(snapshot.indexer.health.queueWait.samples, 1);
+   assert.equal(snapshot.indexer.health.wallTime.samples, 1);
 });
