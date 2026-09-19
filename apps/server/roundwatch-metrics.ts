@@ -59,12 +59,16 @@ export interface WatchLifecycleObservation {
    finalState?: WatchState;
 }
 
+export const FREE_REQUEST_CATEGORIES = [
+   'health',
+   'watch-status',
+   'watch-create-402',
+   'watch-create-rejected',
+   'other',
+] as const;
+
 export type FreeRequestCategory =
-   | 'health'
-   | 'watch-status'
-   | 'watch-create-402'
-   | 'watch-create-rejected'
-   | 'other';
+   (typeof FREE_REQUEST_CATEGORIES)[number];
 
 export interface FreeRequestObservation {
    status: number;
@@ -83,6 +87,7 @@ export interface FreeWorkSnapshot {
 
 export interface RuntimeResourceSample {
    sampledAt: string;
+   elapsedMs: number;
    rssBytes: number;
    heapUsedBytes: number;
    heapTotalBytes: number;
@@ -288,6 +293,15 @@ export class RoundWatchEconomicsMetrics {
             ]),
          ),
       };
+   }
+
+   snapshotAllFreeWork(): Record<FreeRequestCategory, FreeWorkSnapshot> {
+      return Object.fromEntries(
+         FREE_REQUEST_CATEGORIES.map(category => [
+            category,
+            this.snapshotFreeWork(category),
+         ]),
+      ) as Record<FreeRequestCategory, FreeWorkSnapshot>;
    }
 
    private watch(watchId: string): MutableWatchWork {
