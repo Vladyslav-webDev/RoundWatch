@@ -10,7 +10,10 @@ import {
    resolveRoundWatchNetwork,
    resolveRoundWatchPublicBaseUrl,
 } from './network-config.js';
-import { AlgorandIndexerClient } from './roundwatch-indexer.js';
+import {
+   AlgorandIndexerClient,
+   resolveScanQueryVariant,
+} from './roundwatch-indexer.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import {
    DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
@@ -74,6 +77,7 @@ let indexerBurst;
 let indexerConcurrency;
 let scanRoundWindow;
 let economicsSampleIntervalMilliseconds;
+let scanQueryVariant;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -112,6 +116,9 @@ try {
       process.env.ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS,
       DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
       'ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS',
+   );
+   scanQueryVariant = resolveScanQueryVariant(
+      process.env.ROUNDWATCH_SCAN_QUERY_VARIANT,
    );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
@@ -203,6 +210,7 @@ const indexer = new AlgorandIndexerClient(
    fetch,
    10_000,
    economicsMetrics,
+   scanQueryVariant,
 );
 const poller = new RoundWatchPoller(
    store,
@@ -262,6 +270,7 @@ server.on('listening', () => {
       `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
    );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
+   console.log(`Indexer scan query variant: ${scanQueryVariant}`);
    console.log(
       `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
    );
