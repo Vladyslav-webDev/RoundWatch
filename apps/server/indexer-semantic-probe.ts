@@ -51,7 +51,29 @@ console.log(
    `Expected tx=${expectedTransaction} note=${invoiceNote ? 'present' : 'absent'}`,
 );
 
-const results = [];
+interface SemanticProbeResult {
+   variant: ScanQueryVariant;
+   returned: number;
+   foundExpected: boolean;
+   exactLocalMatch: boolean;
+   currentRound: number;
+   nextToken: boolean;
+   senderMatch?: boolean;
+   receiverMatch?: boolean;
+   assetMatch?: boolean;
+   amountMatch?: boolean;
+   roundAfterActivation?: boolean;
+   beforeExpiry?: boolean;
+   notePresent?: boolean;
+   noteExact?: boolean;
+   notePrefix?: boolean;
+   actualSender?: string;
+   actualReceiver?: string;
+   actualAmount?: string;
+   actualNoteUtf8?: string;
+}
+
+const results: SemanticProbeResult[] = [];
 
 for (const variant of ['A', 'B', 'C', 'D'] as const) {
    const dispatcher = new IndexerRequestDispatcher({
@@ -90,8 +112,10 @@ for (const variant of ['A', 'B', 'C', 'D'] as const) {
 
 console.table(results);
 
-const firstExact = results.find(result => result.foundExpected);
-if (firstExact && 'actualNoteUtf8' in firstExact) {
+const firstExact = results.find(
+   result => result.foundExpected && result.actualSender !== undefined,
+);
+if (firstExact) {
    console.log('Exact transaction diagnostics:');
    console.log(
       JSON.stringify(
@@ -134,7 +158,7 @@ if (
 function diagnoseExactTransaction(
    transaction: IndexedWatchTransaction,
    expected: WatchRecord,
-): Record<string, unknown> {
+): Partial<SemanticProbeResult> {
    const actualNoteBytes = transaction.note === undefined
       ? undefined
       : Buffer.from(transaction.note, 'base64');
