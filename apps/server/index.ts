@@ -11,6 +11,7 @@ import {
    resolveRoundWatchPublicBaseUrl,
 } from './network-config.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
+import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import {
@@ -105,6 +106,8 @@ try {
 
 const faultExitAfterSettle =
    process.env.ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE?.trim() === '1';
+const economicsInstrumentationEnabled =
+   process.env.ROUNDWATCH_ECONOMICS_METRICS?.trim() === '1';
 
 if (faultExitAfterSettle && networkConfig.name !== 'testnet') {
    console.error(
@@ -177,17 +180,33 @@ const dispatcher = new IndexerRequestDispatcher({
    burst: indexerBurst,
    concurrency: indexerConcurrency,
 });
-const indexer = new AlgorandIndexerClient(indexerUrl, dispatcher);
+const economicsMetrics = economicsInstrumentationEnabled
+   ? new RoundWatchEconomicsMetrics()
+   : undefined;
+const indexer = new AlgorandIndexerClient(
+   indexerUrl,
+   dispatcher,
+   fetch,
+   10_000,
+   economicsMetrics,
+);
 const poller = new RoundWatchPoller(
    store,
    indexer,
    pollIntervalMilliseconds,
    scanRoundWindow,
+   undefined,
+   economicsMetrics,
 );
-const reconciler = new SettlementReconciler(store, indexer, {
-   network: networkConfig.network,
-   intervalMilliseconds: reconciliationIntervalMilliseconds,
-});
+const reconciler = new SettlementReconciler(
+   store,
+   indexer,
+   {
+      network: networkConfig.network,
+      intervalMilliseconds: reconciliationIntervalMilliseconds,
+   },
+   economicsMetrics,
+);
 const app = createApp({
    avmAddress,
    facilitatorClient,
@@ -195,6 +214,7 @@ const app = createApp({
    indexer,
    networkConfig,
    publicBaseUrl,
+   economicsMetrics,
 });
 
 const port = parsePositiveInteger(process.env.PORT, 4021);
@@ -219,6 +239,9 @@ server.on('listening', () => {
       `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
    );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
+   console.log(
+      `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
+   );
 
    if (faultExitAfterSettle) {
       console.warn(
