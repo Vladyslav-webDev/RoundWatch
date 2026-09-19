@@ -116,7 +116,7 @@ if (TARGET_ROUNDS % ROUND_WINDOW !== 0) {
    );
 }
 
-const PROFILES: BenchmarkProfile[] = [
+const ALL_PROFILES: BenchmarkProfile[] = [
    {
       name: 'quiet-exact-note',
       activity: 'quiet',
@@ -143,12 +143,17 @@ const PROFILES: BenchmarkProfile[] = [
    },
 ];
 
+const PROFILES = selectProfiles(
+   process.env.ROUNDWATCH_BENCH_PROFILES,
+   ALL_PROFILES,
+);
 const results: ScenarioResult[] = [];
 
 console.log(
    [
       'RoundWatch Economics Benchmark v2',
       `query variants: ${QUERY_VARIANTS.join(', ')}`,
+      `profiles: ${PROFILES.map(profile => profile.name).join(', ')}`,
       'A=sender; B=sender+amount; C=B+note-prefix when present; D=receiver+amount+note-prefix when present',
       `target coverage: ${TARGET_ROUNDS} rounds / watch`,
       `scan window: ${ROUND_WINDOW} rounds`,
@@ -699,6 +704,38 @@ function parseWatchCounts(value: string): number[] {
       throw new Error('ROUNDWATCH_BENCH_WATCH_COUNTS must not be empty');
    }
    return counts;
+}
+
+function selectProfiles(
+   value: string | undefined,
+   profiles: BenchmarkProfile[],
+): BenchmarkProfile[] {
+   if (!value?.trim()) return profiles;
+
+   const requested = new Set(
+      value
+         .split(',')
+         .map(item => item.trim())
+         .filter(Boolean),
+   );
+
+   const selected = profiles.filter(profile =>
+      requested.has(profile.name),
+   );
+
+   if (selected.length !== requested.size) {
+      const known = new Set(profiles.map(profile => profile.name));
+      const unknown = [...requested].filter(name => !known.has(name));
+      throw new Error(
+         `ROUNDWATCH_BENCH_PROFILES contains unknown profile(s): ${unknown.join(', ')}`,
+      );
+   }
+
+   if (selected.length === 0) {
+      throw new Error('ROUNDWATCH_BENCH_PROFILES must not be empty');
+   }
+
+   return selected;
 }
 
 function parseQueryVariants(value: string): ScanQueryVariant[] {
