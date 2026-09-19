@@ -453,6 +453,18 @@ async function runScenario(
                'Adversarial collision workload unexpectedly matched or terminalized a watch',
             );
          }
+
+         const expectedUniqueTransactions =
+            expectedTransactions *
+            (profile.sharedFilterAcrossWatches ? 1 : activeWatches);
+         if (
+            syntheticIndexer.uniqueTransactionsServed.size !==
+            expectedUniqueTransactions
+         ) {
+            throw new Error(
+               `Adversarial collision workload expected ${expectedUniqueTransactions} unique synthetic transactions, got ${syntheticIndexer.uniqueTransactionsServed.size}`,
+            );
+         }
       }
 
       return {
