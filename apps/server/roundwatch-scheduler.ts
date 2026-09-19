@@ -24,11 +24,25 @@ export interface IndexerDispatcherSnapshot {
    timeouts: number;
 }
 
+export type IndexerDispatchOutcome = 'success' | 'failure' | 'timeout';
+
+export interface IndexerDispatchObservation {
+   outcome: IndexerDispatchOutcome;
+   queueWaitMs: number;
+   wallTimeMs: number;
+}
+
+export type IndexerDispatchObserver = (
+   observation: IndexerDispatchObservation,
+) => void;
+
 interface PendingRequest<T> {
    purpose: IndexerRequestPurpose;
    operation: () => Promise<T>;
    resolve: (value: T | PromiseLike<T>) => void;
    reject: (reason?: unknown) => void;
+   enqueuedAt: number;
+   observer?: IndexerDispatchObserver;
 }
 
 export const DEFAULT_INDEXER_REQUESTS_PER_SECOND = 4;
@@ -76,13 +90,19 @@ export class IndexerRequestDispatcher {
       }
    }
 
-   dispatch<T>(purpose: IndexerRequestPurpose, operation: () => Promise<T>): Promise<T> {
+   dispatch<T>(
+      purpose: IndexerRequestPurpose,
+      operation: () => Promise<T>,
+      observer?: IndexerDispatchObserver,
+   ): Promise<T> {
       return new Promise<T>((resolve, reject) => {
          this.queue.push({
             purpose,
             operation,
             resolve: resolve as PendingRequest<unknown>['resolve'],
             reject,
+            enqueuedAt: this.safeNow(),
+            observer,
          });
          this.pump();
       });
@@ -113,6 +133,11 @@ export class IndexerRequestDispatcher {
          this.tokens >= 1
       ) {
          const pending = this.queue.shift()!;
+         const startedAt = this.safeNow();
+         const queueWaitMs = elapsedMilliseconds(
+            pending.enqueuedAt,
+            startedAt,
+         );
          this.tokens -= 1;
          this.inFlight += 1;
          this.requestCounts.set(
@@ -123,17 +148,28 @@ export class IndexerRequestDispatcher {
          void pending.operation().then(
             value => {
                this.successes += 1;
-               this.logCompletion(pending.purpose, 'success');
+               const outcome: IndexerDispatchOutcome = 'success';
+               this.logCompletion(pending.purpose, outcome);
+               notifyObserver(pending.observer, {
+                  outcome,
+                  queueWaitMs,
+                  wallTimeMs: elapsedMilliseconds(startedAt, this.safeNow()),
+               });
                pending.resolve(value);
             },
             error => {
                this.failures += 1;
-               let outcome = 'failure';
+               let outcome: IndexerDispatchOutcome = 'failure';
                if (isTimeout(error)) {
                   this.timeouts += 1;
                   outcome = 'timeout';
                }
                this.logCompletion(pending.purpose, outcome);
+               notifyObserver(pending.observer, {
+                  outcome,
+                  queueWaitMs,
+                  wallTimeMs: elapsedMilliseconds(startedAt, this.safeNow()),
+               });
                pending.reject(error);
             },
          ).finally(() => {
@@ -163,6 +199,11 @@ export class IndexerRequestDispatcher {
       );
    }
 
+   private safeNow(): number {
+      const value = this.now();
+      return Number.isFinite(value) ? value : this.lastRefill;
+   }
+
    private logCompletion(purpose: IndexerRequestPurpose, outcome: string): void {
       console.debug(
          `RoundWatch Indexer request purpose=${purpose} outcome=${outcome} inFlight=${this.inFlight} queued=${this.queue.length} successes=${this.successes} failures=${this.failures} timeouts=${this.timeouts}`,
@@ -187,4 +228,26 @@ function positiveNumber(value: number, name: string): number {
 function isTimeout(error: unknown): boolean {
    return error instanceof Error &&
       (error.name === 'TimeoutError' || error.name === 'AbortError');
+}
+
+function elapsedMilliseconds(start: number, end: number): number {
+   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return 0;
+   }
+   return end - start;
+}
+
+function notifyObserver(
+   observer: IndexerDispatchObserver | undefined,
+   observation: IndexerDispatchObservation,
+): void {
+   if (!observer) return;
+   try {
+      observer(observation);
+   } catch (error) {
+      console.warn(
+         'RoundWatch Indexer instrumentation observer failed:',
+         error instanceof Error ? error.message : 'Unknown observer error',
+      );
+   }
 }
