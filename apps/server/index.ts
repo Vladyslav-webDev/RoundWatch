@@ -27,7 +27,10 @@ import {
    DEFAULT_INDEXER_REQUESTS_PER_SECOND,
    IndexerRequestDispatcher,
 } from './roundwatch-scheduler.js';
-import { DEFAULT_SCAN_ROUND_WINDOW } from './roundwatch-poller.js';
+import {
+   DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
+   DEFAULT_SCAN_ROUND_WINDOW,
+} from './roundwatch-poller.js';
 import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
@@ -76,6 +79,7 @@ let indexerRequestsPerSecond;
 let indexerBurst;
 let indexerConcurrency;
 let scanRoundWindow;
+let scanPageCacheEntries;
 let economicsSampleIntervalMilliseconds;
 let scanQueryVariant;
 
@@ -111,6 +115,11 @@ try {
       process.env.ROUNDWATCH_SCAN_ROUND_WINDOW,
       DEFAULT_SCAN_ROUND_WINDOW,
       'ROUNDWATCH_SCAN_ROUND_WINDOW',
+   );
+   scanPageCacheEntries = parseRequiredNonNegativeInteger(
+      process.env.ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES,
+      DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
+      'ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES',
    );
    economicsSampleIntervalMilliseconds = parseRequiredPositiveInteger(
       process.env.ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS,
@@ -219,6 +228,7 @@ const poller = new RoundWatchPoller(
    scanRoundWindow,
    undefined,
    economicsMetrics,
+   scanPageCacheEntries,
 );
 const reconciler = new SettlementReconciler(
    store,
@@ -271,6 +281,9 @@ server.on('listening', () => {
    );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
    console.log(`Indexer scan query variant: ${scanQueryVariant}`);
+   console.log(
+      `Historical scan-page cache: ${scanPageCacheEntries} entries`,
+   );
    console.log(
       `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
    );
@@ -347,6 +360,24 @@ function parseRequiredPositiveInteger(
 
    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
       throw new Error(`${variableName} must be a finite positive integer`);
+   }
+
+   return parsed;
+}
+
+function parseRequiredNonNegativeInteger(
+   value: string | undefined,
+   fallback: number,
+   variableName: string,
+): number {
+   const parsed = value === undefined || value.trim() === ''
+      ? fallback
+      : Number(value);
+
+   if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      throw new Error(
+         `${variableName} must be a non-negative safe integer`,
+      );
    }
 
    return parsed;
