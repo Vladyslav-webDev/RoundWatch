@@ -8,7 +8,8 @@
     "dev": "tsx index.ts",
     "start": "tsx index.ts",
     "typecheck": "tsc --noEmit",
-    "benchmark:economics": "tsx economics-benchmark.ts"
+    "benchmark:economics": "tsx economics-benchmark.ts",
+    "probe:indexer": "tsx indexer-capability-probe.ts"
   },
   "keywords": [],
   "author": "",
