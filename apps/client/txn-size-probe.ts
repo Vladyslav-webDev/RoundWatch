@@ -79,7 +79,7 @@ for (const probeCase of cases) {
             unsignedWireBytes: unsignedBytes.length,
             signedWireBytes: signedBytes.length,
             signedTxnInBlockBytes: blockBytes.length,
-            maxPerFullBlock,
+            maxPerFullBlock: maxPerBlock,
             minimumFeesPerFullBlockMicroAlgo:
                minimumFeesPerFullBlockMicroAlgo.toString(),
             minimumFeesPerFullBlockAlgo:
