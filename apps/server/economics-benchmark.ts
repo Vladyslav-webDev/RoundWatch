@@ -33,6 +33,7 @@ interface BenchmarkProfile {
    withNote: boolean;
    transactionsPerWindow: number;
    adversarialFilterCollision?: boolean;
+   sharedFilterAcrossWatches?: boolean;
 }
 
 interface ScenarioResult {
@@ -41,6 +42,7 @@ interface ScenarioResult {
    activity: ActivityProfile;
    withNote: boolean;
    adversarialFilterCollision: boolean;
+   sharedFilterAcrossWatches: boolean;
    activeWatches: number;
    targetRounds: number;
    transactionsPerWindow: number;
@@ -64,6 +66,8 @@ interface ScenarioResult {
    peakHeapUsedBytes: number;
    sqliteBytes: number;
    walBytes: number;
+   uniqueSyntheticTransactionsServed: number;
+   transactionReuseFactor: number;
 }
 
 interface Distribution {
@@ -152,6 +156,14 @@ const ALL_PROFILES: BenchmarkProfile[] = [
       transactionsPerWindow: HOT_TX_PER_WINDOW,
       adversarialFilterCollision: true,
    },
+   {
+      name: 'adversarial-c-shared-filter-collision',
+      activity: 'hot',
+      withNote: true,
+      transactionsPerWindow: HOT_TX_PER_WINDOW,
+      adversarialFilterCollision: true,
+      sharedFilterAcrossWatches: true,
+   },
 ];
 
 const PROFILES = selectProfiles(
@@ -201,6 +213,7 @@ try {
          variant: result.queryVariant,
          profile: result.profile,
          adversarial: result.adversarialFilterCollision,
+         sharedFilter: result.sharedFilterAcrossWatches,
          watches: result.activeWatches,
          sweeps: result.sweeps,
          'req total': result.totalRequests,
@@ -208,6 +221,8 @@ try {
       'req/watch': round(result.requestsPerWatch.mean),
          'pages/watch': round(result.pagesPerWatch.mean),
          'tx/watch': round(result.transactionsReturnedPerWatch.mean),
+         'unique tx': result.uniqueSyntheticTransactionsServed,
+         'reuse x': round(result.transactionReuseFactor),
          'MB/watch': round(
             result.responseBytesPerWatch.mean / (1024 * 1024),
             3,
@@ -256,11 +271,11 @@ async function runScenario(
       burst: SYNTHETIC_BURST,
       concurrency: DISPATCH_CONCURRENCY,
    });
-   const fakeFetch = createSyntheticIndexerFetch(profile, tip);
+   const syntheticIndexer = createSyntheticIndexerFetch(profile, tip);
    const indexer = new AlgorandIndexerClient(
       'https://synthetic-indexer.invalid',
       dispatcher,
-      fakeFetch,
+      syntheticIndexer.fetch,
       10_000,
       metrics,
       queryVariant,
@@ -303,7 +318,11 @@ async function runScenario(
             assetId: TESTNET_USDC_ASSET_ID,
             atomicAmount: '1',
             ...(profile.withNote
-               ? { invoiceNote: `bench-invoice-${index}` }
+               ? {
+                    invoiceNote: profile.sharedFilterAcrossWatches
+                       ? 'bench-invoice-shared-collision'
+                       : `bench-invoice-${index}`,
+                 }
                : {}),
          };
          const intent: SettlementIntent = {
@@ -443,6 +462,8 @@ async function runScenario(
          withNote: profile.withNote,
          adversarialFilterCollision:
             profile.adversarialFilterCollision === true,
+         sharedFilterAcrossWatches:
+            profile.sharedFilterAcrossWatches === true,
          activeWatches,
          targetRounds: TARGET_ROUNDS,
          transactionsPerWindow: profile.transactionsPerWindow,
@@ -470,6 +491,13 @@ async function runScenario(
          peakHeapUsedBytes,
          sqliteBytes: fileSize(databasePath),
          walBytes: fileSize(`${databasePath}-wal`),
+         uniqueSyntheticTransactionsServed:
+            syntheticIndexer.uniqueTransactionsServed.size,
+         transactionReuseFactor:
+            syntheticIndexer.uniqueTransactionsServed.size === 0
+               ? 0
+               : transactionsReturnedPerWatch.reduce(sum, 0) /
+                 syntheticIndexer.uniqueTransactionsServed.size,
       };
    } finally {
       store.close();
@@ -480,8 +508,13 @@ async function runScenario(
 function createSyntheticIndexerFetch(
    profile: BenchmarkProfile,
    tip: number,
-): typeof fetch {
-   return async input => {
+): {
+   fetch: typeof fetch;
+   uniqueTransactionsServed: Set<string>;
+} {
+   const uniqueTransactionsServed = new Set<string>();
+
+   const syntheticFetch: typeof fetch = async input => {
       const url = requestUrl(input);
 
       if (url.pathname === '/health') {
@@ -520,8 +553,16 @@ function createSyntheticIndexerFetch(
                   ? `bench-invoice-${noteBucket}:noise`
                   : `noise-${index}`;
 
+            const collisionStreamKey =
+               profile.adversarialFilterCollision
+                  ? Buffer.from(
+                       requestedNotePrefix ?? 'no-note',
+                       'utf8',
+                    ).toString('hex')
+                  : 'global';
+
             allTransactions.push({
-               id: `BENCH_TX_${minRound}_${maxRound}_${index}`,
+               id: `BENCH_TX_${collisionStreamKey}_${minRound}_${maxRound}_${index}`,
                sender: EXPECTED_SENDER,
                note: Buffer.from(noteText, 'utf8').toString('base64'),
                'confirmed-round': round,
@@ -554,6 +595,9 @@ function createSyntheticIndexerFetch(
          );
          const end = Math.min(filtered.length, offset + limit);
          const transactions = filtered.slice(offset, end);
+         for (const transaction of transactions) {
+            uniqueTransactionsServed.add(transaction.id);
+         }
 
          return jsonResponse({
             transactions,
@@ -571,6 +615,11 @@ function createSyntheticIndexerFetch(
             headers: { 'content-type': 'application/json' },
          },
       );
+   };
+
+   return {
+      fetch: syntheticFetch,
+      uniqueTransactionsServed,
    };
 }
 
