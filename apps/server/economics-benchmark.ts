@@ -40,6 +40,7 @@ interface ScenarioResult {
    profile: string;
    activity: ActivityProfile;
    withNote: boolean;
+   adversarialFilterCollision: boolean;
    activeWatches: number;
    targetRounds: number;
    transactionsPerWindow: number;
@@ -199,6 +200,7 @@ try {
       results.map(result => ({
          variant: result.queryVariant,
          profile: result.profile,
+         adversarial: result.adversarialFilterCollision,
          watches: result.activeWatches,
          sweeps: result.sweeps,
          'req total': result.totalRequests,
@@ -410,11 +412,37 @@ async function runScenario(
          item => item.roundsCovered,
       );
 
+      if (profile.adversarialFilterCollision) {
+         const windows = TARGET_ROUNDS / ROUND_WINDOW;
+         const expectedTransactions =
+            profile.transactionsPerWindow * windows;
+
+         if (
+            transactionsReturnedPerWatch.some(
+               value => value !== expectedTransactions,
+            )
+         ) {
+            throw new Error(
+               `Adversarial collision workload expected ${expectedTransactions} returned transactions per watch`,
+            );
+         }
+
+         if (
+            watchIds.some(id => store.getWatch(id)?.state !== 'active')
+         ) {
+            throw new Error(
+               'Adversarial collision workload unexpectedly matched or terminalized a watch',
+            );
+         }
+      }
+
       return {
          queryVariant,
          profile: profile.name,
          activity: profile.activity,
          withNote: profile.withNote,
+         adversarialFilterCollision:
+            profile.adversarialFilterCollision === true,
          activeWatches,
          targetRounds: TARGET_ROUNDS,
          transactionsPerWindow: profile.transactionsPerWindow,
