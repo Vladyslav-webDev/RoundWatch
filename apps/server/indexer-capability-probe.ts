@@ -26,9 +26,9 @@ const network = resolveProbeNetwork(
 const indexerUrl =
    process.env.ALGORAND_INDEXER_URL?.trim() || network.indexerUrl;
 
-const ZERO_ADDRESS =
+const ZERO_ADDRESS: string =
    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
-const PROBE_ADDRESS =
+const PROBE_ADDRESS: string =
    'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
 
 if (
