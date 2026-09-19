@@ -27,6 +27,7 @@ import {
 import {
    AlgorandIndexerClient,
    matchesWatch,
+   resolveScanQueryVariant,
    type IndexedBlock,
    type IndexedWatchTransaction,
    type RoundWatchIndexer,
@@ -546,6 +547,19 @@ test('cursor updates are monotonic and stale competing work cannot overwrite pro
       assert.equal(store.advanceScanRound(watch.id, 110, 109), false);
       assert.equal(store.getWatch(watch.id)?.scanAfterRound, 110);
    } finally { store.close(); }
+});
+
+test('runtime scan query strategy defaults to C and validates explicit rollback variants', () => {
+   assert.equal(resolveScanQueryVariant(undefined), 'C');
+   assert.equal(resolveScanQueryVariant(''), 'C');
+   assert.equal(resolveScanQueryVariant(' c '), 'C');
+   assert.equal(resolveScanQueryVariant('A'), 'A');
+   assert.equal(resolveScanQueryVariant('B'), 'B');
+   assert.equal(resolveScanQueryVariant('D'), 'D');
+   assert.throws(
+      () => resolveScanQueryVariant('E'),
+      /must be one of A, B, C, D/,
+   );
 });
 
 test('scan query variants apply only declared server filters and keep exact matching local', async () => {
