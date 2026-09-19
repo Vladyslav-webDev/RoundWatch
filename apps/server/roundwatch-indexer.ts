@@ -9,6 +9,29 @@ import {
 
 export type ScanQueryVariant = 'A' | 'B' | 'C' | 'D';
 
+export const DEFAULT_SCAN_QUERY_VARIANT: ScanQueryVariant = 'C';
+
+export function resolveScanQueryVariant(
+   value: string | undefined,
+): ScanQueryVariant {
+   const normalized = value?.trim().toUpperCase();
+
+   if (!normalized) return DEFAULT_SCAN_QUERY_VARIANT;
+
+   if (
+      normalized === 'A' ||
+      normalized === 'B' ||
+      normalized === 'C' ||
+      normalized === 'D'
+   ) {
+      return normalized;
+   }
+
+   throw new Error(
+      'ROUNDWATCH_SCAN_QUERY_VARIANT must be one of A, B, C, D',
+   );
+}
+
 export interface IndexedWatchTransaction extends IndexedAssetTransfer {
    roundTime: number;
    note?: string;
