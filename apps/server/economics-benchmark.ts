@@ -32,6 +32,7 @@ interface BenchmarkProfile {
    activity: ActivityProfile;
    withNote: boolean;
    transactionsPerWindow: number;
+   adversarialFilterCollision?: boolean;
 }
 
 interface ScenarioResult {
@@ -142,6 +143,13 @@ const ALL_PROFILES: BenchmarkProfile[] = [
       activity: 'hot',
       withNote: false,
       transactionsPerWindow: HOT_TX_PER_WINDOW,
+   },
+   {
+      name: 'adversarial-c-filter-collision',
+      activity: 'hot',
+      withNote: true,
+      transactionsPerWindow: HOT_TX_PER_WINDOW,
+      adversarialFilterCollision: true,
    },
 ];
 
@@ -473,25 +481,40 @@ function createSyntheticIndexerFetch(
             const exactReceiver =
                ((amountOrdinal * 7 + 1) % 20) < 5;
             const noteBucket = amountOrdinal % 97;
-            const noteText = exactAmount
-               ? `bench-invoice-${noteBucket}:noise`
-               : `noise-${profile.name}-${index}`;
+            const requestedNotePrefix = url.searchParams.get('note-prefix');
+            const collisionNote =
+               requestedNotePrefix === null
+                  ? 'bench-adversarial-collision'
+                  : Buffer.from(requestedNotePrefix, 'base64').toString('utf8');
+            const noteText = profile.adversarialFilterCollision
+               ? collisionNote
+               : exactAmount
+                  ? `bench-invoice-${noteBucket}:noise`
+                  : `noise-${index}`;
 
             allTransactions.push({
                id: `BENCH_TX_${minRound}_${maxRound}_${index}`,
                sender: EXPECTED_SENDER,
                note: Buffer.from(noteText, 'utf8').toString('base64'),
                'confirmed-round': round,
-               // Deliberately outside the watch eligibility deadline so
-               // server-filter candidates never become an exact match.
                'round-time': Math.floor(
-                  new Date('2026-09-19T13:00:00.000Z').getTime() / 1_000,
+                  new Date(
+                     profile.adversarialFilterCollision
+                        ? '2026-09-19T12:15:00.000Z'
+                        : '2026-09-19T13:00:00.000Z',
+                  ).getTime() / 1_000,
                ),
                'asset-transfer-transaction': {
-                  amount: exactAmount ? 1 : 999_999,
-                  receiver: exactReceiver
-                     ? EXPECTED_RECEIVER
-                     : NON_MATCHING_RECEIVER,
+                  amount: profile.adversarialFilterCollision
+                     ? 1
+                     : exactAmount
+                        ? 1
+                        : 999_999,
+                  receiver: profile.adversarialFilterCollision
+                     ? NON_MATCHING_RECEIVER
+                     : exactReceiver
+                        ? EXPECTED_RECEIVER
+                        : NON_MATCHING_RECEIVER,
                   'asset-id': TESTNET_USDC_ASSET_ID,
                },
             });
