@@ -22,7 +22,10 @@ import {
 } from '@x402-avm/extensions';
 
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
-import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import type {
+   FreeRequestCategory,
+   RoundWatchEconomicsMetrics,
+} from './roundwatch-metrics.js';
 import {
    TESTNET_NETWORK_CONFIG,
    type RoundWatchNetworkConfig,
@@ -202,6 +205,43 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    const app = new Hono();
+
+   if (economicsMetrics) {
+      app.use(async (c, next) => {
+         const startedAt = performance.now();
+         const requestBytes = declaredContentLength(
+            c.req.header('content-length'),
+         );
+
+         await next();
+
+         const wallTimeMs = Math.max(0, performance.now() - startedAt);
+         const category = classifyFreeRequest(
+            c.req.method,
+            c.req.path,
+            c.res.status,
+            watchPath,
+            c.req.header('payment-signature') !== undefined,
+         );
+
+         if (!category) return;
+
+         const responseBytes = await responseByteLength(c.res);
+         try {
+            economicsMetrics.recordFreeRequest(category, {
+               status: c.res.status,
+               ...(requestBytes === undefined ? {} : { requestBytes }),
+               responseBytes,
+               wallTimeMs,
+            });
+         } catch (error) {
+            console.warn(
+               'RoundWatch economics free-request metric failed:',
+               error instanceof Error ? error.message : 'Unknown metrics error',
+            );
+         }
+      });
+   }
 
    app.get('/health', c => {
       return c.json({
@@ -535,6 +575,59 @@ function parseWatchSpec(
          ...(typeof invoiceNote === 'string' ? { invoiceNote } : {}),
       },
    };
+}
+
+function classifyFreeRequest(
+   method: string,
+   path: string,
+   status: number,
+   watchPath: string,
+   hasPaymentSignature: boolean,
+): FreeRequestCategory | undefined {
+   if (method === 'GET' && path === '/health') {
+      return 'health';
+   }
+
+   if (
+      method === 'GET' &&
+      path.startsWith(`${watchPath}/`)
+   ) {
+      return 'watch-status';
+   }
+
+   if (method === 'POST' && path === watchPath && status === 402) {
+      return 'watch-create-402';
+   }
+
+   if (
+      method === 'POST' &&
+      path === watchPath &&
+      status >= 400 &&
+      !hasPaymentSignature
+   ) {
+      return 'watch-create-rejected';
+   }
+
+   return undefined;
+}
+
+function declaredContentLength(value: string | undefined): number | undefined {
+   if (!value) return undefined;
+   const parsed = Number(value);
+   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+async function responseByteLength(response: Response): Promise<number> {
+   const declared = declaredContentLength(
+      response.headers.get('content-length') ?? undefined,
+   );
+   if (declared !== undefined) return declared;
+
+   try {
+      return (await response.clone().arrayBuffer()).byteLength;
+   } catch {
+      return 0;
+   }
 }
 
 function finishTerminalMetric(
