@@ -7,6 +7,7 @@ import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
 
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
+export const DEFAULT_SCAN_PAGE_CACHE_ENTRIES = 16;
 
 interface ScanSession {
    minRound: number;
@@ -21,6 +22,7 @@ export class RoundWatchPoller {
    private started = false;
    private nextWatchIndex = 0;
    private readonly sessions = new Map<string, ScanSession>();
+   private readonly historicalPageCache = new Map<string, TransactionPage>();
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -29,9 +31,19 @@ export class RoundWatchPoller {
       private readonly roundWindow = DEFAULT_SCAN_ROUND_WINDOW,
       private readonly now: () => Date = () => new Date(),
       private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
+      private readonly historicalPageCacheEntries =
+         DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
    ) {
       if (!Number.isSafeInteger(roundWindow) || roundWindow <= 0) {
          throw new Error('roundWindow must be a finite positive integer');
+      }
+      if (
+         !Number.isSafeInteger(historicalPageCacheEntries) ||
+         historicalPageCacheEntries < 0
+      ) {
+         throw new Error(
+            'historicalPageCacheEntries must be a non-negative safe integer',
+         );
       }
    }
 
@@ -95,6 +107,11 @@ export class RoundWatchPoller {
             );
          }
 
+         const cached = this.getCachedHistoricalPage(queryKey);
+         if (cached) {
+            return Promise.resolve(cached);
+         }
+
          let pending = sharedPages.get(queryKey);
          if (!pending) {
             pending = this.indexer.searchWatchPage(
@@ -102,7 +119,12 @@ export class RoundWatchPoller {
                minRound,
                maxRound,
                nextToken,
-            );
+            ).then(page => {
+               if (page.currentRound >= maxRound) {
+                  this.cacheHistoricalPage(queryKey, page);
+               }
+               return page;
+            });
             sharedPages.set(queryKey, pending);
          }
          return pending;
@@ -113,6 +135,11 @@ export class RoundWatchPoller {
             await this.serviceWatch(watch, getSweepTip, getSweepPage);
          } catch (error) {
             this.sessions.delete(watch.id);
+            // A cached page may contain a provider continuation token that
+            // later became invalid. Clear the bounded cache on any scan-path
+            // failure so the next sweep restarts from fresh provider state
+            // instead of replaying a stale token forever.
+            this.historicalPageCache.clear();
             console.error(
                `RoundWatch poll failed for watch ${watch.id}:`,
                safeErrorMessage(error),
@@ -223,6 +250,37 @@ export class RoundWatchPoller {
          this.store.markExpired(updated.id, updated.scanAfterRound, updated.closingRound);
          this.finishMetric(updated, 'expired');
          console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`);
+      }
+   }
+
+   private getCachedHistoricalPage(
+      queryKey: string,
+   ): TransactionPage | undefined {
+      const page = this.historicalPageCache.get(queryKey);
+      if (!page) return undefined;
+
+      // Refresh insertion order to maintain an LRU eviction policy.
+      this.historicalPageCache.delete(queryKey);
+      this.historicalPageCache.set(queryKey, page);
+      return page;
+   }
+
+   private cacheHistoricalPage(
+      queryKey: string,
+      page: TransactionPage,
+   ): void {
+      if (this.historicalPageCacheEntries === 0) return;
+
+      this.historicalPageCache.delete(queryKey);
+      this.historicalPageCache.set(queryKey, page);
+
+      while (
+         this.historicalPageCache.size >
+         this.historicalPageCacheEntries
+      ) {
+         const oldest = this.historicalPageCache.keys().next().value;
+         if (oldest === undefined) break;
+         this.historicalPageCache.delete(oldest);
       }
    }
 
