@@ -235,7 +235,11 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          this.recordRequestMetric(
             watchId,
             purpose,
-            dispatchObservation,
+            dispatchObservation ?? {
+               outcome: 'success',
+               queueWaitMs: 0,
+               wallTimeMs: 0,
+            },
             responseBytes,
          );
          return result;
