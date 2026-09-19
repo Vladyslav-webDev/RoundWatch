@@ -61,9 +61,15 @@ export class RoundWatchPoller {
       // watch still receives at most one service turn in this sweep.
       this.nextWatchIndex = (startIndex + 1) % watches.length;
 
+      let sharedTipPromise: Promise<number> | undefined;
+      const getSweepTip = (): Promise<number> => {
+         sharedTipPromise ??= this.indexer.getCurrentRound('health');
+         return sharedTipPromise;
+      };
+
       for (const watch of ordered) {
          try {
-            await this.serviceWatch(watch);
+            await this.serviceWatch(watch, getSweepTip);
          } catch (error) {
             this.sessions.delete(watch.id);
             console.error(
@@ -74,7 +80,10 @@ export class RoundWatchPoller {
       }
    }
 
-   private async serviceWatch(initial: WatchRecord): Promise<void> {
+   private async serviceWatch(
+      initial: WatchRecord,
+      getSweepTip: () => Promise<number>,
+   ): Promise<void> {
       if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
          console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
          return;
@@ -104,7 +113,7 @@ export class RoundWatchPoller {
          session = undefined;
       }
       if (!session) {
-         const tip = await this.indexer.getCurrentRound('health', watch.id);
+         const tip = await getSweepTip();
          const maxRound = Math.min(
             watch.scanAfterRound + this.roundWindow,
             tip,
