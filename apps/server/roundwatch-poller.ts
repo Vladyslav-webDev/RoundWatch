@@ -62,14 +62,51 @@ export class RoundWatchPoller {
       this.nextWatchIndex = (startIndex + 1) % watches.length;
 
       let sharedTipPromise: Promise<number> | undefined;
+      const sharedPages = new Map<string, Promise<Awaited<ReturnType<RoundWatchIndexer['searchWatchPage']>>>>();
+
       const getSweepTip = (): Promise<number> => {
          sharedTipPromise ??= this.indexer.getCurrentRound('health');
          return sharedTipPromise;
       };
 
+      const getSweepPage = (
+         watch: WatchRecord,
+         minRound: number,
+         maxRound: number,
+         nextToken?: string,
+      ) => {
+         const queryKey = this.indexer.watchPageQueryKey?.(
+            watch,
+            minRound,
+            maxRound,
+            nextToken,
+         );
+
+         if (!queryKey) {
+            return this.indexer.searchWatchPage(
+               watch,
+               minRound,
+               maxRound,
+               nextToken,
+            );
+         }
+
+         let pending = sharedPages.get(queryKey);
+         if (!pending) {
+            pending = this.indexer.searchWatchPage(
+               watch,
+               minRound,
+               maxRound,
+               nextToken,
+            );
+            sharedPages.set(queryKey, pending);
+         }
+         return pending;
+      };
+
       for (const watch of ordered) {
          try {
-            await this.serviceWatch(watch, getSweepTip);
+            await this.serviceWatch(watch, getSweepTip, getSweepPage);
          } catch (error) {
             this.sessions.delete(watch.id);
             console.error(
@@ -83,6 +120,12 @@ export class RoundWatchPoller {
    private async serviceWatch(
       initial: WatchRecord,
       getSweepTip: () => Promise<number>,
+      getSweepPage: (
+         watch: WatchRecord,
+         minRound: number,
+         maxRound: number,
+         nextToken?: string,
+      ) => Promise<Awaited<ReturnType<RoundWatchIndexer['searchWatchPage']>>>,
    ): Promise<void> {
       if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
          console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
@@ -128,7 +171,7 @@ export class RoundWatchPoller {
          this.sessions.set(watch.id, session);
       }
 
-      const page = await this.indexer.searchWatchPage(
+      const page = await getSweepPage(
          watch,
          session.minRound,
          session.maxRound,
