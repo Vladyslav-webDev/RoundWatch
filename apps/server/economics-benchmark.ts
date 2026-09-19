@@ -34,6 +34,7 @@ interface BenchmarkProfile {
    transactionsPerWindow: number;
    adversarialFilterCollision?: boolean;
    sharedFilterAcrossWatches?: boolean;
+   staggeredAdmissions?: boolean;
 }
 
 interface ScenarioResult {
@@ -43,6 +44,7 @@ interface ScenarioResult {
    withNote: boolean;
    adversarialFilterCollision: boolean;
    sharedFilterAcrossWatches: boolean;
+   staggeredAdmissions: boolean;
    activeWatches: number;
    targetRounds: number;
    transactionsPerWindow: number;
@@ -168,6 +170,15 @@ const ALL_PROFILES: BenchmarkProfile[] = [
       adversarialFilterCollision: true,
       sharedFilterAcrossWatches: true,
    },
+   {
+      name: 'adversarial-c-staggered-shared-filter-collision',
+      activity: 'hot',
+      withNote: true,
+      transactionsPerWindow: HOT_TX_PER_WINDOW,
+      adversarialFilterCollision: true,
+      sharedFilterAcrossWatches: true,
+      staggeredAdmissions: true,
+   },
 ];
 
 const PROFILES = selectProfiles(
@@ -218,6 +229,7 @@ try {
          profile: result.profile,
          adversarial: result.adversarialFilterCollision,
          sharedFilter: result.sharedFilterAcrossWatches,
+         staggered: result.staggeredAdmissions,
          watches: result.activeWatches,
          sweeps: result.sweeps,
          'req total': result.totalRequests,
@@ -311,61 +323,71 @@ async function runScenario(
 
    const watchIds: string[] = [];
 
-   try {
-      for (let index = 0; index < activeWatches; index += 1) {
-         const idempotencyKey =
-            `bench-${queryVariant}-${profile.name}-${activeWatches}-${String(index).padStart(3, '0')}`;
-         const expectedServiceTransaction =
-            `SERVICE_${queryVariant}_${profile.name}_${activeWatches}_${index}`;
-         const servicePayer =
-            `BENCH_SERVICE_PAYER_${queryVariant}_${profile.name}_${activeWatches}_${index}`;
+   const createWatch = (index: number): void => {
+      const idempotencyKey =
+         `bench-${queryVariant}-${profile.name}-${activeWatches}-${String(index).padStart(3, '0')}`;
+      const expectedServiceTransaction =
+         `SERVICE_${queryVariant}_${profile.name}_${activeWatches}_${index}`;
+      const servicePayer =
+         `BENCH_SERVICE_PAYER_${queryVariant}_${profile.name}_${activeWatches}_${index}`;
 
-         const spec: WatchSpec = {
-            idempotencyKey,
-            expectedSender: EXPECTED_SENDER,
-            expectedReceiver: EXPECTED_RECEIVER,
-            assetId: TESTNET_USDC_ASSET_ID,
-            atomicAmount: '1',
-            ...(profile.withNote
-               ? {
-                    invoiceNote: profile.sharedFilterAcrossWatches
-                       ? 'bench-invoice-shared-collision'
-                       : `bench-invoice-${index}`,
-                 }
-               : {}),
-         };
-         const intent: SettlementIntent = {
-            expectedTransaction: expectedServiceTransaction,
+      const spec: WatchSpec = {
+         idempotencyKey,
+         expectedSender: EXPECTED_SENDER,
+         expectedReceiver: EXPECTED_RECEIVER,
+         assetId: TESTNET_USDC_ASSET_ID,
+         atomicAmount: '1',
+         ...(profile.withNote
+            ? {
+                 invoiceNote: profile.sharedFilterAcrossWatches
+                    ? 'bench-invoice-shared-collision'
+                    : `bench-invoice-${index}`,
+              }
+            : {}),
+      };
+      const intent: SettlementIntent = {
+         expectedTransaction: expectedServiceTransaction,
+         network: ALGORAND_TESTNET,
+         payer: servicePayer,
+         receiver: EXPECTED_RECEIVER,
+         assetId: TESTNET_USDC_ASSET_ID,
+         atomicAmount: '1000',
+         firstValid: BASE_ROUND - 100,
+         lastValid: BASE_ROUND + 100,
+      };
+      const prepared = store.prepareWatch(spec, intent);
+      if (!prepared.created) {
+         throw new Error('Synthetic benchmark watch unexpectedly collided');
+      }
+
+      store.activateWatch(
+         prepared.watch.id,
+         {
+            transaction: expectedServiceTransaction,
             network: ALGORAND_TESTNET,
             payer: servicePayer,
-            receiver: EXPECTED_RECEIVER,
-            assetId: TESTNET_USDC_ASSET_ID,
-            atomicAmount: '1000',
-            firstValid: BASE_ROUND - 100,
-            lastValid: BASE_ROUND + 100,
-         };
-         const prepared = store.prepareWatch(spec, intent);
-         if (!prepared.created) {
-            throw new Error('Synthetic benchmark watch unexpectedly collided');
-         }
+         },
+         BASE_ROUND,
+      );
+      watchIds.push(prepared.watch.id);
+   };
 
-         store.activateWatch(
-            prepared.watch.id,
-            {
-               transaction: expectedServiceTransaction,
-               network: ALGORAND_TESTNET,
-               payer: servicePayer,
-            },
-            BASE_ROUND,
-         );
-         watchIds.push(prepared.watch.id);
+   try {
+      if (profile.staggeredAdmissions) {
+         createWatch(0);
+      } else {
+         for (let index = 0; index < activeWatches; index += 1) {
+            createWatch(index);
+         }
       }
 
       let sweeps = 0;
-      const maxSweeps =
+      const pagesPerWatchUpperBound =
          Math.ceil(profile.transactionsPerWindow / 1_000) *
-            (TARGET_ROUNDS / ROUND_WINDOW) +
-         10;
+         (TARGET_ROUNDS / ROUND_WINDOW);
+      const maxSweeps = profile.staggeredAdmissions
+         ? activeWatches + pagesPerWatchUpperBound + 10
+         : pagesPerWatchUpperBound + 10;
 
       let peakRssBytes = 0;
       let peakHeapUsedBytes = 0;
@@ -379,7 +401,10 @@ async function runScenario(
          console.log = () => {};
          console.debug = () => {};
 
-         while (!coverageComplete(store, watchIds, tip)) {
+         while (
+            watchIds.length < activeWatches ||
+            !coverageComplete(store, watchIds, tip)
+         ) {
             if (sweeps >= maxSweeps) {
                throw new Error(
                   `Benchmark exceeded max sweeps (${maxSweeps}) for ${queryVariant}/${profile.name}`,
@@ -388,6 +413,13 @@ async function runScenario(
 
             await poller.runOnce();
             sweeps += 1;
+
+            if (
+               profile.staggeredAdmissions &&
+               watchIds.length < activeWatches
+            ) {
+               createWatch(watchIds.length);
+            }
 
             const sample = sampler.sample();
             peakRssBytes = Math.max(
@@ -494,6 +526,8 @@ async function runScenario(
             profile.adversarialFilterCollision === true,
          sharedFilterAcrossWatches:
             profile.sharedFilterAcrossWatches === true,
+         staggeredAdmissions:
+            profile.staggeredAdmissions === true,
          activeWatches,
          targetRounds: TARGET_ROUNDS,
          transactionsPerWindow: profile.transactionsPerWindow,
