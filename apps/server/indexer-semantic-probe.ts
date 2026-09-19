@@ -1,6 +1,7 @@
 import {
    AlgorandIndexerClient,
    matchesWatch,
+   type IndexedWatchTransaction,
    type ScanQueryVariant,
 } from './roundwatch-indexer.js';
 import {
@@ -81,12 +82,35 @@ for (const variant of ['A', 'B', 'C', 'D'] as const) {
       returned: page.transactions.length,
       foundExpected: exact !== undefined,
       exactLocalMatch: exact ? matchesWatch(exact, watch) : false,
+      ...(exact ? diagnoseExactTransaction(exact, watch) : {}),
       currentRound: page.currentRound,
       nextToken: page.nextToken !== undefined,
    });
 }
 
 console.table(results);
+
+const firstExact = results.find(result => result.foundExpected);
+if (firstExact && 'actualNoteUtf8' in firstExact) {
+   console.log('Exact transaction diagnostics:');
+   console.log(
+      JSON.stringify(
+         {
+            actualSender: firstExact.actualSender,
+            actualReceiver: firstExact.actualReceiver,
+            actualAmount: firstExact.actualAmount,
+            actualNoteUtf8: firstExact.actualNoteUtf8,
+            expectedSender,
+            expectedReceiver,
+            expectedAmount: atomicAmount,
+            expectedNoteUtf8: invoiceNote,
+         },
+         null,
+         2,
+      ),
+   );
+}
+
 console.log(
    'SEMANTIC_PROBE_SUMMARY ' +
       JSON.stringify({
@@ -105,6 +129,56 @@ if (
    )
 ) {
    process.exitCode = 2;
+}
+
+function diagnoseExactTransaction(
+   transaction: IndexedWatchTransaction,
+   expected: WatchRecord,
+): Record<string, unknown> {
+   const actualNoteBytes = transaction.note === undefined
+      ? undefined
+      : Buffer.from(transaction.note, 'base64');
+   const expectedNoteBytes = expected.invoiceNote === undefined
+      ? undefined
+      : Buffer.from(expected.invoiceNote, 'utf8');
+
+   const noteExact =
+      actualNoteBytes === undefined && expectedNoteBytes === undefined
+         ? true
+         : actualNoteBytes !== undefined &&
+           expectedNoteBytes !== undefined &&
+           actualNoteBytes.equals(expectedNoteBytes);
+
+   const notePrefix =
+      actualNoteBytes === undefined || expectedNoteBytes === undefined
+         ? false
+         : actualNoteBytes.length >= expectedNoteBytes.length &&
+           actualNoteBytes
+              .subarray(0, expectedNoteBytes.length)
+              .equals(expectedNoteBytes);
+
+   return {
+      senderMatch: transaction.sender === expected.expectedSender,
+      receiverMatch: transaction.receiver === expected.expectedReceiver,
+      assetMatch: transaction.assetId === expected.assetId,
+      amountMatch: transaction.atomicAmount === expected.atomicAmount,
+      roundAfterActivation:
+         expected.activationRound !== undefined &&
+         transaction.round > expected.activationRound,
+      beforeExpiry:
+         expected.expiresAt !== undefined &&
+         transaction.roundTime * 1_000 < Date.parse(expected.expiresAt),
+      notePresent: transaction.note !== undefined,
+      noteExact,
+      notePrefix,
+      actualSender: transaction.sender,
+      actualReceiver: transaction.receiver,
+      actualAmount: transaction.atomicAmount,
+      actualNoteUtf8:
+         actualNoteBytes === undefined
+            ? undefined
+            : actualNoteBytes.toString('utf8'),
+   };
 }
 
 function resolveNetwork(
