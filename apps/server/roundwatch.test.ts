@@ -924,6 +924,160 @@ test('identical scan pages are fetched once and reused within a poll sweep', asy
    }
 });
 
+test('validated historical pages are reused across staggered poll sweeps', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 2,
+      maxOpenWatchesPerPayer: 2,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   const createActiveWatch = (index: number): void => {
+      const tx = `CROSS_SWEEP_SERVICE_${index}`;
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: `cross-sweep-${index}` },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+   };
+
+   try {
+      createActiveWatch(0);
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 1);
+
+      createActiveWatch(1);
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+
+      await poller.runOnce();
+
+      // Watch 0 physically fetches page 2. The newly admitted watch 1 reuses
+      // page 1 from the bounded cross-sweep cache.
+      assert.equal(indexer.pageCalls.length, 2);
+
+      await poller.runOnce();
+
+      // Watch 1 now reuses the previously fetched page 2 as well.
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(
+         store.listActiveWatches().every(
+            watch => watch.scanAfterRound === 101,
+         ),
+         true,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('scan failure clears historical pages so stale provider tokens cannot loop forever', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   try {
+      const tx = 'STALE_TOKEN_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'stale-token-cache' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'provider-token',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 1);
+
+      indexer.failPageCalls.add(1);
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 2);
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+      await poller.runOnce();
+
+      // The first page must be fetched again after the failed continuation.
+      assert.equal(indexer.pageCalls.length, 3);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 101);
+   } finally {
+      store.close();
+   }
+});
+
+test('historical page cache can be disabled without disabling within-sweep reuse', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   try {
+      const tx = 'CACHE_DISABLED_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'cache-disabled' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => new Date(),
+         undefined,
+         0,
+      );
+      await poller.runOnce();
+      await poller.runOnce();
+
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 101);
+   } finally {
+      store.close();
+   }
+});
+
 test('watch-page query identity follows the actual server-side filters', () => {
    const dispatcher = new IndexerRequestDispatcher({
       requestsPerSecond: 1_000,
