@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx --test roundwatch.test.ts roundwatch-reconciler.test.ts",
+    "test": "tsx --test roundwatch.test.ts roundwatch-reconciler.test.ts roundwatch-metrics.test.ts",
     "dev": "tsx index.ts",
     "start": "tsx index.ts",
     "typecheck": "tsc --noEmit"
@@ -27,4 +27,4 @@
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
-}
+}\n
