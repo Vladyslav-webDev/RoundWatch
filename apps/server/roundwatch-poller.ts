@@ -1,4 +1,8 @@
-import { matchesWatch, type RoundWatchIndexer } from './roundwatch-indexer.js';
+import {
+   matchesWatch,
+   type RoundWatchIndexer,
+   type TransactionPage,
+} from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
 
@@ -62,7 +66,7 @@ export class RoundWatchPoller {
       this.nextWatchIndex = (startIndex + 1) % watches.length;
 
       let sharedTipPromise: Promise<number> | undefined;
-      const sharedPages = new Map<string, Promise<Awaited<ReturnType<RoundWatchIndexer['searchWatchPage']>>>>();
+      const sharedPages = new Map<string, Promise<TransactionPage>>();
 
       const getSweepTip = (): Promise<number> => {
          sharedTipPromise ??= this.indexer.getCurrentRound('health');
@@ -125,7 +129,7 @@ export class RoundWatchPoller {
          minRound: number,
          maxRound: number,
          nextToken?: string,
-      ) => Promise<Awaited<ReturnType<RoundWatchIndexer['searchWatchPage']>>>,
+      ) => Promise<TransactionPage>,
    ): Promise<void> {
       if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
          console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
