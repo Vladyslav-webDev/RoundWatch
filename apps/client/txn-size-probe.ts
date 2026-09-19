@@ -29,7 +29,7 @@ const cases: ProbeCase[] = [
 const sender = algosdk.generateAccount();
 const receiver = algosdk.generateAccount();
 
-const suggestedParams: algosdk.SuggestedParams = {
+const suggestedParams = {
    flatFee: true,
    fee: MIN_TXN_FEE_MICROALGOS,
    minFee: MIN_TXN_FEE_MICROALGOS,
