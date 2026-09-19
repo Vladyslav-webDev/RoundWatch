@@ -7,7 +7,8 @@
     "test": "tsx --test roundwatch.test.ts roundwatch-reconciler.test.ts roundwatch-metrics.test.ts",
     "dev": "tsx index.ts",
     "start": "tsx index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "benchmark:economics": "tsx economics-benchmark.ts"
   },
   "keywords": [],
   "author": "",
