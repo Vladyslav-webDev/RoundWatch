@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import type { FacilitatorClient } from '@x402/core/server';
 
+import {
+   ALGORAND_TESTNET,
+   createApp,
+} from './app.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import { RoundWatchRuntimeSampler } from './roundwatch-runtime-metrics.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
+import { RoundWatchStore } from './roundwatch-store.js';
 
 test('watch metrics aggregate per-purpose work without exporting the watch id', () => {
    const metrics = new RoundWatchEconomicsMetrics();
@@ -149,4 +156,133 @@ test('Indexer client attributes dispatcher timing and response bytes to one watc
    );
    assert.equal(snapshot.indexer.health.queueWait.samples, 1);
    assert.equal(snapshot.indexer.health.wallTime.samples, 1);
+});
+
+test('runtime sampler reports interval CPU, memory, disk, dispatcher, and free-work totals', () => {
+   const metrics = new RoundWatchEconomicsMetrics();
+   metrics.recordFreeRequest('health', {
+      status: 200,
+      responseBytes: 32,
+      wallTimeMs: 2,
+   });
+
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 4,
+      burst: 4,
+      concurrency: 2,
+   });
+
+   const monotonic = [1_000, 2_250];
+   const cpu = [
+      { user: 100, system: 50 },
+      { user: 600, system: 250 },
+   ];
+
+   const sampler = new RoundWatchRuntimeSampler(
+      metrics,
+      dispatcher,
+      '/data/roundwatch.sqlite',
+      {
+         now: () => new Date('2026-09-19T12:00:00.000Z'),
+         monotonicNow: () => monotonic.shift() ?? 2_250,
+         cpuUsage: () => cpu.shift() ?? { user: 600, system: 250 },
+         memoryUsage: () => ({
+            rss: 150_000_000,
+            heapTotal: 40_000_000,
+            heapUsed: 25_000_000,
+            external: 2_000_000,
+            arrayBuffers: 500_000,
+         }),
+         fileSize: path => path.endsWith('-wal') ? 4_096 : 65_536,
+         log: () => {},
+      },
+   );
+
+   const snapshot = sampler.sample();
+
+   assert.equal(snapshot.resources.sampledAt, '2026-09-19T12:00:00.000Z');
+   assert.equal(snapshot.resources.elapsedMs, 1_250);
+   assert.equal(snapshot.resources.cpuUserMicros, 500);
+   assert.equal(snapshot.resources.cpuSystemMicros, 200);
+   assert.equal(snapshot.resources.rssBytes, 150_000_000);
+   assert.equal(snapshot.resources.heapUsedBytes, 25_000_000);
+   assert.equal(snapshot.resources.sqliteBytes, 65_536);
+   assert.equal(snapshot.resources.walBytes, 4_096);
+   assert.equal(snapshot.resources.dispatcher.queued, 0);
+   assert.equal(snapshot.activeWatchMetrics, 0);
+   assert.equal(snapshot.freeWork.health.requests, 1);
+   assert.equal(snapshot.freeWork.health.responseBytes, 32);
+});
+
+test('HTTP instrumentation separates health, public status, and unpaid watch creation', async () => {
+   const metrics = new RoundWatchEconomicsMetrics();
+   const store = new RoundWatchStore(':memory:');
+   const receiver =
+      'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
+
+   try {
+      const app = createApp({
+         avmAddress: receiver,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [
+                  {
+                     x402Version: 2,
+                     scheme: 'exact',
+                     network: ALGORAND_TESTNET,
+                  },
+               ],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: {} as never,
+         economicsMetrics: metrics,
+      });
+
+      const health = await app.request('/health');
+      assert.equal(health.status, 200);
+      await health.text();
+
+      const missingStatus = await app.request(
+         '/spike/watch/00000000-0000-0000-0000-000000000000',
+      );
+      assert.equal(missingStatus.status, 404);
+      await missingStatus.text();
+
+      const unpaidBody = JSON.stringify({
+         idempotencyKey: 'economics-unpaid-001',
+         expectedSender:
+            'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
+         expectedReceiver: receiver,
+         atomicAmount: '1',
+      });
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'content-length': String(Buffer.byteLength(unpaidBody, 'utf8')),
+         },
+         body: unpaidBody,
+      });
+      assert.equal(unpaid.status, 402);
+      await unpaid.text();
+
+      const free = metrics.snapshotAllFreeWork();
+      assert.equal(free.health.requests, 1);
+      assert.equal(free['watch-status'].requests, 1);
+      assert.deepEqual(free['watch-status'].statuses, { '404': 1 });
+      assert.equal(free['watch-create-402'].requests, 1);
+      assert.deepEqual(free['watch-create-402'].statuses, { '402': 1 });
+      assert.equal(
+         free['watch-create-402'].requestBytes,
+         Buffer.byteLength(unpaidBody, 'utf8'),
+      );
+      assert.ok(free.health.responseBytes > 0);
+      assert.ok(free['watch-status'].responseBytes > 0);
+      assert.ok(free['watch-create-402'].responseBytes > 0);
+   } finally {
+      store.close();
+   }
 });
