@@ -12,6 +12,10 @@ import {
 } from './network-config.js';
 import { AlgorandIndexerClient } from './roundwatch-indexer.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import {
+   DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
+   RoundWatchRuntimeSampler,
+} from './roundwatch-runtime-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import {
@@ -69,6 +73,7 @@ let indexerRequestsPerSecond;
 let indexerBurst;
 let indexerConcurrency;
 let scanRoundWindow;
+let economicsSampleIntervalMilliseconds;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -98,7 +103,16 @@ try {
    );
    indexerBurst = parseRequiredPositiveInteger(process.env.ROUNDWATCH_INDEXER_BURST, DEFAULT_INDEXER_BURST, 'ROUNDWATCH_INDEXER_BURST');
    indexerConcurrency = parseRequiredPositiveInteger(process.env.ROUNDWATCH_INDEXER_CONCURRENCY, DEFAULT_INDEXER_CONCURRENCY, 'ROUNDWATCH_INDEXER_CONCURRENCY');
-   scanRoundWindow = parseRequiredPositiveInteger(process.env.ROUNDWATCH_SCAN_ROUND_WINDOW, DEFAULT_SCAN_ROUND_WINDOW, 'ROUNDWATCH_SCAN_ROUND_WINDOW');
+   scanRoundWindow = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_SCAN_ROUND_WINDOW,
+      DEFAULT_SCAN_ROUND_WINDOW,
+      'ROUNDWATCH_SCAN_ROUND_WINDOW',
+   );
+   economicsSampleIntervalMilliseconds = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS,
+      DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
+      'ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS',
+   );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
    process.exit(1);
@@ -216,6 +230,14 @@ const app = createApp({
    publicBaseUrl,
    economicsMetrics,
 });
+const runtimeSampler = economicsMetrics
+   ? new RoundWatchRuntimeSampler(
+      economicsMetrics,
+      dispatcher,
+      databasePath,
+      { intervalMilliseconds: economicsSampleIntervalMilliseconds },
+   )
+   : undefined;
 
 const port = parsePositiveInteger(process.env.PORT, 4021);
 
@@ -227,6 +249,7 @@ const server = serve({
 server.on('listening', () => {
    reconciler.start();
    poller.start();
+   runtimeSampler?.start();
    console.log(
       `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
    );
@@ -242,6 +265,11 @@ server.on('listening', () => {
    console.log(
       `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
    );
+   if (economicsInstrumentationEnabled) {
+      console.log(
+         `Economics sample interval: ${economicsSampleIntervalMilliseconds} ms`,
+      );
+   }
 
    if (faultExitAfterSettle) {
       console.warn(
@@ -253,6 +281,7 @@ server.on('listening', () => {
 server.on('close', () => {
    reconciler.stop();
    poller.stop();
+   runtimeSampler?.stop();
    store.close();
    console.log('x402 Resource Server CLOSED');
 });
