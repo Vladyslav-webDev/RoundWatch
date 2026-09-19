@@ -45,6 +45,8 @@ interface ScenarioResult {
    sweeps: number;
    elapsedMs: number;
    totalRequests: number;
+   attributedRequests: number;
+   sharedRequests: number;
    requestsPerWatch: Distribution;
    pagesPerWatch: Distribution;
    transactionsReturnedPerWatch: Distribution;
@@ -191,7 +193,9 @@ try {
          profile: result.profile,
          watches: result.activeWatches,
          sweeps: result.sweeps,
-         'req/watch': round(result.requestsPerWatch.mean),
+         'req total': result.totalRequests,
+      'req shared': result.sharedRequests,
+      'req/watch': round(result.requestsPerWatch.mean),
          'pages/watch': round(result.pagesPerWatch.mean),
          'tx/watch': round(result.transactionsReturnedPerWatch.mean),
          'MB/watch': round(
@@ -374,6 +378,16 @@ async function runScenario(
       });
 
       const totalRequestsPerWatch = snapshots.map(totalIndexerRequests);
+      const attributedRequests = totalRequestsPerWatch.reduce(sum, 0);
+      const dispatcherSnapshot = dispatcher.snapshot();
+      const requestsByPurpose = Object.fromEntries(
+         INDEXER_REQUEST_PURPOSES.map(purpose => [
+            purpose,
+            dispatcherSnapshot.requests[purpose] ?? 0,
+         ]),
+      );
+      const totalRequests = Object.values(requestsByPurpose).reduce(sum, 0);
+      const sharedRequests = Math.max(0, totalRequests - attributedRequests);
       const pagesPerWatch = snapshots.map(item => item.scanPages);
       const transactionsReturnedPerWatch = snapshots.map(
          item => item.transactionsReturned,
@@ -398,7 +412,9 @@ async function runScenario(
          transactionsPerWindow: profile.transactionsPerWindow,
          sweeps,
          elapsedMs,
-         totalRequests: totalRequestsPerWatch.reduce(sum, 0),
+         totalRequests,
+         attributedRequests,
+         sharedRequests,
          requestsPerWatch: distribution(totalRequestsPerWatch),
          pagesPerWatch: distribution(pagesPerWatch),
          transactionsReturnedPerWatch: distribution(
@@ -411,7 +427,7 @@ async function runScenario(
          queueWaitMsPerWatch: distribution(queueWaitMsPerWatch),
          indexerWallMsPerWatch: distribution(indexerWallMsPerWatch),
          roundsCoveredPerWatch: distribution(roundsCoveredPerWatch),
-         requestsByPurpose: sumRequestsByPurpose(snapshots),
+         requestsByPurpose,
          cpuUserMs: cpuUserMicros / 1_000,
          cpuSystemMs: cpuSystemMicros / 1_000,
          peakRssBytes,
@@ -631,21 +647,6 @@ function totalIndexerWallMs(snapshot: WatchWorkSnapshot): number {
       (total, purpose) =>
          total + snapshot.indexer[purpose].wallTime.totalMs,
       0,
-   );
-}
-
-function sumRequestsByPurpose(
-   snapshots: WatchWorkSnapshot[],
-): Record<string, number> {
-   return Object.fromEntries(
-      INDEXER_REQUEST_PURPOSES.map(purpose => [
-         purpose,
-         snapshots.reduce(
-            (total, snapshot) =>
-               total + snapshot.indexer[purpose].attempts,
-            0,
-         ),
-      ]),
    );
 }
 
