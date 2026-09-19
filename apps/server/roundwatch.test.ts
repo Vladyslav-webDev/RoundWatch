@@ -30,6 +30,7 @@ import {
    type IndexedBlock,
    type IndexedWatchTransaction,
    type RoundWatchIndexer,
+   type ScanQueryVariant,
    type TransactionIdPage,
    type TransactionPage,
 } from './roundwatch-indexer.js';
@@ -547,6 +548,163 @@ test('cursor updates are monotonic and stale competing work cannot overwrite pro
    } finally { store.close(); }
 });
 
+test('scan query variants apply only declared server filters and keep exact matching local', async () => {
+   const watch = watchRecord({});
+   const variants: Array<{
+      variant: ScanQueryVariant;
+      expectedRole: 'sender' | 'receiver';
+      expectedAddress: string;
+      expectAmount: boolean;
+      expectNote: boolean;
+   }> = [
+      {
+         variant: 'A',
+         expectedRole: 'sender',
+         expectedAddress: PAYER,
+         expectAmount: false,
+         expectNote: false,
+      },
+      {
+         variant: 'B',
+         expectedRole: 'sender',
+         expectedAddress: PAYER,
+         expectAmount: true,
+         expectNote: false,
+      },
+      {
+         variant: 'C',
+         expectedRole: 'sender',
+         expectedAddress: PAYER,
+         expectAmount: true,
+         expectNote: true,
+      },
+      {
+         variant: 'D',
+         expectedRole: 'receiver',
+         expectedAddress: RECEIVER,
+         expectAmount: true,
+         expectNote: true,
+      },
+   ];
+
+   for (const expected of variants) {
+      let requested: URL | undefined;
+      const dispatcher = new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      });
+      const mockFetch: typeof fetch = async input => {
+         requested = new URL(String(input));
+
+         const sender =
+            expected.variant === 'D' ? RECEIVER : PAYER;
+         const note = Buffer.from(
+            `${SPEC.invoiceNote}:suffix`,
+            'utf8',
+         ).toString('base64');
+
+         return Response.json({
+            transactions: [{
+               id: `TX_${expected.variant}`,
+               sender,
+               note,
+               'confirmed-round': 11,
+               'round-time': 1,
+               'asset-transfer-transaction': {
+                  receiver: RECEIVER,
+                  'asset-id': TESTNET_USDC_ASSET_ID,
+                  amount: Number(SPEC.atomicAmount),
+               },
+            }],
+            'current-round': 20,
+         });
+      };
+
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         dispatcher,
+         mockFetch,
+         1_000,
+         undefined,
+         expected.variant,
+      );
+
+      const page = await indexer.searchWatchPage(watch, 10, 20);
+      assert.equal(page.transactions.length, 1);
+      assert.ok(requested);
+
+      assert.equal(
+         requested.searchParams.get('address-role'),
+         expected.expectedRole,
+      );
+      assert.equal(
+         requested.searchParams.get('address'),
+         expected.expectedAddress,
+      );
+
+      if (expected.expectAmount) {
+         assert.equal(
+            requested.searchParams.get('currency-greater-than'),
+            String(BigInt(SPEC.atomicAmount) - 1n),
+         );
+         assert.equal(
+            requested.searchParams.get('currency-less-than'),
+            String(BigInt(SPEC.atomicAmount) + 1n),
+         );
+      } else {
+         assert.equal(
+            requested.searchParams.has('currency-greater-than'),
+            false,
+         );
+         assert.equal(
+            requested.searchParams.has('currency-less-than'),
+            false,
+         );
+      }
+
+      if (expected.expectNote) {
+         assert.equal(
+            requested.searchParams.get('note-prefix'),
+            Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64'),
+         );
+      } else {
+         assert.equal(requested.searchParams.has('note-prefix'), false);
+      }
+
+      // D is receiver-oriented. A different sender is allowed through
+      // server-filter validation and is rejected later by matchesWatch().
+      if (expected.variant === 'D') {
+         assert.equal(page.transactions[0]?.sender, RECEIVER);
+         assert.equal(matchesWatch(page.transactions[0]!, watch), false);
+      }
+   }
+
+   const noNote = watchRecord({ invoiceNote: undefined });
+   let cUrl: URL | undefined;
+   const cIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async input => {
+         cUrl = new URL(String(input));
+         return Response.json({
+            transactions: [],
+            'current-round': 20,
+         });
+      },
+      1_000,
+      undefined,
+      'C',
+   );
+   await cIndexer.searchWatchPage(noNote, 10, 20);
+   assert.ok(cUrl);
+   assert.equal(cUrl.searchParams.has('note-prefix'), false);
+});
+
 test('Indexer page validation rejects malformed fields, bounds, JSON, and inadequate watermark', async () => {
    const bodies: Array<Response> = [
       Response.json({ 'current-round': 10 }),
@@ -606,11 +764,11 @@ test('Indexer rejects responses that violate requested filters and disables redi
 
    await assert.rejects(
       indexer.searchWatchPage(watchRecord({}), 10, 20),
-      /sender and asset filters/,
+      /requested sender filter/,
    );
    await assert.rejects(
       indexer.searchWatchPage(watchRecord({}), 10, 20),
-      /sender and asset filters/,
+      /requested asset filter/,
    );
    await assert.rejects(
       indexer.searchTransactionPage('SERVICE'),
