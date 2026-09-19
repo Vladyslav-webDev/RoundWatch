@@ -51,6 +51,12 @@ export interface RoundWatchIndexer {
       watchId?: string,
    ): Promise<IndexedAssetTransfer | undefined>;
    getBlock(round: number, watchId?: string): Promise<IndexedBlock>;
+   watchPageQueryKey?(
+      watch: WatchRecord,
+      minRound: number,
+      maxRound: number,
+      nextToken?: string,
+   ): string;
    searchWatchPage(
       watch: WatchRecord,
       minRound: number,
@@ -136,12 +142,65 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       ))!;
    }
 
+   watchPageQueryKey(
+      watch: WatchRecord,
+      minRound: number,
+      maxRound: number,
+      nextToken?: string,
+   ): string {
+      return this.buildWatchSearchUrl(
+         watch,
+         minRound,
+         maxRound,
+         nextToken,
+      ).toString();
+   }
+
    async searchWatchPage(
       watch: WatchRecord,
       minRound: number,
       maxRound: number,
       nextToken?: string,
    ): Promise<TransactionPage> {
+      const plan = buildScanQueryPlan(watch, this.scanQueryVariant);
+      const url = this.buildWatchSearchUrl(
+         watch,
+         minRound,
+         maxRound,
+         nextToken,
+      );
+
+      return (await this.requestUrl(
+         'scan-page',
+         url,
+         body => ({
+            transactions: requiredArray(body, 'transactions').map((item, i) =>
+               parseWatchTransaction(
+                  item,
+                  i,
+                  minRound,
+                  maxRound,
+                  watch,
+                  plan,
+               ),
+            ),
+            currentRound: safeRound(
+               field(body, 'current-round'),
+               'transaction page current-round',
+            ),
+            ...optionalToken(body),
+         }),
+         false,
+         watch.id,
+      ))!;
+   }
+
+   private buildWatchSearchUrl(
+      watch: WatchRecord,
+      minRound: number,
+      maxRound: number,
+      nextToken?: string,
+   ): URL {
       safeRange(minRound, maxRound);
       const plan = buildScanQueryPlan(watch, this.scanQueryVariant);
       const url = new URL(
@@ -175,30 +234,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       }
 
       if (nextToken) url.searchParams.set('next', nextToken);
-
-      return (await this.requestUrl(
-         'scan-page',
-         url,
-         body => ({
-            transactions: requiredArray(body, 'transactions').map((item, i) =>
-               parseWatchTransaction(
-                  item,
-                  i,
-                  minRound,
-                  maxRound,
-                  watch,
-                  plan,
-               ),
-            ),
-            currentRound: safeRound(
-               field(body, 'current-round'),
-               'transaction page current-round',
-            ),
-            ...optionalToken(body),
-         }),
-         false,
-         watch.id,
-      ))!;
+      return url;
    }
 
    async searchTransactionPage(
