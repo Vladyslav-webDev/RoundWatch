@@ -891,6 +891,11 @@ test('50 watches each receive at most one page turn in one fair sweep', async ()
 
       assert.equal(indexer.pageCalls.length, 50);
       assert.equal(
+         indexer.currentRoundCalls,
+         1,
+         'one sweep must share one health tip across all watches',
+      );
+      assert.equal(
          store.listActiveWatches().filter(watch => watch.scanAfterRound === 101).length,
          49,
       );
@@ -904,6 +909,11 @@ test('50 watches each receive at most one page turn in one fair sweep', async ()
       await poller.runOnce();
 
       assert.equal(indexer.pageCalls.length, 51);
+      assert.equal(
+         indexer.currentRoundCalls,
+         2,
+         'the next sweep may fetch one fresh shared tip',
+      );
       assert.equal(indexer.pageCalls.at(-1)?.nextToken, 'busy-page-2');
       assert.equal(
          store.listActiveWatches().every(watch => watch.scanAfterRound === 101),
@@ -1159,9 +1169,13 @@ class FakeIndexer implements RoundWatchIndexer {
    pages: TransactionPage[] = [];
    pageCalls: Array<{ min: number; max: number; nextToken?: string }> = [];
    failPageCalls = new Set<number>();
+   currentRoundCalls = 0;
    block: IndexedBlock;
    constructor(public round: number) { this.block = { round, timestamp: 0 }; }
-   async getCurrentRound(): Promise<number> { return this.round; }
+   async getCurrentRound(): Promise<number> {
+      this.currentRoundCalls += 1;
+      return this.round;
+   }
    async lookupAssetTransfer(): Promise<undefined> { return undefined; }
    async getBlock(): Promise<IndexedBlock> { return this.block; }
    async searchWatchPage(_watch: WatchRecord, min: number, max: number, nextToken?: string): Promise<TransactionPage> {
