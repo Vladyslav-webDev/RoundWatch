@@ -7,6 +7,8 @@ import {
    type IndexerRequestPurpose,
 } from './roundwatch-scheduler.js';
 
+export type ScanQueryVariant = 'A' | 'B' | 'C' | 'D';
+
 export interface IndexedWatchTransaction extends IndexedAssetTransfer {
    roundTime: number;
    note?: string;
@@ -52,6 +54,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       private readonly fetchImplementation: typeof fetch = fetch,
       private readonly timeoutMilliseconds = 10_000,
       private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
+      private readonly scanQueryVariant: ScanQueryVariant = 'A',
    ) {}
 
    async getCurrentRound(
@@ -110,22 +113,59 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       ))!;
    }
 
-   async searchWatchPage(watch: WatchRecord, minRound: number, maxRound: number, nextToken?: string): Promise<TransactionPage> {
+   async searchWatchPage(
+      watch: WatchRecord,
+      minRound: number,
+      maxRound: number,
+      nextToken?: string,
+   ): Promise<TransactionPage> {
       safeRange(minRound, maxRound);
-      const url = new URL(`/v2/assets/${watch.assetId}/transactions`, this.baseUrl);
+      const plan = buildScanQueryPlan(watch, this.scanQueryVariant);
+      const url = new URL(
+         `/v2/assets/${watch.assetId}/transactions`,
+         this.baseUrl,
+      );
       url.searchParams.set('tx-type', 'axfer');
-      url.searchParams.set('address', watch.expectedSender);
-      url.searchParams.set('address-role', 'sender');
+      url.searchParams.set('address', plan.address);
+      url.searchParams.set('address-role', plan.addressRole);
       url.searchParams.set('min-round', String(minRound));
       url.searchParams.set('max-round', String(maxRound));
       url.searchParams.set('limit', '1000');
+
+      if (plan.exactAmount) {
+         const amount = BigInt(watch.atomicAmount);
+         url.searchParams.set(
+            'currency-greater-than',
+            String(amount - 1n),
+         );
+         url.searchParams.set(
+            'currency-less-than',
+            String(amount + 1n),
+         );
+      }
+
+      if (plan.notePrefix) {
+         url.searchParams.set(
+            'note-prefix',
+            Buffer.from(watch.invoiceNote!, 'utf8').toString('base64'),
+         );
+      }
+
       if (nextToken) url.searchParams.set('next', nextToken);
+
       return (await this.requestUrl(
          'scan-page',
          url,
          body => ({
             transactions: requiredArray(body, 'transactions').map((item, i) =>
-               parseWatchTransaction(item, i, minRound, maxRound, watch),
+               parseWatchTransaction(
+                  item,
+                  i,
+                  minRound,
+                  maxRound,
+                  watch,
+                  plan,
+               ),
             ),
             currentRound: safeRound(
                field(body, 'current-round'),
@@ -295,29 +335,135 @@ function parseAssetTransfer(value: unknown, label: string): IndexedAssetTransfer
    };
 }
 
+interface ScanQueryPlan {
+   address: string;
+   addressRole: 'sender' | 'receiver';
+   exactAmount: boolean;
+   notePrefix: boolean;
+}
+
+function buildScanQueryPlan(
+   watch: Pick<
+      WatchRecord,
+      'expectedSender' | 'expectedReceiver' | 'atomicAmount' | 'invoiceNote'
+   >,
+   variant: ScanQueryVariant,
+): ScanQueryPlan {
+   const exactAmount = variant !== 'A';
+   const notePrefix =
+      (variant === 'C' || variant === 'D') &&
+      watch.invoiceNote !== undefined;
+
+   if (exactAmount) {
+      const amount = BigInt(watch.atomicAmount);
+      if (amount <= 0n) {
+         throw new Error(
+            'exact amount Indexer filtering requires a positive atomicAmount',
+         );
+      }
+   }
+
+   return {
+      address: variant === 'D'
+         ? watch.expectedReceiver
+         : watch.expectedSender,
+      addressRole: variant === 'D' ? 'receiver' : 'sender',
+      exactAmount,
+      notePrefix,
+   };
+}
+
 function parseWatchTransaction(
    value: unknown,
    index: number,
    minRound: number,
    maxRound: number,
-   watch: Pick<WatchRecord, 'expectedSender' | 'assetId'>,
+   watch: Pick<
+      WatchRecord,
+      | 'expectedSender'
+      | 'expectedReceiver'
+      | 'assetId'
+      | 'atomicAmount'
+      | 'invoiceNote'
+   >,
+   plan: ScanQueryPlan,
 ): IndexedWatchTransaction {
    const label = `transaction page item ${index}`;
    const parsed = parseAssetTransfer(value, label);
    const transaction = value as IndexerTransaction;
+
    if (parsed.round < minRound || parsed.round > maxRound) {
       throw new Error(`${label} lies outside the requested round range`);
    }
-   if (parsed.sender !== watch.expectedSender || parsed.assetId !== watch.assetId) {
-      throw new Error(`${label} does not satisfy the requested sender and asset filters`);
+   if (parsed.assetId !== watch.assetId) {
+      throw new Error(
+         `${label} does not satisfy the requested asset filter`,
+      );
    }
-   const roundTime = safeRound(transaction['round-time'], `${label} round-time`);
+   if (
+      plan.addressRole === 'sender' &&
+      parsed.sender !== watch.expectedSender
+   ) {
+      throw new Error(
+         `${label} does not satisfy the requested sender filter`,
+      );
+   }
+   if (
+      plan.addressRole === 'receiver' &&
+      parsed.receiver !== watch.expectedReceiver
+   ) {
+      throw new Error(
+         `${label} does not satisfy the requested receiver filter`,
+      );
+   }
+   if (
+      plan.exactAmount &&
+      parsed.atomicAmount !== watch.atomicAmount
+   ) {
+      throw new Error(
+         `${label} does not satisfy the requested amount range`,
+      );
+   }
+
+   const roundTime = safeRound(
+      transaction['round-time'],
+      `${label} round-time`,
+   );
+
+   let note: string | undefined;
    if (transaction.note !== undefined) {
-      if (typeof transaction.note !== 'string' || !isCanonicalBase64(transaction.note)) {
+      if (
+         typeof transaction.note !== 'string' ||
+         !isCanonicalBase64(transaction.note)
+      ) {
          throw new Error(`${label} note is malformed`);
       }
+      note = transaction.note;
    }
-   return { ...parsed, roundTime, ...(transaction.note === undefined ? {} : { note: transaction.note }) };
+
+   if (plan.notePrefix) {
+      if (note === undefined) {
+         throw new Error(
+            `${label} does not satisfy the requested note prefix`,
+         );
+      }
+      const actual = Buffer.from(note, 'base64');
+      const prefix = Buffer.from(watch.invoiceNote!, 'utf8');
+      if (
+         actual.length < prefix.length ||
+         !actual.subarray(0, prefix.length).equals(prefix)
+      ) {
+         throw new Error(
+            `${label} does not satisfy the requested note prefix`,
+         );
+      }
+   }
+
+   return {
+      ...parsed,
+      roundTime,
+      ...(note === undefined ? {} : { note }),
+   };
 }
 
 function parseTransactionSearchItem(
