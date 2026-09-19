@@ -1,3 +1,5 @@
+import { isValidAlgorandAddress } from '@x402/avm';
+
 import {
    MAINNET_NETWORK_CONFIG,
    TESTNET_NETWORK_CONFIG,
@@ -24,10 +26,17 @@ const network = resolveProbeNetwork(
 const indexerUrl =
    process.env.ALGORAND_INDEXER_URL?.trim() || network.indexerUrl;
 
-const SENDER =
+const ZERO_ADDRESS =
    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
-const RECEIVER =
+const PROBE_ADDRESS =
    'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
+
+if (
+   !isValidAlgorandAddress(PROBE_ADDRESS) ||
+   PROBE_ADDRESS === ZERO_ADDRESS
+) {
+   throw new Error('Indexer capability probe requires a non-zero valid address');
+}
 
 console.log(
    `RoundWatch Indexer capability probe network=${network.name} endpoint=${indexerUrl}`,
@@ -50,7 +59,7 @@ const base = new URL(
    indexerUrl,
 );
 base.searchParams.set('tx-type', 'axfer');
-base.searchParams.set('address', SENDER);
+base.searchParams.set('address', PROBE_ADDRESS);
 base.searchParams.set('address-role', 'sender');
 base.searchParams.set('min-round', String(tip));
 base.searchParams.set('max-round', String(tip));
@@ -78,7 +87,7 @@ const probes: Array<{ name: ProbeName; url: URL }> = [
       name: 'receiver-role',
       url: (() => {
          const url = new URL(base);
-         url.searchParams.set('address', RECEIVER);
+         url.searchParams.set('address', PROBE_ADDRESS);
          url.searchParams.set('address-role', 'receiver');
          return url;
       })(),
