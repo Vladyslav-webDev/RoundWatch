@@ -22,6 +22,7 @@ import {
 } from '@x402-avm/extensions';
 
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
+import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import {
    TESTNET_NETWORK_CONFIG,
    type RoundWatchNetworkConfig,
@@ -54,6 +55,7 @@ export interface AppDependencies {
    publicBaseUrl?: string;
    syncFacilitatorOnStart?: boolean;
    requireSettlementIntent?: boolean;
+   economicsMetrics?: RoundWatchEconomicsMetrics;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -108,6 +110,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       publicBaseUrl,
       syncFacilitatorOnStart = true,
       requireSettlementIntent = networkConfig.name === 'mainnet',
+      economicsMetrics,
    } = dependencies;
 
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
@@ -152,6 +155,7 @@ export function createApp(dependencies: AppDependencies): Hono {
          const transfer = await indexer.lookupAssetTransfer(
             settlementEvidence.transaction,
             'activation',
+            watchId,
          );
          const watch = store.getWatch(watchId);
          if (!transfer || !watch) return;
@@ -165,6 +169,7 @@ export function createApp(dependencies: AppDependencies): Hono {
             transfer.round <= (watch.serviceLastValid ?? -1);
          if (!matches) {
             store.markSettlementInvalid(watchId);
+            finishTerminalMetric(economicsMetrics, watch, 'settlement_unknown');
             return;
          }
          store.activateWatch(watchId, settlementEvidence, transfer.round);
@@ -530,6 +535,35 @@ function parseWatchSpec(
          ...(typeof invoiceNote === 'string' ? { invoiceNote } : {}),
       },
    };
+}
+
+function finishTerminalMetric(
+   economicsMetrics: RoundWatchEconomicsMetrics | undefined,
+   watch: WatchRecord,
+   finalState: WatchRecord['state'],
+): void {
+   if (!economicsMetrics) return;
+
+   try {
+      const createdAt = Date.parse(watch.createdAt);
+      economicsMetrics.recordLifecycle(watch.id, {
+         finalState,
+         ...(Number.isFinite(createdAt)
+            ? { timeToTerminalMs: Math.max(0, Date.now() - createdAt) }
+            : {}),
+      });
+      const snapshot = economicsMetrics.finishWatch(watch.id);
+      if (snapshot) {
+         console.info(
+            `RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`,
+         );
+      }
+   } catch (error) {
+      console.warn(
+         'RoundWatch economics terminal metric failed:',
+         error instanceof Error ? error.message : 'Unknown metrics error',
+      );
+   }
 }
 
 function publicWatch(watch: WatchRecord): Record<string, unknown> {
