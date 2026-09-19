@@ -176,20 +176,23 @@ export class RoundWatchEconomicsMetrics {
    }
 
    recordScanPage(watchId: string, observation: ScanPageObservation): void {
-      const metric = this.watch(watchId);
-      metric.scanPages += 1;
-      metric.transactionsReturned += nonNegativeInteger(
+      const returned = nonNegativeInteger(
          observation.transactionsReturned,
          'transactionsReturned',
       );
-      metric.transactionsExamined += nonNegativeInteger(
+      const examined = nonNegativeInteger(
          observation.transactionsExamined,
          'transactionsExamined',
       );
 
-      if (observation.transactionsExamined > observation.transactionsReturned) {
+      if (examined > returned) {
          throw new Error('transactionsExamined cannot exceed transactionsReturned');
       }
+
+      const metric = this.watch(watchId);
+      metric.scanPages += 1;
+      metric.transactionsReturned += returned;
+      metric.transactionsExamined += examined;
    }
 
    recordCoverage(watchId: string, roundsCovered: number): void {
