@@ -68,6 +68,10 @@ interface ScenarioResult {
    walBytes: number;
    uniqueSyntheticTransactionsServed: number;
    transactionReuseFactor: number;
+   logicalScanPages: number;
+   physicalScanRequests: number;
+   scanPageReuseFactor: number;
+   effectivePhysicalRequestsPerWatch: number;
 }
 
 interface Distribution {
@@ -217,9 +221,14 @@ try {
          watches: result.activeWatches,
          sweeps: result.sweeps,
          'req total': result.totalRequests,
-      'req shared': result.sharedRequests,
-      'req/watch': round(result.requestsPerWatch.mean),
+         'req shared': result.sharedRequests,
+         'req/watch attributed': round(result.requestsPerWatch.mean),
+         'req/watch effective': round(
+            result.effectivePhysicalRequestsPerWatch,
+            3,
+         ),
          'pages/watch': round(result.pagesPerWatch.mean),
+         'scan reuse x': round(result.scanPageReuseFactor),
          'tx/watch': round(result.transactionsReturnedPerWatch.mean),
          'unique tx': result.uniqueSyntheticTransactionsServed,
          'reuse x': round(result.transactionReuseFactor),
@@ -431,6 +440,15 @@ async function runScenario(
          item => item.roundsCovered,
       );
 
+      const logicalScanPages = pagesPerWatch.reduce(sum, 0);
+      const physicalScanRequests = requestsByPurpose['scan-page'] ?? 0;
+      const scanPageReuseFactor =
+         physicalScanRequests === 0
+            ? 0
+            : logicalScanPages / physicalScanRequests;
+      const effectivePhysicalRequestsPerWatch =
+         activeWatches === 0 ? 0 : totalRequests / activeWatches;
+
       if (profile.adversarialFilterCollision) {
          const windows = TARGET_ROUNDS / ROUND_WINDOW;
          const expectedTransactions =
@@ -510,6 +528,10 @@ async function runScenario(
                ? 0
                : transactionsReturnedPerWatch.reduce(sum, 0) /
                  syntheticIndexer.uniqueTransactionsServed.size,
+         logicalScanPages,
+         physicalScanRequests,
+         scanPageReuseFactor,
+         effectivePhysicalRequestsPerWatch,
       };
    } finally {
       store.close();
