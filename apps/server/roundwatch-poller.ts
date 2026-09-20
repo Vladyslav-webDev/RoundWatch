@@ -1,7 +1,13 @@
-import { matchesWatch, type RoundWatchIndexer } from './roundwatch-indexer.js';
-import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
+import {
+   matchesWatch,
+   type RoundWatchIndexer,
+   type TransactionPage,
+} from './roundwatch-indexer.js';
+import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
 
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
+export const DEFAULT_SCAN_PAGE_CACHE_ENTRIES = 16;
 
 interface ScanSession {
    minRound: number;
@@ -16,6 +22,7 @@ export class RoundWatchPoller {
    private started = false;
    private nextWatchIndex = 0;
    private readonly sessions = new Map<string, ScanSession>();
+   private readonly historicalPageCache = new Map<string, TransactionPage>();
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -23,9 +30,20 @@ export class RoundWatchPoller {
       private readonly intervalMilliseconds = 5_000,
       private readonly roundWindow = DEFAULT_SCAN_ROUND_WINDOW,
       private readonly now: () => Date = () => new Date(),
+      private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
+      private readonly historicalPageCacheEntries =
+         DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
    ) {
       if (!Number.isSafeInteger(roundWindow) || roundWindow <= 0) {
          throw new Error('roundWindow must be a finite positive integer');
+      }
+      if (
+         !Number.isSafeInteger(historicalPageCacheEntries) ||
+         historicalPageCacheEntries < 0
+      ) {
+         throw new Error(
+            'historicalPageCacheEntries must be a non-negative safe integer',
+         );
       }
    }
 
@@ -59,11 +77,69 @@ export class RoundWatchPoller {
       // watch still receives at most one service turn in this sweep.
       this.nextWatchIndex = (startIndex + 1) % watches.length;
 
+      let sharedTipPromise: Promise<number> | undefined;
+      const sharedPages = new Map<string, Promise<TransactionPage>>();
+
+      const getSweepTip = (): Promise<number> => {
+         sharedTipPromise ??= this.indexer.getCurrentRound('health');
+         return sharedTipPromise;
+      };
+
+      const getSweepPage = (
+         watch: WatchRecord,
+         minRound: number,
+         maxRound: number,
+         nextToken?: string,
+      ) => {
+         const queryKey = this.indexer.watchPageQueryKey?.(
+            watch,
+            minRound,
+            maxRound,
+            nextToken,
+         );
+
+         if (!queryKey) {
+            return this.indexer.searchWatchPage(
+               watch,
+               minRound,
+               maxRound,
+               nextToken,
+            );
+         }
+
+         const cached = this.getCachedHistoricalPage(queryKey);
+         if (cached) {
+            return Promise.resolve(cached);
+         }
+
+         let pending = sharedPages.get(queryKey);
+         if (!pending) {
+            pending = this.indexer.searchWatchPage(
+               watch,
+               minRound,
+               maxRound,
+               nextToken,
+            ).then(page => {
+               if (page.currentRound >= maxRound) {
+                  this.cacheHistoricalPage(queryKey, page);
+               }
+               return page;
+            });
+            sharedPages.set(queryKey, pending);
+         }
+         return pending;
+      };
+
       for (const watch of ordered) {
          try {
-            await this.serviceWatch(watch);
+            await this.serviceWatch(watch, getSweepTip, getSweepPage);
          } catch (error) {
             this.sessions.delete(watch.id);
+            // A cached page may contain a provider continuation token that
+            // later became invalid. Clear the bounded cache on any scan-path
+            // failure so the next sweep restarts from fresh provider state
+            // instead of replaying a stale token forever.
+            this.historicalPageCache.clear();
             console.error(
                `RoundWatch poll failed for watch ${watch.id}:`,
                safeErrorMessage(error),
@@ -72,16 +148,41 @@ export class RoundWatchPoller {
       }
    }
 
-   private async serviceWatch(initial: WatchRecord): Promise<void> {
+   private async serviceWatch(
+      initial: WatchRecord,
+      getSweepTip: () => Promise<number>,
+      getSweepPage: (
+         watch: WatchRecord,
+         minRound: number,
+         maxRound: number,
+         nextToken?: string,
+      ) => Promise<TransactionPage>,
+   ): Promise<void> {
       if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
          console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
          return;
       }
 
+      const workClaim = this.store.claimWorkUnit(initial.id);
+      if (workClaim === 'exhausted') {
+         this.sessions.delete(initial.id);
+         this.finishMetric(initial, 'indeterminate');
+         console.warn(
+            `RoundWatch work budget exhausted watch=${initial.id}; terminal state=indeterminate`,
+         );
+         return;
+      }
+      if (workClaim !== 'claimed') return;
+
+      this.recordMetric(() =>
+         this.economicsMetrics?.recordWorkUnit(initial.id),
+      );
+
       let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
       if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
-         const tip = await this.indexer.getCurrentRound('checkpoint');
-         const block = await this.indexer.getBlock(tip);
+         this.recordMetric(() => this.economicsMetrics?.recordClosingRequest(watch.id));
+         const tip = await this.indexer.getCurrentRound('checkpoint', watch.id);
+         const block = await this.indexer.getBlock(tip, watch.id);
          if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
             this.store.setClosingRound(watch.id, block.round);
             watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
@@ -91,6 +192,7 @@ export class RoundWatchPoller {
 
       if (watch.closingRound !== undefined && watch.scanAfterRound >= watch.closingRound) {
          this.store.markExpired(watch.id, watch.scanAfterRound, watch.closingRound);
+         this.finishMetric(watch, 'expired');
          return;
       }
 
@@ -100,7 +202,7 @@ export class RoundWatchPoller {
          session = undefined;
       }
       if (!session) {
-         const tip = await this.indexer.getCurrentRound('health');
+         const tip = await getSweepTip();
          const maxRound = Math.min(
             watch.scanAfterRound + this.roundWindow,
             tip,
@@ -115,19 +217,29 @@ export class RoundWatchPoller {
          this.sessions.set(watch.id, session);
       }
 
-      const page = await this.indexer.searchWatchPage(
+      const page = await getSweepPage(
          watch,
          session.minRound,
          session.maxRound,
          session.nextToken,
       );
+      let transactionsExamined = 0;
+      const match = page.transactions.find(transaction => {
+         transactionsExamined += 1;
+         return matchesWatch(transaction, watch);
+      });
+      this.recordMetric(() => this.economicsMetrics?.recordScanPage(watch.id, {
+         transactionsReturned: page.transactions.length,
+         transactionsExamined,
+      }));
+
       if (page.currentRound < session.maxRound) {
          throw new Error(`Indexer coverage ${page.currentRound} is below requested round ${session.maxRound}`);
       }
-      const match = page.transactions.find(transaction => matchesWatch(transaction, watch));
       if (match) {
          this.store.markMatched(watch.id, match.transaction, match.round);
          this.sessions.delete(watch.id);
+         this.finishMetric(watch, 'matched');
          console.log(`RoundWatch matched watch ${watch.id} in round ${match.round}`);
          return;
       }
@@ -143,11 +255,81 @@ export class RoundWatchPoller {
       const advanced = this.store.advanceScanRound(watch.id, watch.scanAfterRound, session.maxRound);
       this.sessions.delete(watch.id);
       if (!advanced) return;
+      this.recordMetric(() => this.economicsMetrics?.recordCoverage(
+         watch.id,
+         session.maxRound - watch.scanAfterRound,
+      ));
       console.log(`RoundWatch scan progress watch=${watch.id} coveredThrough=${session.maxRound}`);
       const updated = this.store.getWatch(watch.id);
       if (updated?.closingRound !== undefined && updated.scanAfterRound !== undefined && updated.scanAfterRound === updated.closingRound) {
          this.store.markExpired(updated.id, updated.scanAfterRound, updated.closingRound);
+         this.finishMetric(updated, 'expired');
          console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`);
+      }
+   }
+
+   private getCachedHistoricalPage(
+      queryKey: string,
+   ): TransactionPage | undefined {
+      const page = this.historicalPageCache.get(queryKey);
+      if (!page) return undefined;
+
+      // Refresh insertion order to maintain an LRU eviction policy.
+      this.historicalPageCache.delete(queryKey);
+      this.historicalPageCache.set(queryKey, page);
+      return page;
+   }
+
+   private cacheHistoricalPage(
+      queryKey: string,
+      page: TransactionPage,
+   ): void {
+      if (this.historicalPageCacheEntries === 0) return;
+
+      this.historicalPageCache.delete(queryKey);
+      this.historicalPageCache.set(queryKey, page);
+
+      while (
+         this.historicalPageCache.size >
+         this.historicalPageCacheEntries
+      ) {
+         const oldest = this.historicalPageCache.keys().next().value;
+         if (oldest === undefined) break;
+         this.historicalPageCache.delete(oldest);
+      }
+   }
+
+   private finishMetric(watch: WatchRecord, finalState: WatchState): void {
+      if (!this.economicsMetrics) return;
+
+      const now = this.now().getTime();
+      const createdAt = Date.parse(watch.createdAt);
+      const activatedAt = watch.activatedAt ? Date.parse(watch.activatedAt) : NaN;
+
+      this.recordMetric(() => this.economicsMetrics?.recordLifecycle(watch.id, {
+         finalState,
+         ...(Number.isFinite(activatedAt)
+            ? { activeDurationMs: Math.max(0, now - activatedAt) }
+            : {}),
+         ...(Number.isFinite(createdAt)
+            ? { timeToTerminalMs: Math.max(0, now - createdAt) }
+            : {}),
+      }));
+
+      const snapshot = this.economicsMetrics.finishWatch(watch.id);
+      if (snapshot) {
+         console.info(`RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`);
+      }
+   }
+
+   private recordMetric(operation: () => void): void {
+      try {
+         operation();
+      } catch (error) {
+         console.warn(
+            'RoundWatch economics poll metric failed:',
+            error instanceof Error ? error.message : 'Unknown metrics error',
+         );
       }
    }
 

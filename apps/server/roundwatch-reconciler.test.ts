@@ -111,6 +111,49 @@ test('covered historical absence after LastValid terminalizes nonpayment but ina
    } finally { store.close(); }
 });
 
+test('reconciliation pagination consumes bounded work units and exhausts indeterminate', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 1,
+   });
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+
+   try {
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'reconcile-budget-1' },
+         terms('BUDGETED_ABSENCE'),
+      ).watch;
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 901,
+         nextToken: 'page-2',
+      });
+
+      await reconciler(store, indexer).reconcileOnce();
+
+      const afterFirst = store.getWatch(watch.id);
+      assert.equal(afterFirst?.state, 'settlement_pending');
+      assert.equal(afterFirst?.workUnitsUsed, 1);
+      assert.equal(indexer.pageCalls, 1);
+
+      store.recordReconciliationFailure(watch.id, new Date(0));
+      await reconciler(store, indexer).reconcileOnce();
+
+      const exhausted = store.getWatch(watch.id);
+      assert.equal(exhausted?.state, 'indeterminate');
+      assert.equal(exhausted?.terminalReason, 'work_budget_exhausted');
+      assert.equal(exhausted?.workUnitsUsed, 1);
+      assert.equal(indexer.pageCalls, 1);
+      assert.equal(
+         store.listSettlementReconciliationCandidates().length,
+         0,
+      );
+   } finally {
+      store.close();
+   }
+});
+
 test('confirmed incompatible immutable terms fail closed and runtime values cannot rewrite the purchase', async () => {
    const store = new RoundWatchStore(':memory:');
    const indexer = new FakeLookup(); indexer.lookups.set('WRONG', transfer('WRONG', { atomicAmount: '9999' }));
@@ -147,12 +190,14 @@ class FakeLookup implements SettlementLookupIndexer {
    lookups = new Map<string, IndexedAssetTransfer>();
    throwFor = new Set<string>();
    pages: TransactionIdPage[] = [];
+   pageCalls = 0;
    async lookupAssetTransfer(transactionId: string): Promise<IndexedAssetTransfer | undefined> {
       if (this.throwFor.has(transactionId)) throw new Error('synthetic lookup failure');
       return this.lookups.get(transactionId);
    }
    async getCurrentRound(): Promise<number> { return this.round; }
    async searchTransactionPage(): Promise<TransactionIdPage> {
+      this.pageCalls += 1;
       const page = this.pages.shift(); if (!page) throw new Error('missing fake absence page'); return page;
    }
 }

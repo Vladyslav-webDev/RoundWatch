@@ -44,6 +44,8 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 
 The production server does not contain or need a wallet mnemonic or private key.
 
+> Economics release candidate: source on `feat/economics-instrumentation-v1` is repriced to `0.02 USDC` (`20000` atomic units) per watch. Until that candidate is deployed, the live production table above intentionally remains at the verified `0.001 USDC` contract.
+
 ## API
 
 ### Health

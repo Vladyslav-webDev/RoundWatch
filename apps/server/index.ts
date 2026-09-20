@@ -10,20 +10,37 @@ import {
    resolveRoundWatchNetwork,
    resolveRoundWatchPublicBaseUrl,
 } from './network-config.js';
-import { AlgorandIndexerClient } from './roundwatch-indexer.js';
+import {
+   AlgorandIndexerClient,
+   resolveScanQueryVariant,
+} from './roundwatch-indexer.js';
+import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import {
+   DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
+   RoundWatchRuntimeSampler,
+} from './roundwatch-runtime-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
+import {
+   DEFAULT_SIGNED_PAYMENT_BURST,
+   DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+   DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+} from './free-payment-gate.js';
 import {
    DEFAULT_INDEXER_BURST,
    DEFAULT_INDEXER_CONCURRENCY,
    DEFAULT_INDEXER_REQUESTS_PER_SECOND,
    IndexerRequestDispatcher,
 } from './roundwatch-scheduler.js';
-import { DEFAULT_SCAN_ROUND_WINDOW } from './roundwatch-poller.js';
+import {
+   DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
+   DEFAULT_SCAN_ROUND_WINDOW,
+} from './roundwatch-poller.js';
 import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
    DEFAULT_WATCH_TTL_MILLISECONDS,
+   DEFAULT_WORK_UNIT_BUDGET,
    RoundWatchStore,
    type SettlementEvidence,
    type WatchRecord,
@@ -64,10 +81,17 @@ let publicBaseUrl;
 let watchTtlMilliseconds;
 let maxOpenWatches;
 let maxOpenWatchesPerPayer;
+let workUnitBudget;
 let indexerRequestsPerSecond;
 let indexerBurst;
 let indexerConcurrency;
 let scanRoundWindow;
+let scanPageCacheEntries;
+let economicsSampleIntervalMilliseconds;
+let scanQueryVariant;
+let signedPaymentRequestsPerSecond;
+let signedPaymentBurst;
+let signedPaymentConcurrency;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -90,6 +114,11 @@ try {
       DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
       'ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER',
    );
+   workUnitBudget = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_WORK_UNIT_BUDGET,
+      DEFAULT_WORK_UNIT_BUDGET,
+      'ROUNDWATCH_WORK_UNIT_BUDGET',
+   );
    indexerRequestsPerSecond = parseRequiredPositiveNumber(
       process.env.ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND,
       DEFAULT_INDEXER_REQUESTS_PER_SECOND,
@@ -97,7 +126,39 @@ try {
    );
    indexerBurst = parseRequiredPositiveInteger(process.env.ROUNDWATCH_INDEXER_BURST, DEFAULT_INDEXER_BURST, 'ROUNDWATCH_INDEXER_BURST');
    indexerConcurrency = parseRequiredPositiveInteger(process.env.ROUNDWATCH_INDEXER_CONCURRENCY, DEFAULT_INDEXER_CONCURRENCY, 'ROUNDWATCH_INDEXER_CONCURRENCY');
-   scanRoundWindow = parseRequiredPositiveInteger(process.env.ROUNDWATCH_SCAN_ROUND_WINDOW, DEFAULT_SCAN_ROUND_WINDOW, 'ROUNDWATCH_SCAN_ROUND_WINDOW');
+   scanRoundWindow = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_SCAN_ROUND_WINDOW,
+      DEFAULT_SCAN_ROUND_WINDOW,
+      'ROUNDWATCH_SCAN_ROUND_WINDOW',
+   );
+   scanPageCacheEntries = parseRequiredNonNegativeInteger(
+      process.env.ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES,
+      DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
+      'ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES',
+   );
+   economicsSampleIntervalMilliseconds = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS,
+      DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
+      'ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS',
+   );
+   scanQueryVariant = resolveScanQueryVariant(
+      process.env.ROUNDWATCH_SCAN_QUERY_VARIANT,
+   );
+   signedPaymentRequestsPerSecond = parseRequiredPositiveNumber(
+      process.env.ROUNDWATCH_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+      DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+      'ROUNDWATCH_SIGNED_PAYMENT_REQUESTS_PER_SECOND',
+   );
+   signedPaymentBurst = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_SIGNED_PAYMENT_BURST,
+      DEFAULT_SIGNED_PAYMENT_BURST,
+      'ROUNDWATCH_SIGNED_PAYMENT_BURST',
+   );
+   signedPaymentConcurrency = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_SIGNED_PAYMENT_CONCURRENCY,
+      DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      'ROUNDWATCH_SIGNED_PAYMENT_CONCURRENCY',
+   );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
    process.exit(1);
@@ -105,6 +166,8 @@ try {
 
 const faultExitAfterSettle =
    process.env.ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE?.trim() === '1';
+const economicsInstrumentationEnabled =
+   process.env.ROUNDWATCH_ECONOMICS_METRICS?.trim() === '1';
 
 if (faultExitAfterSettle && networkConfig.name !== 'testnet') {
    console.error(
@@ -168,6 +231,7 @@ const storeOptions = {
    watchTtlMilliseconds,
    maxOpenWatches,
    maxOpenWatchesPerPayer,
+   workUnitBudget,
 };
 const store = faultExitAfterSettle
    ? new TestnetExitAfterSettleStore(databasePath, storeOptions)
@@ -177,17 +241,35 @@ const dispatcher = new IndexerRequestDispatcher({
    burst: indexerBurst,
    concurrency: indexerConcurrency,
 });
-const indexer = new AlgorandIndexerClient(indexerUrl, dispatcher);
+const economicsMetrics = economicsInstrumentationEnabled
+   ? new RoundWatchEconomicsMetrics()
+   : undefined;
+const indexer = new AlgorandIndexerClient(
+   indexerUrl,
+   dispatcher,
+   fetch,
+   10_000,
+   economicsMetrics,
+   scanQueryVariant,
+);
 const poller = new RoundWatchPoller(
    store,
    indexer,
    pollIntervalMilliseconds,
    scanRoundWindow,
+   undefined,
+   economicsMetrics,
+   scanPageCacheEntries,
 );
-const reconciler = new SettlementReconciler(store, indexer, {
-   network: networkConfig.network,
-   intervalMilliseconds: reconciliationIntervalMilliseconds,
-});
+const reconciler = new SettlementReconciler(
+   store,
+   indexer,
+   {
+      network: networkConfig.network,
+      intervalMilliseconds: reconciliationIntervalMilliseconds,
+   },
+   economicsMetrics,
+);
 const app = createApp({
    avmAddress,
    facilitatorClient,
@@ -195,7 +277,21 @@ const app = createApp({
    indexer,
    networkConfig,
    publicBaseUrl,
+   economicsMetrics,
+   signedPaymentGateOptions: {
+      requestsPerSecond: signedPaymentRequestsPerSecond,
+      burst: signedPaymentBurst,
+      concurrency: signedPaymentConcurrency,
+   },
 });
+const runtimeSampler = economicsMetrics
+   ? new RoundWatchRuntimeSampler(
+      economicsMetrics,
+      dispatcher,
+      databasePath,
+      { intervalMilliseconds: economicsSampleIntervalMilliseconds },
+   )
+   : undefined;
 
 const port = parsePositiveInteger(process.env.PORT, 4021);
 
@@ -207,6 +303,7 @@ const server = serve({
 server.on('listening', () => {
    reconciler.start();
    poller.start();
+   runtimeSampler?.start();
    console.log(
       `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
    );
@@ -218,7 +315,25 @@ server.on('listening', () => {
    console.log(
       `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
    );
+   console.log(
+      `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
+   );
+   console.log(
+      `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
+   );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
+   console.log(`Indexer scan query variant: ${scanQueryVariant}`);
+   console.log(
+      `Historical scan-page cache: ${scanPageCacheEntries} entries`,
+   );
+   console.log(
+      `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
+   );
+   if (economicsInstrumentationEnabled) {
+      console.log(
+         `Economics sample interval: ${economicsSampleIntervalMilliseconds} ms`,
+      );
+   }
 
    if (faultExitAfterSettle) {
       console.warn(
@@ -230,6 +345,7 @@ server.on('listening', () => {
 server.on('close', () => {
    reconciler.stop();
    poller.stop();
+   runtimeSampler?.stop();
    store.close();
    console.log('x402 Resource Server CLOSED');
 });
@@ -286,6 +402,24 @@ function parseRequiredPositiveInteger(
 
    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
       throw new Error(`${variableName} must be a finite positive integer`);
+   }
+
+   return parsed;
+}
+
+function parseRequiredNonNegativeInteger(
+   value: string | undefined,
+   fallback: number,
+   variableName: string,
+): number {
+   const parsed = value === undefined || value.trim() === ''
+      ? fallback
+      : Number(value);
+
+   if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      throw new Error(
+         `${variableName} must be a non-negative safe integer`,
+      );
    }
 
    return parsed;

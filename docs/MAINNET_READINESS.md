@@ -22,6 +22,8 @@ This is a dated evidence record, not an availability or performance guarantee.
 
 The production server has no mnemonic or private key. The dedicated payer signs locally.
 
+The economics release candidate changes the service purchase contract to `0.02 USDC` (`20000` atomic units). This section intentionally keeps the verified live `0.001 USDC` baseline until the repriced candidate is deployed and confirmed by an unpaid MainNet `402` preflight. The historical paid E2E below remains evidence of the earlier `1000`-atomic contract and must not be rewritten.
+
 ## Production hardening and current release
 
 The initial production-readiness audit identified failure-path issues around

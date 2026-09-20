@@ -21,7 +21,18 @@ import {
    declareDiscoveryExtension,
 } from '@x402-avm/extensions';
 
+import {
+   DEFAULT_SIGNED_PAYMENT_BURST,
+   DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+   DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+   SignedPaymentGate,
+   type SignedPaymentGateOptions,
+} from './free-payment-gate.js';
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
+import type {
+   FreeRequestCategory,
+   RoundWatchEconomicsMetrics,
+} from './roundwatch-metrics.js';
 import {
    TESTNET_NETWORK_CONFIG,
    type RoundWatchNetworkConfig,
@@ -36,7 +47,7 @@ import { WatchCapacityError } from './roundwatch-store.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
-export const ROUNDWATCH_SERVICE_PRICE_USD = '0.001';
+export const ROUNDWATCH_SERVICE_PRICE_USD = '0.02';
 export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
    ROUNDWATCH_SERVICE_PRICE_USD,
    USDC_DECIMALS,
@@ -44,6 +55,7 @@ export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
 
 const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 
 export interface AppDependencies {
    avmAddress: string;
@@ -54,6 +66,8 @@ export interface AppDependencies {
    publicBaseUrl?: string;
    syncFacilitatorOnStart?: boolean;
    requireSettlementIntent?: boolean;
+   economicsMetrics?: RoundWatchEconomicsMetrics;
+   signedPaymentGateOptions?: SignedPaymentGateOptions;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -66,7 +80,8 @@ const demoDiscovery = declareDiscoveryExtension({
    },
 });
 
-const watchDiscovery = declareDiscoveryExtension({
+function createWatchDiscovery(workUnitBudget: number) {
+   return declareDiscoveryExtension({
    bodyType: 'json',
    input: {
       idempotencyKey: 'invoice-2026-09-15-001',
@@ -93,10 +108,13 @@ const watchDiscovery = declareDiscoveryExtension({
    output: {
       example: {
          watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
-         message: 'Durable watch activated after confirmed x402 settlement',
+         workUnitBudget,
+         message:
+            'Durable watch activated after confirmed x402 settlement; incomplete coverage terminates as indeterminate, never expired',
       },
    },
-});
+   });
+}
 
 export function createApp(dependencies: AppDependencies): Hono {
    const {
@@ -108,8 +126,20 @@ export function createApp(dependencies: AppDependencies): Hono {
       publicBaseUrl,
       syncFacilitatorOnStart = true,
       requireSettlementIntent = networkConfig.name === 'mainnet',
+      economicsMetrics,
+      signedPaymentGateOptions,
    } = dependencies;
 
+   const signedPaymentGate = new SignedPaymentGate(
+      signedPaymentGateOptions ?? {
+         requestsPerSecond:
+            DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+         burst: DEFAULT_SIGNED_PAYMENT_BURST,
+         concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      },
+   );
+   const workUnitBudget = store.configuredWorkUnitBudget();
+   const watchDiscovery = createWatchDiscovery(workUnitBudget);
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
    const watchRouteKey = `POST ${watchPath}`;
    const publicDemoResource = publicBaseUrl ? `${publicBaseUrl}/demo` : undefined;
@@ -152,6 +182,7 @@ export function createApp(dependencies: AppDependencies): Hono {
          const transfer = await indexer.lookupAssetTransfer(
             settlementEvidence.transaction,
             'activation',
+            watchId,
          );
          const watch = store.getWatch(watchId);
          if (!transfer || !watch) return;
@@ -165,6 +196,7 @@ export function createApp(dependencies: AppDependencies): Hono {
             transfer.round <= (watch.serviceLastValid ?? -1);
          if (!matches) {
             store.markSettlementInvalid(watchId);
+            finishTerminalMetric(economicsMetrics, watch, 'settlement_unknown');
             return;
          }
          store.activateWatch(watchId, settlementEvidence, transfer.round);
@@ -198,6 +230,43 @@ export function createApp(dependencies: AppDependencies): Hono {
 
    const app = new Hono();
 
+   if (economicsMetrics) {
+      app.use(async (c, next) => {
+         const startedAt = performance.now();
+         const requestBytes = declaredContentLength(
+            c.req.header('content-length'),
+         );
+
+         await next();
+
+         const wallTimeMs = Math.max(0, performance.now() - startedAt);
+         const category = classifyFreeRequest(
+            c.req.method,
+            c.req.path,
+            c.res.status,
+            watchPath,
+            c.req.header('payment-signature') !== undefined,
+         );
+
+         if (!category) return;
+
+         const responseBytes = await responseByteLength(c.res);
+         try {
+            economicsMetrics.recordFreeRequest(category, {
+               status: c.res.status,
+               ...(requestBytes === undefined ? {} : { requestBytes }),
+               responseBytes,
+               wallTimeMs,
+            });
+         } catch (error) {
+            console.warn(
+               'RoundWatch economics free-request metric failed:',
+               error instanceof Error ? error.message : 'Unknown metrics error',
+            );
+         }
+      });
+   }
+
    app.get('/health', c => {
       return c.json({
          status: 'ok',
@@ -227,6 +296,62 @@ export function createApp(dependencies: AppDependencies): Hono {
             }),
             { status: 500, headers },
          );
+      }
+   });
+
+   app.use(watchPath, async (c, next) => {
+      if (c.req.method !== 'POST') {
+         await next();
+         return;
+      }
+
+      const paymentHeader = c.req.header('payment-signature');
+      if (!paymentHeader) {
+         await next();
+         return;
+      }
+
+      if (
+         Buffer.byteLength(paymentHeader, 'utf8') >
+         MAX_PAYMENT_SIGNATURE_HEADER_BYTES
+      ) {
+         return c.json(
+            {
+               error: 'PAYMENT-SIGNATURE header is too large',
+               code: 'payment_signature_header_too_large',
+            },
+            400,
+         );
+      }
+
+      try {
+         decodePaymentSignatureHeader(paymentHeader);
+      } catch {
+         return c.json(
+            {
+               error: 'Invalid PAYMENT-SIGNATURE header',
+               code: 'invalid_payment_signature_header',
+            },
+            400,
+         );
+      }
+
+      const admission = signedPaymentGate.tryAcquire();
+      if (!admission.allowed) {
+         c.header('retry-after', '1');
+         return c.json(
+            {
+               error: 'Payment verification capacity is temporarily exhausted',
+               code: 'payment_verification_rate_limited',
+            },
+            429,
+         );
+      }
+
+      try {
+         await next();
+      } finally {
+         admission.release();
       }
    });
 
@@ -266,7 +391,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                   },
                ],
                ...(publicWatchResource ? { resource: publicWatchResource } : {}),
-               description: `Create one durable RoundWatch ${networkConfig.name} watch`,
+               description: `Create one durable RoundWatch ${networkConfig.name} watch with a ${workUnitBudget}-turn background work budget; matched and expired are proofs, while exhausted work terminates as indeterminate`,
                mimeType: 'application/json',
                extensions: watchDiscovery,
             },
@@ -371,6 +496,7 @@ export function createApp(dependencies: AppDependencies): Hono {
 
       return c.json({
          watchId: prepared.watch.id,
+         workUnitBudget: prepared.watch.workUnitBudget,
          message:
             'The watch is returned only if x402 settlement and durable activation succeed',
       });
@@ -530,6 +656,96 @@ function parseWatchSpec(
          ...(typeof invoiceNote === 'string' ? { invoiceNote } : {}),
       },
    };
+}
+
+function classifyFreeRequest(
+   method: string,
+   path: string,
+   status: number,
+   watchPath: string,
+   hasPaymentSignature: boolean,
+): FreeRequestCategory | undefined {
+   if (method === 'GET' && path === '/health') {
+      return 'health';
+   }
+
+   if (
+      method === 'GET' &&
+      path.startsWith(`${watchPath}/`)
+   ) {
+      return 'watch-status';
+   }
+
+   if (
+      method === 'POST' &&
+      path === watchPath &&
+      status >= 400 &&
+      hasPaymentSignature
+   ) {
+      return 'watch-create-payment-rejected';
+   }
+
+   if (method === 'POST' && path === watchPath && status === 402) {
+      return 'watch-create-402';
+   }
+
+   if (
+      method === 'POST' &&
+      path === watchPath &&
+      status >= 400
+   ) {
+      return 'watch-create-rejected';
+   }
+
+   return undefined;
+}
+
+function declaredContentLength(value: string | undefined): number | undefined {
+   if (!value) return undefined;
+   const parsed = Number(value);
+   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+async function responseByteLength(response: Response): Promise<number> {
+   const declared = declaredContentLength(
+      response.headers.get('content-length') ?? undefined,
+   );
+   if (declared !== undefined) return declared;
+
+   try {
+      return (await response.clone().arrayBuffer()).byteLength;
+   } catch {
+      return 0;
+   }
+}
+
+function finishTerminalMetric(
+   economicsMetrics: RoundWatchEconomicsMetrics | undefined,
+   watch: WatchRecord,
+   finalState: WatchRecord['state'],
+): void {
+   if (!economicsMetrics) return;
+
+   try {
+      const createdAt = Date.parse(watch.createdAt);
+      economicsMetrics.recordLifecycle(watch.id, {
+         finalState,
+         ...(Number.isFinite(createdAt)
+            ? { timeToTerminalMs: Math.max(0, Date.now() - createdAt) }
+            : {}),
+      });
+      const snapshot = economicsMetrics.finishWatch(watch.id);
+      if (snapshot) {
+         console.info(
+            `RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`,
+         );
+      }
+   } catch (error) {
+      console.warn(
+         'RoundWatch economics terminal metric failed:',
+         error instanceof Error ? error.message : 'Unknown metrics error',
+      );
+   }
 }
 
 function publicWatch(watch: WatchRecord): Record<string, unknown> {
