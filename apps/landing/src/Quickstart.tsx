@@ -67,7 +67,7 @@ export default function QuickstartPage() {
           <div className="quickstart-facts mono">
             <span>Algorand MainNet</span>
             <span>USDC ASA 31566704</span>
-            <span>0.001 USDC service fee</span>
+            <span>0.02 USDC service fee</span>
             <span>30 minute eligibility deadline</span>
           </div>
         </section>
@@ -156,7 +156,10 @@ export default function QuickstartPage() {
                 matched watch exposes the exact Algorand transaction ID and confirmed
                 round that satisfied the watch. Passing the 30-minute deadline does not
                 itself produce <code>expired</code>; terminal expiry requires complete
-                indexed coverage through a fixed closing checkpoint.
+                indexed coverage through a fixed closing checkpoint. If the
+                durable 500-turn work budget is exhausted before a match or complete
+                expiry proof, the terminal state is <code>indeterminate</code>, not
+                <code>expired</code>.
               </p>
               <CodeBlock>{statusRequest}</CodeBlock>
               <div className="quickstart-states mono" aria-label="Watch states">
@@ -165,6 +168,7 @@ export default function QuickstartPage() {
                 <span>matched</span>
                 <span>settlement_unknown</span>
                 <span>expired</span>
+                <span>indeterminate</span>
               </div>
             </div>
           </article>
@@ -186,11 +190,15 @@ export default function QuickstartPage() {
             </div>
             <div>
               <dt>Service fee</dt>
-              <dd>0.001 USDC</dd>
+              <dd>0.02 USDC</dd>
             </div>
             <div>
               <dt>Eligibility deadline</dt>
               <dd>30 minutes from durable creation; expiry is proof-based</dd>
+            </div>
+            <div>
+              <dt>Work budget</dt>
+              <dd>500 durable background turns; exhaustion → indeterminate</dd>
             </div>
             <div>
               <dt>Open capacity</dt>
