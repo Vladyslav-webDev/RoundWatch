@@ -8,16 +8,21 @@ export type WatchState =
    | 'active'
    | 'matched'
    | 'settlement_unknown'
-   | 'expired';
+   | 'expired'
+   | 'indeterminate';
+
+export type WatchTerminalReason = 'work_budget_exhausted';
 
 export const DEFAULT_WATCH_TTL_MILLISECONDS = 30 * 60 * 1_000;
 export const DEFAULT_MAX_OPEN_WATCHES = 50;
 export const DEFAULT_MAX_OPEN_WATCHES_PER_PAYER = 5;
+export const DEFAULT_WORK_UNIT_BUDGET = 500;
 
 export interface RoundWatchStoreOptions {
    watchTtlMilliseconds?: number;
    maxOpenWatches?: number;
    maxOpenWatchesPerPayer?: number;
+   workUnitBudget?: number;
    now?: () => Date;
 }
 
@@ -75,6 +80,9 @@ export interface WatchRecord extends WatchSpec {
    serviceLastValid?: number;
    reconciliationAttempts: number;
    reconciliationNextAttemptAt?: string;
+   workUnitBudget?: number;
+   workUnitsUsed: number;
+   terminalReason?: WatchTerminalReason;
 }
 
 export interface SettlementEvidence {
@@ -115,6 +123,9 @@ interface WatchRow {
    service_last_valid: number | null;
    reconciliation_attempts: number;
    reconciliation_next_attempt_at: string | null;
+   work_unit_budget: number | null;
+   work_units_used: number;
+   terminal_reason: WatchTerminalReason | null;
 }
 
 export class RoundWatchStore {
@@ -122,6 +133,7 @@ export class RoundWatchStore {
    private readonly watchTtlMilliseconds: number;
    private readonly maxOpenWatches: number;
    private readonly maxOpenWatchesPerPayer: number;
+   private readonly workUnitBudget: number;
    private readonly now: () => Date;
 
    constructor(
@@ -139,6 +151,10 @@ export class RoundWatchStore {
       this.maxOpenWatchesPerPayer = assertPositiveInteger(
          options.maxOpenWatchesPerPayer ?? DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
          'maxOpenWatchesPerPayer',
+      );
+      this.workUnitBudget = assertPositiveInteger(
+         options.workUnitBudget ?? DEFAULT_WORK_UNIT_BUDGET,
+         'workUnitBudget',
       );
       this.now = options.now ?? (() => new Date());
 
@@ -171,7 +187,19 @@ export class RoundWatchStore {
       this.ensureColumn('service_last_valid', 'service_last_valid INTEGER');
       this.ensureColumn('reconciliation_attempts', 'reconciliation_attempts INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('reconciliation_next_attempt_at', 'reconciliation_next_attempt_at TEXT');
-      this.ensureExpiredStateConstraint();
+      this.ensureColumn('work_unit_budget', 'work_unit_budget INTEGER');
+      this.ensureColumn('work_units_used', 'work_units_used INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('terminal_reason', 'terminal_reason TEXT');
+      this.ensureWatchStateConstraint();
+
+      // Existing rows predate the durable work contract. Give them a fresh
+      // conservative budget from migration time instead of leaving an
+      // accidentally unbounded obligation after deploy.
+      this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET work_unit_budget = ?
+         WHERE work_unit_budget IS NULL
+      `).run(this.workUnitBudget);
 
       this.database.exec(`
          CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_expected_service_tx_unique
@@ -286,8 +314,11 @@ export class RoundWatchStore {
                service_last_valid,
                created_at,
                expires_at,
-               evidence_version
-            ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               evidence_version,
+               work_unit_budget,
+               work_units_used,
+               terminal_reason
+            ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
          `).run(
             id,
             spec.idempotencyKey,
@@ -307,6 +338,7 @@ export class RoundWatchStore {
             createdAt,
             expiresAt,
             settlementIntent ? 1 : 0,
+            this.workUnitBudget,
          );
 
          const inserted = this.database.prepare(`
@@ -406,6 +438,54 @@ export class RoundWatchStore {
       `).run(id);
    }
 
+   claimWorkUnit(
+      id: string,
+   ): 'claimed' | 'exhausted' | 'inactive' {
+      const claimed = this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET work_units_used = work_units_used + 1
+         WHERE id = ?
+           AND state IN ('settlement_pending', 'settlement_unknown', 'active')
+           AND work_unit_budget IS NOT NULL
+           AND work_units_used < work_unit_budget
+      `).run(id);
+
+      if (claimed.changes === 1) {
+         return 'claimed';
+      }
+
+      const watch = this.getWatch(id);
+      if (
+         !watch ||
+         !['settlement_pending', 'settlement_unknown', 'active'].includes(
+            watch.state,
+         )
+      ) {
+         return 'inactive';
+      }
+
+      if (
+         watch.workUnitBudget !== undefined &&
+         watch.workUnitsUsed >= watch.workUnitBudget
+      ) {
+         const exhausted = this.database.prepare(`
+            UPDATE roundwatch_watches
+            SET
+               state = 'indeterminate',
+               terminal_reason = 'work_budget_exhausted',
+               settlement_reconciliation_terminal = 1
+            WHERE id = ?
+              AND state IN ('settlement_pending', 'settlement_unknown', 'active')
+              AND work_unit_budget IS NOT NULL
+              AND work_units_used >= work_unit_budget
+         `).run(id);
+
+         return exhausted.changes === 1 ? 'exhausted' : 'inactive';
+      }
+
+      return 'inactive';
+   }
+
    markMatched(
       id: string,
       transaction: string,
@@ -495,6 +575,10 @@ export class RoundWatchStore {
       `).run(nextAttemptAt.toISOString(), id);
    }
 
+   configuredWorkUnitBudget(): number {
+      return this.workUnitBudget;
+   }
+
    close(): void {
       this.database.close();
    }
@@ -530,7 +614,8 @@ export class RoundWatchStore {
                   'active',
                   'matched',
                   'settlement_unknown',
-                  'expired'
+                  'expired',
+                  'indeterminate'
                )
             ),
             expected_sender TEXT NOT NULL,
@@ -560,19 +645,25 @@ export class RoundWatchStore {
             service_first_valid INTEGER,
             service_last_valid INTEGER,
             reconciliation_attempts INTEGER NOT NULL DEFAULT 0,
-            reconciliation_next_attempt_at TEXT
+            reconciliation_next_attempt_at TEXT,
+            work_unit_budget INTEGER,
+            work_units_used INTEGER NOT NULL DEFAULT 0,
+            terminal_reason TEXT
          );
       `);
    }
 
-   private ensureExpiredStateConstraint(): void {
+   private ensureWatchStateConstraint(): void {
       const schema = this.database.prepare(`
          SELECT sql
          FROM sqlite_master
          WHERE type = 'table' AND name = 'roundwatch_watches'
       `).get() as unknown as { sql?: string } | undefined;
 
-      if (schema?.sql?.includes("'expired'")) {
+      if (
+         schema?.sql?.includes("'expired'") &&
+         schema.sql.includes("'indeterminate'")
+      ) {
          return;
       }
 
@@ -615,7 +706,10 @@ export class RoundWatchStore {
                service_first_valid,
                service_last_valid,
                reconciliation_attempts,
-               reconciliation_next_attempt_at
+               reconciliation_next_attempt_at,
+               work_unit_budget,
+               work_units_used,
+               terminal_reason
             )
             SELECT
                id,
@@ -648,7 +742,10 @@ export class RoundWatchStore {
                service_first_valid,
                service_last_valid,
                reconciliation_attempts,
-               reconciliation_next_attempt_at
+               reconciliation_next_attempt_at,
+               work_unit_budget,
+               work_units_used,
+               terminal_reason
             FROM roundwatch_watches_legacy;
 
             DROP TABLE roundwatch_watches_legacy;
@@ -776,6 +873,9 @@ function mapRow(row: WatchRow): WatchRecord {
       ...(row.service_last_valid === null ? {} : { serviceLastValid: row.service_last_valid }),
       reconciliationAttempts: row.reconciliation_attempts,
       ...(row.reconciliation_next_attempt_at === null ? {} : { reconciliationNextAttemptAt: row.reconciliation_next_attempt_at }),
+      ...(row.work_unit_budget === null ? {} : { workUnitBudget: row.work_unit_budget }),
+      workUnitsUsed: row.work_units_used,
+      ...(row.terminal_reason === null ? {} : { terminalReason: row.terminal_reason }),
    };
 }
 

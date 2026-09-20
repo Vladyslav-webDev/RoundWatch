@@ -3,7 +3,7 @@ import { isValidAlgorandAddress } from '@x402/avm';
 export const ALGORAND_MAINNET =
    'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=' as const;
 export const USDC_MAINNET_ASA_ID = 31_566_704;
-export const SERVICE_ATOMIC_AMOUNT = '1000';
+export const SERVICE_ATOMIC_AMOUNT = '20000';
 export const INVOICE_ATOMIC_AMOUNT = '1';
 export const MAX_INVOICE_ATOMIC_AMOUNT = 1n;
 export const EXPECTED_RECEIVER =
