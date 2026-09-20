@@ -52,7 +52,7 @@ console.log(
       'RoundWatch Storage Economics Benchmark v1',
       `rows: ${ROW_COUNTS.join(', ')}`,
       `states: ${STATES.join(', ')}`,
-      'Measures isolated SQLite+WAL footprint. This is not a production IOPS benchmark.',
+      'Measures isolated retained SQLite footprint plus outstanding WAL before close. WAL size is not cumulative write amplification.',
    ].join('\n'),
 );
 
@@ -97,7 +97,10 @@ function runScenario(
    const store = new RoundWatchStore(databasePath, {
       maxOpenWatches: Math.max(rows + 10, 100),
       maxOpenWatchesPerPayer: Math.max(rows + 10, 100),
-      workUnitBudget: 500,
+      // Storage footprint is independent of how many turns were needed to
+      // reach indeterminate. Use one turn there so this benchmark measures
+      // retained row size instead of millions of historical UPDATE writes.
+      workUnitBudget: state === 'indeterminate' ? 1 : 500,
       now: () => new Date('2026-09-20T12:00:00.000Z'),
    });
 
@@ -230,13 +233,11 @@ function createWatchInState(
       return;
    }
 
-   for (let unit = 0; unit < 500; unit += 1) {
-      const result = store.claimWorkUnit(active.id);
-      if (result !== 'claimed') {
-         throw new Error(
-            `expected claimed work unit ${unit}, got ${result}`,
-         );
-      }
+   const claimed = store.claimWorkUnit(active.id);
+   if (claimed !== 'claimed') {
+      throw new Error(
+         `expected claimed work unit, got ${claimed}`,
+      );
    }
    const exhausted = store.claimWorkUnit(active.id);
    if (exhausted !== 'exhausted') {
