@@ -27,9 +27,11 @@ import {
 import {
    AlgorandIndexerClient,
    matchesWatch,
+   resolveScanQueryVariant,
    type IndexedBlock,
    type IndexedWatchTransaction,
    type RoundWatchIndexer,
+   type ScanQueryVariant,
    type TransactionIdPage,
    type TransactionPage,
 } from './roundwatch-indexer.js';
@@ -89,6 +91,7 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
       assert.equal(required.network, ALGORAND_TESTNET);
       assert.equal(required.payTo, RECEIVER);
+      assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '20000');
       assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
       assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
@@ -547,6 +550,176 @@ test('cursor updates are monotonic and stale competing work cannot overwrite pro
    } finally { store.close(); }
 });
 
+test('runtime scan query strategy defaults to C and validates explicit rollback variants', () => {
+   assert.equal(resolveScanQueryVariant(undefined), 'C');
+   assert.equal(resolveScanQueryVariant(''), 'C');
+   assert.equal(resolveScanQueryVariant(' c '), 'C');
+   assert.equal(resolveScanQueryVariant('A'), 'A');
+   assert.equal(resolveScanQueryVariant('B'), 'B');
+   assert.equal(resolveScanQueryVariant('D'), 'D');
+   assert.throws(
+      () => resolveScanQueryVariant('E'),
+      /must be one of A, B, C, D/,
+   );
+});
+
+test('scan query variants apply only declared server filters and keep exact matching local', async () => {
+   const watch = watchRecord({});
+   const variants: Array<{
+      variant: ScanQueryVariant;
+      expectedRole: 'sender' | 'receiver';
+      expectedAddress: string;
+      expectAmount: boolean;
+      expectNote: boolean;
+   }> = [
+      {
+         variant: 'A',
+         expectedRole: 'sender',
+         expectedAddress: PAYER,
+         expectAmount: false,
+         expectNote: false,
+      },
+      {
+         variant: 'B',
+         expectedRole: 'sender',
+         expectedAddress: PAYER,
+         expectAmount: true,
+         expectNote: false,
+      },
+      {
+         variant: 'C',
+         expectedRole: 'sender',
+         expectedAddress: PAYER,
+         expectAmount: true,
+         expectNote: true,
+      },
+      {
+         variant: 'D',
+         expectedRole: 'receiver',
+         expectedAddress: RECEIVER,
+         expectAmount: true,
+         expectNote: true,
+      },
+   ];
+
+   for (const expected of variants) {
+      let requested: URL | undefined;
+      const dispatcher = new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      });
+      const mockFetch: typeof fetch = async input => {
+         requested = new URL(String(input));
+
+         const sender =
+            expected.variant === 'D' ? RECEIVER : PAYER;
+         const note = Buffer.from(
+            `${SPEC.invoiceNote}:suffix`,
+            'utf8',
+         ).toString('base64');
+
+         return Response.json({
+            transactions: [{
+               id: `TX_${expected.variant}`,
+               sender,
+               note,
+               'confirmed-round': 11,
+               'round-time': 1,
+               'asset-transfer-transaction': {
+                  receiver: RECEIVER,
+                  'asset-id': TESTNET_USDC_ASSET_ID,
+                  amount: Number(SPEC.atomicAmount),
+               },
+            }],
+            'current-round': 20,
+         });
+      };
+
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         dispatcher,
+         mockFetch,
+         1_000,
+         undefined,
+         expected.variant,
+      );
+
+      const page = await indexer.searchWatchPage(watch, 10, 20);
+      assert.equal(page.transactions.length, 1);
+      assert.ok(requested);
+
+      assert.equal(
+         requested.searchParams.get('address-role'),
+         expected.expectedRole,
+      );
+      assert.equal(
+         requested.searchParams.get('address'),
+         expected.expectedAddress,
+      );
+
+      if (expected.expectAmount) {
+         assert.equal(
+            requested.searchParams.get('currency-greater-than'),
+            String(BigInt(SPEC.atomicAmount) - 1n),
+         );
+         assert.equal(
+            requested.searchParams.get('currency-less-than'),
+            String(BigInt(SPEC.atomicAmount) + 1n),
+         );
+      } else {
+         assert.equal(
+            requested.searchParams.has('currency-greater-than'),
+            false,
+         );
+         assert.equal(
+            requested.searchParams.has('currency-less-than'),
+            false,
+         );
+      }
+
+      if (expected.expectNote) {
+         assert.equal(
+            requested.searchParams.get('note-prefix'),
+            Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64'),
+         );
+      } else {
+         assert.equal(requested.searchParams.has('note-prefix'), false);
+      }
+
+      // D is receiver-oriented. A different sender is allowed through
+      // server-filter validation and is rejected later by matchesWatch().
+      if (expected.variant === 'D') {
+         assert.equal(page.transactions[0]?.sender, RECEIVER);
+         assert.equal(matchesWatch(page.transactions[0]!, watch), false);
+      }
+   }
+
+   const noNote = watchRecord({ invoiceNote: undefined });
+   let cUrl: URL | undefined;
+   const cIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async input => {
+         cUrl = new URL(String(input));
+         return Response.json({
+            transactions: [],
+            'current-round': 20,
+         });
+      },
+      1_000,
+      undefined,
+      'C',
+   );
+   await cIndexer.searchWatchPage(noNote, 10, 20);
+   assert.ok(cUrl);
+   assert.equal(cUrl.searchParams.has('note-prefix'), false);
+});
+
 test('Indexer page validation rejects malformed fields, bounds, JSON, and inadequate watermark', async () => {
    const bodies: Array<Response> = [
       Response.json({ 'current-round': 10 }),
@@ -554,6 +727,10 @@ test('Indexer page validation rejects malformed fields, bounds, JSON, and inadeq
       Response.json({ transactions: [{ ...rawTx(11), 'confirmed-round': 99 }], 'current-round': 99 }),
       Response.json({ transactions: [rawTx(11)], 'current-round': 20, 'next-token': 7 }),
       Response.json({ transactions: [{ ...rawTx(11), 'round-time': 'bad' }], 'current-round': 20 }),
+      Response.json({
+         transactions: Array.from({ length: 1_001 }, () => rawTx(11)),
+         'current-round': 20,
+      }),
       new Response('{', { status: 200, headers: { 'content-type': 'application/json' } }),
    ];
    const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 2 });
@@ -564,6 +741,10 @@ test('Indexer page validation rejects malformed fields, bounds, JSON, and inadeq
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /outside/);
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /next-token/);
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /round-time/);
+   await assert.rejects(
+      indexer.searchWatchPage(watch, 10, 20),
+      /exceeded requested page limit/,
+   );
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /valid JSON/);
 });
 
@@ -606,11 +787,11 @@ test('Indexer rejects responses that violate requested filters and disables redi
 
    await assert.rejects(
       indexer.searchWatchPage(watchRecord({}), 10, 20),
-      /sender and asset filters/,
+      /requested sender filter/,
    );
    await assert.rejects(
       indexer.searchWatchPage(watchRecord({}), 10, 20),
-      /sender and asset filters/,
+      /requested asset filter/,
    );
    await assert.rejects(
       indexer.searchTransactionPage('SERVICE'),
@@ -697,6 +878,309 @@ test('each pagination page consumes a separate dispatcher credit', async () => {
    assert.equal(dispatcher.snapshot().requests['scan-page'], 2);
 });
 
+test('identical scan pages are fetched once and reused within a poll sweep', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 2,
+      maxOpenWatchesPerPayer: 2,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   try {
+      for (let i = 0; i < 2; i += 1) {
+         const tx = `SHARED_PAGE_SERVICE_${i}`;
+         const watch = store.prepareWatch(
+            { ...SPEC, idempotencyKey: `shared-page-${i}` },
+            intent(tx),
+         ).watch;
+         store.activateWatch(
+            watch.id,
+            { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+            100,
+         );
+      }
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+      assert.equal(
+         store.listActiveWatches().every(watch => watch.scanAfterRound === 100),
+         true,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+      await poller.runOnce();
+
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(indexer.pageCalls.at(-1)?.nextToken, 'page-2');
+      assert.equal(
+         store.listActiveWatches().every(watch => watch.scanAfterRound === 101),
+         true,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('validated historical pages are reused across staggered poll sweeps', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 2,
+      maxOpenWatchesPerPayer: 2,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   const createActiveWatch = (index: number): void => {
+      const tx = `CROSS_SWEEP_SERVICE_${index}`;
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: `cross-sweep-${index}` },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+   };
+
+   try {
+      createActiveWatch(0);
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 1);
+
+      createActiveWatch(1);
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+
+      await poller.runOnce();
+
+      // Watch 0 physically fetches page 2. The newly admitted watch 1 reuses
+      // page 1 from the bounded cross-sweep cache.
+      assert.equal(indexer.pageCalls.length, 2);
+
+      await poller.runOnce();
+
+      // Watch 1 now reuses the previously fetched page 2 as well.
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(
+         store.listActiveWatches().every(
+            watch => watch.scanAfterRound === 101,
+         ),
+         true,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('scan failure clears historical pages so stale provider tokens cannot loop forever', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   try {
+      const tx = 'STALE_TOKEN_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'stale-token-cache' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'provider-token',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 1);
+
+      indexer.failPageCalls.add(1);
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 2);
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+      await poller.runOnce();
+
+      // The first page must be fetched again after the failed continuation.
+      assert.equal(indexer.pageCalls.length, 3);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 101);
+   } finally {
+      store.close();
+   }
+});
+
+test('historical page cache can be disabled without disabling within-sweep reuse', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   try {
+      const tx = 'CACHE_DISABLED_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'cache-disabled' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+      });
+
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => new Date(),
+         undefined,
+         0,
+      );
+      await poller.runOnce();
+      await poller.runOnce();
+
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 101);
+   } finally {
+      store.close();
+   }
+});
+
+test('active polling stops before extra work after durable budget exhaustion', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+      workUnitBudget: 1,
+   });
+   const indexer = new FakeIndexer(101);
+
+   try {
+      const tx = 'WORK_BUDGET_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'work-budget-active' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+
+      const afterFirst = store.getWatch(watch.id);
+      assert.equal(afterFirst?.state, 'active');
+      assert.equal(afterFirst?.workUnitsUsed, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+
+      await poller.runOnce();
+
+      const exhausted = store.getWatch(watch.id);
+      assert.equal(exhausted?.state, 'indeterminate');
+      assert.equal(exhausted?.terminalReason, 'work_budget_exhausted');
+      assert.equal(exhausted?.workUnitsUsed, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+   } finally {
+      store.close();
+   }
+});
+
+test('watch-page query identity follows the actual server-side filters', () => {
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 1_000,
+      burst: 10,
+      concurrency: 1,
+   });
+   const cIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      dispatcher,
+      async () => Response.json({ transactions: [], 'current-round': 20 }),
+      1_000,
+      undefined,
+      'C',
+   );
+   const dIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      dispatcher,
+      async () => Response.json({ transactions: [], 'current-round': 20 }),
+      1_000,
+      undefined,
+      'D',
+   );
+
+   const base = watchRecord({});
+   const otherReceiver = watchRecord({
+      id: 'other-receiver',
+      expectedReceiver:
+         'AEBAGBAFAYDQQCIKBMGA2DQPCAIREEYUCULBOGAZDINRYHI6D4QCC5T6YA',
+   });
+   const otherNote = watchRecord({
+      id: 'other-note',
+      invoiceNote: 'different-note',
+   });
+
+   assert.equal(
+      cIndexer.watchPageQueryKey(base, 101, 200),
+      cIndexer.watchPageQueryKey(otherReceiver, 101, 200),
+   );
+   assert.notEqual(
+      cIndexer.watchPageQueryKey(base, 101, 200),
+      cIndexer.watchPageQueryKey(otherNote, 101, 200),
+   );
+   assert.notEqual(
+      dIndexer.watchPageQueryKey(base, 101, 200),
+      dIndexer.watchPageQueryKey(otherReceiver, 101, 200),
+   );
+});
+
 test('50 watches each receive at most one page turn in one fair sweep', async () => {
    const store = new RoundWatchStore(':memory:', { maxOpenWatches: 50, maxOpenWatchesPerPayer: 50 });
    const indexer = new FakeIndexer(101);
@@ -719,6 +1203,11 @@ test('50 watches each receive at most one page turn in one fair sweep', async ()
 
       assert.equal(indexer.pageCalls.length, 50);
       assert.equal(
+         indexer.currentRoundCalls,
+         1,
+         'one sweep must share one health tip across all watches',
+      );
+      assert.equal(
          store.listActiveWatches().filter(watch => watch.scanAfterRound === 101).length,
          49,
       );
@@ -732,6 +1221,11 @@ test('50 watches each receive at most one page turn in one fair sweep', async ()
       await poller.runOnce();
 
       assert.equal(indexer.pageCalls.length, 51);
+      assert.equal(
+         indexer.currentRoundCalls,
+         2,
+         'the next sweep may fetch one fresh shared tip',
+      );
       assert.equal(indexer.pageCalls.at(-1)?.nextToken, 'busy-page-2');
       assert.equal(
          store.listActiveWatches().every(watch => watch.scanAfterRound === 101),
@@ -833,6 +1327,8 @@ test('legacy migration is idempotent and does not fabricate proof or alter match
          assert.equal(legacy?.evidenceVersion, 0);
          assert.equal(legacy?.expiresAt, undefined);
          assert.equal(legacy?.closingRound, undefined);
+         assert.equal(legacy?.workUnitBudget, 500);
+         assert.equal(legacy?.workUnitsUsed, 0);
          store.close();
       }
    } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -987,9 +1483,13 @@ class FakeIndexer implements RoundWatchIndexer {
    pages: TransactionPage[] = [];
    pageCalls: Array<{ min: number; max: number; nextToken?: string }> = [];
    failPageCalls = new Set<number>();
+   currentRoundCalls = 0;
    block: IndexedBlock;
    constructor(public round: number) { this.block = { round, timestamp: 0 }; }
-   async getCurrentRound(): Promise<number> { return this.round; }
+   async getCurrentRound(): Promise<number> {
+      this.currentRoundCalls += 1;
+      return this.round;
+   }
    async lookupAssetTransfer(): Promise<undefined> { return undefined; }
    async getBlock(): Promise<IndexedBlock> { return this.block; }
    async searchWatchPage(_watch: WatchRecord, min: number, max: number, nextToken?: string): Promise<TransactionPage> {
@@ -1001,11 +1501,23 @@ class FakeIndexer implements RoundWatchIndexer {
    async searchTransactionPage(): Promise<TransactionIdPage> { return { transactions: [], currentRound: this.round }; }
 }
 
+class SharedPageFakeIndexer extends FakeIndexer {
+   watchPageQueryKey(
+      _watch: WatchRecord,
+      min: number,
+      max: number,
+      nextToken?: string,
+   ): string {
+      return `${min}:${max}:${nextToken ?? ''}`;
+   }
+}
+
 function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
    return {
       ...SPEC, id: 'watch', state: 'active', activationRound: 100, scanAfterRound: 100,
       createdAt: '2026-09-18T09:30:00Z', expiresAt: '2026-09-18T10:00:00Z',
-      evidenceVersion: 1, reconciliationAttempts: 0, ...overrides,
+      evidenceVersion: 1, reconciliationAttempts: 0,
+      workUnitBudget: 500, workUnitsUsed: 0, ...overrides,
    };
 }
 function invoiceTx(round: number, roundTime: number): IndexedWatchTransaction {
