@@ -164,12 +164,13 @@ Failures are isolated per servicing turn. A busy pagination session yields after
 SQLite uses WAL mode and a single `roundwatch_watches` table. The durable record contains:
 
 - UUID watch ID and unique idempotency key;
-- public state: `settlement_pending`, `active`, `matched`, `settlement_unknown`, or `expired`;
+- public state: `settlement_pending`, `active`, `matched`, `settlement_unknown`, `expired`, or `indeterminate`;
 - expected invoice sender, receiver, server-selected asset ID, atomic amount, and optional note;
 - expected service transaction, network, and payer derived before settlement;
 - confirmed service transaction, network, payer, activation round, and activation time;
 - scan cursor and creation time;
 - persisted server-controlled expiry time for bounded watches;
+- immutable per-watch work-unit budget, consumed work-unit count, and terminal reason when exhausted;
 - matched invoice transaction and confirmed round; and
 - immutable signed service-payment receiver, ASA, amount, payer, `FirstValid`, and `LastValid`;
 - reconciliation attempts and next-attempt timestamp;
@@ -182,11 +183,13 @@ The public API omits the idempotency key and internal proof, purchase-term, chec
 
 `idempotency_key` is unique. The handler checks it before inserting a watch. A repeated key returns HTTP `409` with the existing public watch record, causing x402 settlement not to proceed for that handler response. Callers must generate a distinct key per intended obligation and treat the returned existing record as authoritative; the service does not merge or replace the specification attached to an existing key.
 
-## Expiry and admission capacity
+## Expiry, work budget, and admission capacity
 
-The challenge-release contract gives each new watch a server-controlled deadline of `createdAt + 30 minutes`. Settlement latency consumes this interval. Wall-clock passage is not a lifecycle proof and reads never mutate the state. `expired` means the service baseline exists and the complete eligible range was validated through the fixed closing checkpoint with no match.
+The challenge-release contract gives each new watch a server-controlled deadline of `createdAt + 30 minutes` and an immutable durable budget of 500 background work turns. Settlement latency consumes the eligibility interval. Wall-clock passage is not a lifecycle proof and reads never mutate the state. `expired` means the service baseline exists and the complete eligible range was validated through the fixed closing checkpoint with no match.
 
-An open obligation is `settlement_pending`, `active`, or non-terminal `settlement_unknown`. Admission is capped at 50 open obligations globally and 5 for the deterministic service payer derived from the verified AVM payment payload. The store opens an immediate SQLite transaction, checks the idempotency key and both caps, and inserts the pending row without an asynchronous gap. Capacity failure returns HTTP `429` before after-handler settlement.
+A work turn is claimed durably before background polling or reconciliation work. If all 500 turns are consumed before either an exact match or complete expiry proof, the watch terminates as `indeterminate` with `terminalReason=work_budget_exhausted`. This state is deliberately weaker than `expired`: it bounds the service obligation without inventing proof of absence.
+
+An open obligation is `settlement_pending`, `active`, or non-terminal `settlement_unknown`. `matched`, `expired`, `indeterminate`, and definitive terminal settlement mismatches do not consume open-obligation capacity. Admission is capped at 50 open obligations globally and 5 for the deterministic service payer derived from the verified AVM payment payload. The store opens an immediate SQLite transaction, checks the idempotency key and both caps, and inserts the pending row without an asynchronous gap. Capacity failure returns HTTP `429` before after-handler settlement.
 
 Schema additions are idempotent. Pre-hardening rows retain evidence version 0; missing validity terms, closing proof, deadlines, or historical coverage are never fabricated. Existing matched results remain unchanged, while ambiguous legacy rows stay conservative rather than being silently expired or declared unpaid.
 
@@ -199,7 +202,7 @@ The current production shape is one Render application instance with:
 - SQLite, WAL, and shared-memory files on the same `/data` persistent disk; and
 - HTTPS terminated by the hosting platform.
 
-The implementation has no leader election, distributed lock, shared queue, or multi-instance coordination. Horizontal replicas sharing or copying this state are outside the current design. The 30-minute lifetime and 50-global/5-per-payer caps are challenge-release safety bounds, not an SLA or a long-term commercial capacity commitment.
+The implementation has no leader election, distributed lock, shared queue, or multi-instance coordination. Horizontal replicas sharing or copying this state are outside the current design. The 30-minute eligibility deadline, 500-turn work budget, and 50-global/5-per-payer caps are challenge-release safety bounds, not an SLA or a long-term commercial capacity commitment.
 
 ## TestNet and MainNet separation
 
