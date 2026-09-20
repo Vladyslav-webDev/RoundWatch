@@ -163,6 +163,21 @@ export class RoundWatchPoller {
          return;
       }
 
+      const workClaim = this.store.claimWorkUnit(initial.id);
+      if (workClaim === 'exhausted') {
+         this.sessions.delete(initial.id);
+         this.finishMetric(initial, 'indeterminate');
+         console.warn(
+            `RoundWatch work budget exhausted watch=${initial.id}; terminal state=indeterminate`,
+         );
+         return;
+      }
+      if (workClaim !== 'claimed') return;
+
+      this.recordMetric(() =>
+         this.economicsMetrics?.recordWorkUnit(initial.id),
+      );
+
       let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
       if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
          this.recordMetric(() => this.economicsMetrics?.recordClosingRequest(watch.id));
