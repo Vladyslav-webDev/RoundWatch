@@ -174,7 +174,11 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          'scan-page',
          url,
          body => ({
-            transactions: requiredArray(body, 'transactions').map((item, i) =>
+            transactions: requiredBoundedArray(
+               body,
+               'transactions',
+               1_000,
+            ).map((item, i) =>
                parseWatchTransaction(
                   item,
                   i,
@@ -250,7 +254,11 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          'absence-proof',
          url,
          body => ({
-            transactions: requiredArray(body, 'transactions').map((item, i) =>
+            transactions: requiredBoundedArray(
+               body,
+               'transactions',
+               1_000,
+            ).map((item, i) =>
                parseTransactionSearchItem(item, i, transactionId),
             ),
             currentRound: safeRound(
@@ -563,6 +571,19 @@ function optionalToken(body: unknown): { nextToken?: string } {
 }
 function requiredArray(body: unknown, name: string): unknown[] {
    const value = field(body, name); if (!Array.isArray(value)) throw new Error(`Indexer ${name} is not an array`); return value;
+}
+function requiredBoundedArray(
+   body: unknown,
+   name: string,
+   maximumItems: number,
+): unknown[] {
+   const value = requiredArray(body, name);
+   if (value.length > maximumItems) {
+      throw new Error(
+         `Indexer ${name} exceeded requested page limit ${maximumItems}`,
+      );
+   }
+   return value;
 }
 function field(value: unknown, name: string, required = true): unknown {
    const object = record(value, 'response');
