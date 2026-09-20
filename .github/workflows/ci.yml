@@ -19,14 +19,35 @@ jobs:
       - name: Full-history secret scan
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          report="$GITHUB_WORKSPACE/.gitleaks-diagnostic.json"
+          rm -f "$report"
+          set +e
           docker run --rm \
             -e GIT_CONFIG_COUNT=1 \
             -e GIT_CONFIG_KEY_0=safe.directory \
             -e GIT_CONFIG_VALUE_0=/repo \
             -v "$GITHUB_WORKSPACE:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.29.1 \
-            git --redact --no-banner /repo
+            git --redact --no-banner --report-format json --report-path /repo/.gitleaks-diagnostic.json /repo
+          status=$?
+          set -e
+          if [ -f "$report" ]; then
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path(".gitleaks-diagnostic.json")
+          for finding in json.loads(path.read_text()):
+              print({
+                  "RuleID": finding.get("RuleID"),
+                  "File": finding.get("File"),
+                  "StartLine": finding.get("StartLine"),
+                  "Commit": finding.get("Commit"),
+              })
+          PY
+            rm -f "$report"
+          fi
+          exit "$status"
 
       - name: Reject tracked environment secrets
         shell: bash
