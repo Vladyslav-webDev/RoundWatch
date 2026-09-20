@@ -1,6 +1,6 @@
 # RoundWatch MainNet readiness
 
-Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, and the post-hardening production deployment are proven. The current production `main` is `d05fabaea6124ed5658dd13cf06167a885aefeb0`.
+Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-economics production deployment are proven. The current production `main` is `80ed94c746f2eac4a784a3738c6dbe8306ecfa3e`.
 
 This is a dated evidence record, not an availability or performance guarantee.
 
@@ -14,15 +14,16 @@ This is a dated evidence record, not an availability or performance guarantee.
 | Circle USDC | ASA `31566704` |
 | Watch route | `POST /v1/watch` |
 | Status route | `GET /v1/watch/:id` |
-| Service price | `0.001 USDC` (`1000` atomic units) |
+| Service price | `0.02 USDC` (`20000` atomic units) |
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
 | Facilitator | `https://facilitator.goplausible.xyz` |
 | Hosting | Render with persistent SQLite disk mounted at `/data` |
+| Durable work budget | `500` background work turns per watch; exhaustion is terminal `indeterminate` |
 | Health response | `{ "status": "ok", "network": "mainnet" }` |
 
 The production server has no mnemonic or private key. The dedicated payer signs locally.
 
-The economics release candidate changes the service purchase contract to `0.02 USDC` (`20000` atomic units). This section intentionally keeps the verified live `0.001 USDC` baseline until the repriced candidate is deployed and confirmed by an unpaid MainNet `402` preflight. The historical paid E2E below remains evidence of the earlier `1000`-atomic contract and must not be rewritten.
+Economics v1 is live at `0.02 USDC` (`20000` atomic units). On 2026-09-20, an external unsigned production `POST /v1/watch` received HTTP `402` and verified the exact MainNet resource contract: `exact` scheme, ASA `31566704`, amount `20000`, approved service receiver, and `x402-global-challenge` tag. The historical paid E2E below remains evidence of the earlier `1000`-atomic contract and is intentionally unchanged.
 
 ## Production hardening and current release
 
@@ -89,6 +90,19 @@ No second paid MainNet E2E was performed after these hardening releases, and
 this document does not imply one. The paid MainNet proof below remains the
 known-good pre-hardening baseline; the current hardened release is covered by
 free production regression checks.
+
+Economics v1 was later squash-merged and deployed as:
+
+```text
+80ed94c746f2eac4a784a3738c6dbe8306ecfa3e
+```
+
+That release added the immutable 500-turn per-watch work budget and terminal
+`indeterminate` outcome for budget exhaustion, bounded signed-payment
+pre-settlement verification, retained the measured storage model, and changed
+the live service price to `0.02 USDC` (`20000` atomic units). Render reported the
+exact commit live, and the external unpaid `402` smoke described above confirmed
+the new price from outside the service without a MainNet spend.
 
 ## Settlement and activation recovery
 
