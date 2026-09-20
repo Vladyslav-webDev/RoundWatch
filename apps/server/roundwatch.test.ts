@@ -726,6 +726,10 @@ test('Indexer page validation rejects malformed fields, bounds, JSON, and inadeq
       Response.json({ transactions: [{ ...rawTx(11), 'confirmed-round': 99 }], 'current-round': 99 }),
       Response.json({ transactions: [rawTx(11)], 'current-round': 20, 'next-token': 7 }),
       Response.json({ transactions: [{ ...rawTx(11), 'round-time': 'bad' }], 'current-round': 20 }),
+      Response.json({
+         transactions: Array.from({ length: 1_001 }, () => rawTx(11)),
+         'current-round': 20,
+      }),
       new Response('{', { status: 200, headers: { 'content-type': 'application/json' } }),
    ];
    const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 2 });
@@ -736,6 +740,10 @@ test('Indexer page validation rejects malformed fields, bounds, JSON, and inadeq
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /outside/);
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /next-token/);
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /round-time/);
+   await assert.rejects(
+      indexer.searchWatchPage(watch, 10, 20),
+      /exceeded requested page limit/,
+   );
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /valid JSON/);
 });
 
@@ -1318,6 +1326,8 @@ test('legacy migration is idempotent and does not fabricate proof or alter match
          assert.equal(legacy?.evidenceVersion, 0);
          assert.equal(legacy?.expiresAt, undefined);
          assert.equal(legacy?.closingRound, undefined);
+         assert.equal(legacy?.workUnitBudget, 100);
+         assert.equal(legacy?.workUnitsUsed, 0);
          store.close();
       }
    } finally { rmSync(directory, { recursive: true, force: true }); }
