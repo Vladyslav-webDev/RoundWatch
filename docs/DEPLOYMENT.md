@@ -94,7 +94,7 @@ GET  /v1/watch/:id
 GET  /demo
 ```
 
-`/v1/watch` costs `0.001 USDC` (`1000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`.
+The economics release candidate configures `/v1/watch` at `0.02 USDC` (`20000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`. The proven live baseline above remains `0.001 USDC` until this candidate is deployed.
 
 The challenge-release policy gives each accepted watch a chain-time eligibility deadline 30 minutes from durable creation, with at most 50 unfinished obligations globally and 5 per verified service payer. Wall time alone does not expire it; validated chain coverage through a fixed closing checkpoint does. Capacity exhaustion returns HTTP `429` before x402 settlement. These values are operational safeguards, not a commercial SLA.
 
@@ -164,7 +164,7 @@ curl -i -X POST https://roundwatch-api.onrender.com/v1/watch \
   --data '{"idempotencyKey":"smoke-readonly-20260916","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-Do not attach a payment signature. Expected result: HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `1000`, approved service receiver, and `x402-global-challenge` tag.
+Do not attach a payment signature. For the repriced economics candidate, expected result after deployment is HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `20000`, approved service receiver, and `x402-global-challenge` tag. A response that still advertises `1000` means the new contract is not live yet.
 
 Also decode the `payment-required` header and inspect the Bazaar discovery example. Both `expectedSender` and `expectedReceiver` must be checksum-valid Algorand addresses. The current receiver example is `AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI`. Discovery examples are not payment authority, but malformed examples can break autonomous clients before they ever reach settlement.
 
