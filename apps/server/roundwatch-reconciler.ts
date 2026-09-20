@@ -36,9 +36,16 @@ export interface SettlementReconcilerConfig {
    now?: () => Date;
 }
 
+interface AbsenceProofSession {
+   nextToken?: string;
+   seenTokens: Set<string>;
+   coverage?: number;
+}
+
 export class SettlementReconciler {
    private timer: NodeJS.Timeout | undefined;
    private running = false;
+   private readonly absenceProofSessions = new Map<string, AbsenceProofSession>();
    private readonly now: () => Date;
    private readonly baseBackoffMilliseconds: number;
    private readonly maxBackoffMilliseconds: number;
@@ -82,6 +89,7 @@ export class SettlementReconciler {
             try {
                await this.reconcileWatch(watch);
             } catch (error) {
+               this.absenceProofSessions.delete(watch.id);
                this.defer(watch);
                console.error(`RoundWatch settlement reconciliation failed for watch ${watch.id}:`, safeErrorMessage(error));
             }
@@ -90,9 +98,21 @@ export class SettlementReconciler {
    }
 
    private async reconcileWatch(watch: WatchRecord): Promise<void> {
-      this.recordMetric(() =>
-         this.economicsMetrics?.recordReconciliationAttempt(watch.id),
-      );
+      const workClaim = this.store.claimWorkUnit(watch.id);
+      if (workClaim === 'exhausted') {
+         this.absenceProofSessions.delete(watch.id);
+         this.finishMetric(watch, 'indeterminate');
+         console.warn(
+            `RoundWatch work budget exhausted during settlement reconciliation watch=${watch.id}; terminal state=indeterminate`,
+         );
+         return;
+      }
+      if (workClaim !== 'claimed') return;
+
+      this.recordMetric(() => {
+         this.economicsMetrics?.recordWorkUnit(watch.id);
+         this.economicsMetrics?.recordReconciliationAttempt(watch.id);
+      });
 
       const expectedTransaction = watch.expectedServiceTransaction;
       if (!expectedTransaction) return;
@@ -102,56 +122,89 @@ export class SettlementReconciler {
          return;
       }
 
-      const transfer = await this.indexer.lookupAssetTransfer(
+      let session = this.absenceProofSessions.get(watch.id);
+
+      if (!session) {
+         const transfer = await this.indexer.lookupAssetTransfer(
+            expectedTransaction,
+            'reconciliation',
+            watch.id,
+         );
+         if (transfer) {
+            this.absenceProofSessions.delete(watch.id);
+            this.applyConfirmed(watch, transfer);
+            return;
+         }
+
+         const currentRound = await this.indexer.getCurrentRound(
+            'reconciliation',
+            watch.id,
+         );
+         if (currentRound <= watch.serviceLastValid) {
+            this.defer(watch);
+            return;
+         }
+
+         session = {
+            seenTokens: new Set<string>(),
+         };
+         this.absenceProofSessions.set(watch.id, session);
+      }
+
+      const page = await this.indexer.searchTransactionPage(
          expectedTransaction,
-         'reconciliation',
+         session.nextToken,
          watch.id,
       );
-      if (transfer) {
-         this.applyConfirmed(watch, transfer);
+      session.coverage =
+         session.coverage === undefined
+            ? page.currentRound
+            : Math.min(session.coverage, page.currentRound);
+
+      const found = page.transactions.find(
+         item => item.transaction === expectedTransaction,
+      );
+      if (found) {
+         this.absenceProofSessions.delete(watch.id);
+         this.applyConfirmed(watch, found);
          return;
       }
 
-      const currentRound = await this.indexer.getCurrentRound(
-         'reconciliation',
-         watch.id,
-      );
-      if (currentRound <= watch.serviceLastValid) {
+      if (page.nextToken) {
+         if (
+            page.nextToken === session.nextToken ||
+            session.seenTokens.has(page.nextToken)
+         ) {
+            throw new Error(
+               'Indexer absence-proof pagination repeated or stalled',
+            );
+         }
+
+         session.seenTokens.add(page.nextToken);
+         session.nextToken = page.nextToken;
          this.defer(watch);
          return;
       }
 
-      let nextToken: string | undefined;
-      const seen = new Set<string>();
-      let coverage = 0;
-      do {
-         const page = await this.indexer.searchTransactionPage(
-            expectedTransaction,
-            nextToken,
-            watch.id,
+      this.absenceProofSessions.delete(watch.id);
+      if (
+         session.coverage === undefined ||
+         session.coverage <= watch.serviceLastValid
+      ) {
+         throw new Error(
+            'Indexer absence proof lacks post-LastValid coverage',
          );
-         coverage = Math.min(coverage || page.currentRound, page.currentRound);
-         const found = page.transactions.find(item => item.transaction === expectedTransaction);
-         if (found) {
-            this.applyConfirmed(watch, found);
-            return;
-         }
-         if (page.nextToken) {
-            if (page.nextToken === nextToken || seen.has(page.nextToken)) throw new Error('Indexer absence-proof pagination repeated or stalled');
-            seen.add(page.nextToken);
-         }
-         nextToken = page.nextToken;
-      } while (nextToken);
-
-      if (coverage <= watch.serviceLastValid) {
-         throw new Error('Indexer absence proof lacks post-LastValid coverage');
       }
+
       this.store.markSettlementInvalid(watch.id);
-      this.finishMetric(watch);
-      console.error(`RoundWatch service transaction remained absent after LastValid for watch ${watch.id}`);
+      this.finishMetric(watch, 'settlement_unknown');
+      console.error(
+         `RoundWatch service transaction remained absent after LastValid for watch ${watch.id}`,
+      );
    }
 
    private applyConfirmed(watch: WatchRecord, transfer: IndexedAssetTransfer): void {
+      this.absenceProofSessions.delete(watch.id);
       const matches =
          transfer.transaction === watch.expectedServiceTransaction &&
          watch.expectedServiceNetwork === this.config.network &&
@@ -163,7 +216,7 @@ export class SettlementReconciler {
          transfer.round <= watch.serviceLastValid!;
       if (!matches) {
          this.store.markSettlementInvalid(watch.id);
-         this.finishMetric(watch);
+         this.finishMetric(watch, 'settlement_unknown');
          console.error(`RoundWatch confirmed service transaction mismatched immutable terms for watch ${watch.id}`);
          return;
       }
@@ -181,12 +234,15 @@ export class SettlementReconciler {
       this.store.recordReconciliationFailure(watch.id, new Date(this.now().getTime() + delay));
    }
 
-   private finishMetric(watch: WatchRecord): void {
+   private finishMetric(
+      watch: WatchRecord,
+      finalState: WatchRecord['state'],
+   ): void {
       if (!this.economicsMetrics) return;
 
       const createdAt = Date.parse(watch.createdAt);
       this.recordMetric(() => this.economicsMetrics?.recordLifecycle(watch.id, {
-         finalState: 'settlement_unknown',
+         finalState,
          ...(Number.isFinite(createdAt)
             ? { timeToTerminalMs: Math.max(0, this.now().getTime() - createdAt) }
             : {}),
