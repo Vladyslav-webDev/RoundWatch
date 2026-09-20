@@ -1326,7 +1326,7 @@ test('legacy migration is idempotent and does not fabricate proof or alter match
          assert.equal(legacy?.evidenceVersion, 0);
          assert.equal(legacy?.expiresAt, undefined);
          assert.equal(legacy?.closingRound, undefined);
-         assert.equal(legacy?.workUnitBudget, 100);
+         assert.equal(legacy?.workUnitBudget, 500);
          assert.equal(legacy?.workUnitsUsed, 0);
          store.close();
       }
@@ -1516,7 +1516,7 @@ function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
       ...SPEC, id: 'watch', state: 'active', activationRound: 100, scanAfterRound: 100,
       createdAt: '2026-09-18T09:30:00Z', expiresAt: '2026-09-18T10:00:00Z',
       evidenceVersion: 1, reconciliationAttempts: 0,
-      workUnitBudget: 100, workUnitsUsed: 0, ...overrides,
+      workUnitBudget: 500, workUnitsUsed: 0, ...overrides,
    };
 }
 function invoiceTx(round: number, roundTime: number): IndexedWatchTransaction {
