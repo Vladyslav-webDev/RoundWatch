@@ -35,16 +35,17 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 | Network | Algorand MainNet |
 | CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
 | Asset | Circle USDC, ASA `31566704` |
-| Service price | `0.001 USDC` (`1000` atomic units) |
+| Service price | `0.02 USDC` (`20000` atomic units) |
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
 | Facilitator | `https://facilitator.goplausible.xyz` |
 | Hosting | Render, with persistent SQLite storage mounted at `/data` |
 | Eligibility deadline | 30 minutes from durable creation; terminal `expired` requires complete validated chain coverage through a fixed closing checkpoint |
+| Work budget | 500 durable background work turns per watch; exhaustion terminates as `indeterminate`, never as `expired` |
 | Open-obligation capacity | 50 globally; 5 per verified service payer |
 
 The production server does not contain or need a wallet mnemonic or private key.
 
-> Economics release candidate: source on `feat/economics-instrumentation-v1` is repriced to `0.02 USDC` (`20000` atomic units) per watch. Until that candidate is deployed, the live production table above intentionally remains at the verified `0.001 USDC` contract.
+> Economics v1 is live in production as of 2026-09-20 at `80ed94c746f2eac4a784a3738c6dbe8306ecfa3e`. An external unsigned `POST /v1/watch` received HTTP `402` and verified MainNet, `exact`, ASA `31566704`, the approved receiver, challenge tag, and amount `20000`. The historical paid MainNet proof below remains evidence of the earlier `0.001 USDC` contract.
 
 ## API
 
@@ -103,7 +104,7 @@ Request fields:
 
 The watched asset is not a request field. The server selects the USDC ASA from its explicit network configuration: MainNet ASA `31566704` or TestNet ASA `10458941`.
 
-The server controls the lifetime and admission policy. New watches have an immutable eligibility deadline 30 minutes after `createdAt`; callers cannot override it. Passing that wall-clock time does not itself expire a watch; proof requires complete chain coverage through a closing checkpoint. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` before settlement.
+The server controls the lifetime, work budget, and admission policy. New watches have an immutable eligibility deadline 30 minutes after `createdAt` and a durable 500-turn background work budget; callers cannot override either value. Passing the wall-clock deadline does not itself expire a watch; proof requires complete chain coverage through a closing checkpoint. If the work budget is exhausted first, the watch terminates as `indeterminate` with `terminalReason=work_budget_exhausted`, never as a false `expired`. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` before settlement.
 
 ### Read a watch
 
@@ -142,6 +143,7 @@ Unknown IDs return HTTP `404`.
 | `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
 | `settlement_unknown` | Settlement did not produce an immediately usable activation. An ambiguous outcome remains eligible for exact reconciliation; a definitive on-chain mismatch is terminal and remains fail-closed in this public state. |
 | `expired` | The deadline's complete eligible chain range was scanned through a fixed closing checkpoint with no exact match. The terminal record remains readable. |
+| `indeterminate` | The durable per-watch work budget was exhausted before a positive match or complete expiry proof. The record is terminal and does not claim absence. |
 
 ### Exact matching
 
@@ -275,7 +277,7 @@ Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 
 ## Current limitations
 
-- The current challenge-release policy is a 30-minute lifetime, 50 global open obligations, and 5 open obligations per verified service payer. These are operational safety bounds, not a commercial SLA or final pricing/capacity policy.
+- The current challenge-release policy is a 30-minute eligibility deadline, a 500-turn durable work budget, 50 global open obligations, and 5 open obligations per verified service payer. These are operational safety bounds, not a commercial SLA or final pricing/capacity policy.
 - There is no cancellation operation, SLA, or long-term pricing policy.
 - The current deployment is a single application instance with an in-process poller/reconciler and local persistent SQLite. It is not a horizontally coordinated worker system.
 - Each poll sweep gives every active watch at most one bounded servicing turn; pagination yields between sweeps, and FIFO Indexer dispatch enforces the global request bound. The tuning values are not an SLA or arbitrary-scale claim.
