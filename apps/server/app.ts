@@ -98,7 +98,6 @@ const watchDiscovery = declareDiscoveryExtension({
    output: {
       example: {
          watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
-         workUnitBudget: 100,
          message:
             'Durable watch activated after confirmed x402 settlement; incomplete coverage terminates as indeterminate, never expired',
       },
