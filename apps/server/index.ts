@@ -22,6 +22,11 @@ import {
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import {
+   DEFAULT_SIGNED_PAYMENT_BURST,
+   DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+   DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+} from './free-payment-gate.js';
+import {
    DEFAULT_INDEXER_BURST,
    DEFAULT_INDEXER_CONCURRENCY,
    DEFAULT_INDEXER_REQUESTS_PER_SECOND,
@@ -84,6 +89,9 @@ let scanRoundWindow;
 let scanPageCacheEntries;
 let economicsSampleIntervalMilliseconds;
 let scanQueryVariant;
+let signedPaymentRequestsPerSecond;
+let signedPaymentBurst;
+let signedPaymentConcurrency;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -135,6 +143,21 @@ try {
    );
    scanQueryVariant = resolveScanQueryVariant(
       process.env.ROUNDWATCH_SCAN_QUERY_VARIANT,
+   );
+   signedPaymentRequestsPerSecond = parseRequiredPositiveNumber(
+      process.env.ROUNDWATCH_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+      DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+      'ROUNDWATCH_SIGNED_PAYMENT_REQUESTS_PER_SECOND',
+   );
+   signedPaymentBurst = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_SIGNED_PAYMENT_BURST,
+      DEFAULT_SIGNED_PAYMENT_BURST,
+      'ROUNDWATCH_SIGNED_PAYMENT_BURST',
+   );
+   signedPaymentConcurrency = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_SIGNED_PAYMENT_CONCURRENCY,
+      DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      'ROUNDWATCH_SIGNED_PAYMENT_CONCURRENCY',
    );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
@@ -255,6 +278,11 @@ const app = createApp({
    networkConfig,
    publicBaseUrl,
    economicsMetrics,
+   signedPaymentGateOptions: {
+      requestsPerSecond: signedPaymentRequestsPerSecond,
+      burst: signedPaymentBurst,
+      concurrency: signedPaymentConcurrency,
+   },
 });
 const runtimeSampler = economicsMetrics
    ? new RoundWatchRuntimeSampler(
@@ -289,6 +317,9 @@ server.on('listening', () => {
    );
    console.log(
       `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
+   );
+   console.log(
+      `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
    );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
    console.log(`Indexer scan query variant: ${scanQueryVariant}`);
