@@ -43,7 +43,7 @@ const SIGNED_SERVICE_PAYMENT =
 interface Scenario {
    name: string;
    category: FreeRequestCategory;
-   request: () => Promise<Response>;
+   request: () => Response | Promise<Response>;
 }
 
 interface ScenarioResult {
