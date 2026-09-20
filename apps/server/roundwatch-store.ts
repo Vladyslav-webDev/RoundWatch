@@ -314,8 +314,11 @@ export class RoundWatchStore {
                service_last_valid,
                created_at,
                expires_at,
-               evidence_version
-            ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               evidence_version,
+               work_unit_budget,
+               work_units_used,
+               terminal_reason
+            ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
          `).run(
             id,
             spec.idempotencyKey,
