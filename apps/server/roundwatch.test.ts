@@ -1078,6 +1078,52 @@ test('historical page cache can be disabled without disabling within-sweep reuse
    }
 });
 
+test('active polling stops before extra work after durable budget exhaustion', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+      workUnitBudget: 1,
+   });
+   const indexer = new FakeIndexer(101);
+
+   try {
+      const tx = 'WORK_BUDGET_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'work-budget-active' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(store, indexer);
+      await poller.runOnce();
+
+      const afterFirst = store.getWatch(watch.id);
+      assert.equal(afterFirst?.state, 'active');
+      assert.equal(afterFirst?.workUnitsUsed, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+
+      await poller.runOnce();
+
+      const exhausted = store.getWatch(watch.id);
+      assert.equal(exhausted?.state, 'indeterminate');
+      assert.equal(exhausted?.terminalReason, 'work_budget_exhausted');
+      assert.equal(exhausted?.workUnitsUsed, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+   } finally {
+      store.close();
+   }
+});
+
 test('watch-page query identity follows the actual server-side filters', () => {
    const dispatcher = new IndexerRequestDispatcher({
       requestsPerSecond: 1_000,
@@ -1459,7 +1505,8 @@ function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
    return {
       ...SPEC, id: 'watch', state: 'active', activationRound: 100, scanAfterRound: 100,
       createdAt: '2026-09-18T09:30:00Z', expiresAt: '2026-09-18T10:00:00Z',
-      evidenceVersion: 1, reconciliationAttempts: 0, ...overrides,
+      evidenceVersion: 1, reconciliationAttempts: 0,
+      workUnitBudget: 100, workUnitsUsed: 0, ...overrides,
    };
 }
 function invoiceTx(round: number, roundTime: number): IndexedWatchTransaction {
