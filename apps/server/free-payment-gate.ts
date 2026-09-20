@@ -1,3 +1,7 @@
+export const DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND = 10;
+export const DEFAULT_SIGNED_PAYMENT_BURST = 20;
+export const DEFAULT_SIGNED_PAYMENT_CONCURRENCY = 4;
+
 export interface SignedPaymentGateOptions {
    requestsPerSecond: number;
    burst: number;
