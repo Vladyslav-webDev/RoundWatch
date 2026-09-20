@@ -575,6 +575,10 @@ export class RoundWatchStore {
       `).run(nextAttemptAt.toISOString(), id);
    }
 
+   configuredWorkUnitBudget(): number {
+      return this.workUnitBudget;
+   }
+
    close(): void {
       this.database.close();
    }
