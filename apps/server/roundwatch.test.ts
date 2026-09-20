@@ -91,6 +91,7 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
       assert.equal(required.network, ALGORAND_TESTNET);
       assert.equal(required.payTo, RECEIVER);
+      assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '20000');
       assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
       assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
