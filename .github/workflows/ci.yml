@@ -51,6 +51,42 @@ jobs:
           node-version: 24.14.0
           cache: pnpm
 
+      - name: Verify live RoundWatch /start economics copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const response = await fetch('https://roundwatch.observer/start', {
+            headers: { 'user-agent': 'roundwatch-postdeploy-smoke/1.0' },
+          });
+          if (!response.ok) {
+            throw new Error(`Expected 2xx from /start, got ${response.status}`);
+          }
+          const html = await response.text();
+
+          const required = [
+            '0.02 USDC service fee',
+            '500 durable background turns',
+            'indeterminate',
+          ];
+          for (const text of required) {
+            if (!html.includes(text)) {
+              throw new Error(`Live /start is missing expected copy: ${text}`);
+            }
+          }
+          if (html.includes('0.001 USDC service fee')) {
+            throw new Error('Live /start still exposes the retired 0.001 USDC service fee');
+          }
+
+          console.log('LANDING_SMOKE_OK', JSON.stringify({
+            status: response.status,
+            hasPrice: true,
+            hasWorkBudget: true,
+            hasIndeterminate: true,
+            oldServiceFeeAbsent: true,
+          }));
+          NODE
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
