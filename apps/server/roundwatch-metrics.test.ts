@@ -123,6 +123,31 @@ test('free request metrics aggregate status, bytes, and latency separately from 
    assert.equal(metrics.snapshotWatch('watch-does-not-exist'), undefined);
 });
 
+test('free metrics keep rejected payment attempts separate from ordinary 402 challenges', () => {
+   const metrics = new RoundWatchEconomicsMetrics();
+
+   metrics.recordFreeRequest('watch-create-402', {
+      status: 402,
+      responseBytes: 1_000,
+      wallTimeMs: 2,
+   });
+   metrics.recordFreeRequest('watch-create-payment-rejected', {
+      status: 402,
+      responseBytes: 900,
+      wallTimeMs: 5,
+   });
+
+   assert.equal(metrics.snapshotFreeWork('watch-create-402').requests, 1);
+   assert.equal(
+      metrics.snapshotFreeWork('watch-create-payment-rejected').requests,
+      1,
+   );
+   assert.equal(
+      metrics.snapshotFreeWork('watch-create-payment-rejected').wallTime.totalMs,
+      5,
+   );
+});
+
 test('Indexer client attributes dispatcher timing and response bytes to one watch', async () => {
    const metrics = new RoundWatchEconomicsMetrics();
    const dispatcher = new IndexerRequestDispatcher({
