@@ -98,7 +98,9 @@ const watchDiscovery = declareDiscoveryExtension({
    output: {
       example: {
          watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
-         message: 'Durable watch activated after confirmed x402 settlement',
+         workUnitBudget: 100,
+         message:
+            'Durable watch activated after confirmed x402 settlement; incomplete coverage terminates as indeterminate, never expired',
       },
    },
 });
@@ -311,7 +313,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                   },
                ],
                ...(publicWatchResource ? { resource: publicWatchResource } : {}),
-               description: `Create one durable RoundWatch ${networkConfig.name} watch`,
+               description: `Create one durable RoundWatch ${networkConfig.name} watch with bounded background work; matched and expired are proofs, while exhausted work terminates as indeterminate`,
                mimeType: 'application/json',
                extensions: watchDiscovery,
             },
@@ -416,6 +418,7 @@ export function createApp(dependencies: AppDependencies): Hono {
 
       return c.json({
          watchId: prepared.watch.id,
+         workUnitBudget: prepared.watch.workUnitBudget,
          message:
             'The watch is returned only if x402 settlement and durable activation succeed',
       });
