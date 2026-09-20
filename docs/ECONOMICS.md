@@ -111,7 +111,7 @@ At the hard 2,000-background-request ceiling, a $0.02 watch could absorb an Inde
 
 The original `$0.001` price is a challenge/proof-of-payment placeholder, not an economically justified commercial price.
 
-Implemented release-candidate price: **$0.02 USDC per 30-minute watch** (`20000` atomic units). This becomes the live contract only after deployment and an unpaid MainNet `402` preflight confirms the advertised amount.
+Live production price: **$0.02 USDC per 30-minute watch** (`20000` atomic units). The Economics v1 release was deployed on 2026-09-20, and an external unsigned MainNet `POST /v1/watch` received HTTP `402` with the advertised amount `20000`, confirming the production contract without spending funds.
 
 Rationale:
 
@@ -122,7 +122,7 @@ Rationale:
 - Storage is negligible at current scale, so no retention surcharge is justified.
 - $0.02 leaves materially more room for a future metered Indexer than $0.005-$0.01 without introducing pricing tiers before demand exists.
 
-This is a launch recommendation, not proof that 363 monthly purchases will occur. At very low demand the service will still operate below cash break-even. Price must be revisited with real independent payer, repeat-buyer, completion, indeterminate-rate, and provider-cost data.
+This is the current launch price, not proof that 363 monthly purchases will occur. At very low demand the service will still operate below cash break-even. Price must be revisited with real independent payer, repeat-buyer, completion, indeterminate-rate, and provider-cost data.
 
 ## Repricing triggers
 

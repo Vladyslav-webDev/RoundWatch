@@ -47,6 +47,8 @@ The current production baseline includes:
   concurrency;
 - fair bounded poll sweeps so one busy or failing watch cannot monopolize the
   service loop;
+- an immutable 500-turn durable work budget per watch, with exhaustion terminating
+  as `indeterminate` rather than fabricating an expiry proof;
 - bounded open-obligation capacity: 50 globally and 5 per verified service
   payer;
 - admission before settlement when capacity is unavailable;
@@ -132,8 +134,8 @@ and watch lifecycle while the autonomy work proceeds.
 Useful signals include:
 
 - request correlation across `402 issued -> paid retry -> watch created -> settled`;
-- watch transitions such as `active`, `matched`, `expired`, and recovery
-  states;
+- watch transitions such as `active`, `matched`, `expired`, `indeterminate`, and
+  recovery states;
 - route, timestamp, latency, HTTP status, and bounded safe client metadata;
 - settlement, reconciliation, poller, capacity, and discovery failures;
 - classification such as known internal test, known discovery probe, known
