@@ -47,7 +47,7 @@ import { WatchCapacityError } from './roundwatch-store.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
-export const ROUNDWATCH_SERVICE_PRICE_USD = '0.001';
+export const ROUNDWATCH_SERVICE_PRICE_USD = '0.02';
 export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
    ROUNDWATCH_SERVICE_PRICE_USD,
    USDC_DECIMALS,
