@@ -51,6 +51,77 @@ jobs:
           node-version: 24.14.0
           cache: pnpm
 
+      - name: Verify live unpaid RoundWatch pricing contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const expected = {
+            status: 402,
+            network: 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=',
+            amount: '20000',
+            payTo: 'EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY',
+            asset: '31566704',
+            tag: 'x402-global-challenge',
+          };
+
+          const response = await fetch('https://roundwatch-api.onrender.com/v1/watch', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              idempotencyKey: 'postdeploy-smoke-20260920-001',
+              expectedSender: '3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ',
+              expectedReceiver: expected.payTo,
+              atomicAmount: '1',
+            }),
+          });
+
+          if (response.status !== expected.status) {
+            throw new Error(`Expected HTTP ${expected.status}, got ${response.status}`);
+          }
+
+          const encoded = response.headers.get('payment-required');
+          if (!encoded) throw new Error('Missing payment-required header');
+
+          let required;
+          try {
+            required = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+          } catch (error) {
+            throw new Error(`Unable to decode payment-required header: ${error}`);
+          }
+
+          const accepted = required.accepts?.[0];
+          if (!accepted) throw new Error('No accepted payment requirement');
+
+          const checks = [
+            ['scheme', accepted.scheme, 'exact'],
+            ['network', accepted.network, expected.network],
+            ['amount', String(accepted.amount), expected.amount],
+            ['payTo', accepted.payTo, expected.payTo],
+            ['asset', String(accepted.extra?.asset), expected.asset],
+            ['tag', accepted.extra?.tag, expected.tag],
+          ];
+
+          for (const [name, actual, wanted] of checks) {
+            if (actual !== wanted) {
+              throw new Error(`${name} mismatch: expected ${wanted}, got ${actual}`);
+            }
+          }
+
+          console.log(
+            'POSTDEPLOY_SMOKE_OK',
+            JSON.stringify({
+              status: response.status,
+              scheme: accepted.scheme,
+              network: accepted.network,
+              amount: String(accepted.amount),
+              payTo: accepted.payTo,
+              asset: String(accepted.extra?.asset),
+              tag: accepted.extra?.tag,
+            }),
+          );
+          NODE
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
