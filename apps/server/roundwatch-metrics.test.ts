@@ -34,6 +34,7 @@ test('watch metrics aggregate per-purpose work without exporting the watch id', 
    metrics.recordCoverage('watch-1', 100);
    metrics.recordReconciliationAttempt('watch-1');
    metrics.recordClosingRequest('watch-1');
+   metrics.recordWorkUnit('watch-1');
    metrics.recordLifecycle('watch-1', {
       activeDurationMs: 30_000,
       timeToTerminalMs: 31_000,
@@ -57,6 +58,7 @@ test('watch metrics aggregate per-purpose work without exporting the watch id', 
    assert.equal(snapshot.roundsCovered, 100);
    assert.equal(snapshot.reconciliationAttempts, 1);
    assert.equal(snapshot.closingRequests, 1);
+   assert.equal(snapshot.workUnitsClaimed, 1);
    assert.equal(snapshot.activeDurationMs, 30_000);
    assert.equal(snapshot.timeToTerminalMs, 31_000);
    assert.equal(snapshot.finalState, 'matched');
