@@ -81,7 +81,9 @@ If any page, checkpoint, or watermark validation fails, the cursor is not advanc
 
 Each new watch persists `expiresAt = createdAt + 30 minutes`. This is an exclusive chain-time eligibility boundary, not a wall-clock state transition. Expiry requires a fixed indexed block timestamped at or after the deadline plus complete validated coverage through that closing round. Status/idempotency reads have no expiry side effects, and Indexer lag or failure leaves the watch unresolved.
 
-Every Indexer HTTP attempt, including pagination, activation, reconciliation, absence proof, health, block lookup, failure, and timeout, passes through one finite token bucket and aggregate concurrency gate. Tokens are capped at the configured burst, so delayed timers and restart cannot accumulate unlimited capacity. Budget exhaustion delays work and never proves absence, coverage, expiry, or nonpayment.
+Every Indexer HTTP attempt, including pagination, activation, reconciliation, absence proof, health, block lookup, failure, and timeout, passes through one finite token bucket and aggregate concurrency gate. Tokens are capped at the configured burst, so delayed timers and restart cannot accumulate unlimited capacity. Dispatcher token exhaustion only delays work and never proves absence, coverage, expiry, or nonpayment.
+
+Separately, each purchased watch has an immutable durable budget of 500 background work turns. A turn is claimed before polling or reconciliation work. If that per-watch budget is exhausted before a match or complete expiry proof, the store atomically terminates the watch as `indeterminate` with `terminalReason=work_budget_exhausted`. This is a bounded-obligation safety outcome, not evidence that the watched payment did not occur.
 
 ## Idempotency and duplicate-purchase protection
 
@@ -91,7 +93,7 @@ Idempotency keys are global to the database and are not authentication credentia
 
 ## Capacity admission
 
-The challenge-release limits are 50 open obligations globally and 5 per verified service payer. Open means `settlement_pending`, `active`, or non-terminal `settlement_unknown`; `matched`, `expired`, and definitive terminal mismatches do not count. The payer key comes from the deterministic verified AVM transaction identity, never a caller-supplied body field.
+The challenge-release limits are 50 open obligations globally and 5 per verified service payer. Open means `settlement_pending`, `active`, or non-terminal `settlement_unknown`; `matched`, `expired`, `indeterminate`, and definitive terminal mismatches do not count. The payer key comes from the deterministic verified AVM transaction identity, never a caller-supplied body field.
 
 Capacity checks and insertion run synchronously at the SQLite boundary under an immediate transaction. Exhaustion returns HTTP `429` before the handler can return success. These limits and the Indexer dispatcher bound persistent and external work; they are not an SLA.
 
@@ -111,7 +113,7 @@ This runner is for explicitly authorized evidence collection, not routine health
 
 - The current service is a single instance with in-process workers and local SQLite. It has no multi-instance leader election or distributed queue.
 - Availability depends on Render, its persistent disk, GoPlausible, the configured AlgoNode Indexer, and Algorand MainNet.
-- The current 30-minute TTL and 50-global/5-per-payer admission limits are challenge-release operational policy, not an SLA or final commercial capacity policy.
+- The current 30-minute eligibility deadline, 500-turn work budget, and 50-global/5-per-payer admission limits are challenge-release operational policy, not an SLA or final commercial capacity policy.
 - Watch status is unauthenticated. Anyone who knows a UUID can retrieve its record, including addresses, amounts, optional notes, settlement metadata, and transaction IDs.
 - Algorand transfers and public addresses are already public, but an invoice note can add application-specific information. Do not place confidential or personal data in it.
 - There is no cancellation or deletion API and no documented retention policy.
