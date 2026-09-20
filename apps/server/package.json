@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "benchmark:economics": "tsx economics-benchmark.ts",
     "benchmark:free-abuse": "tsx free-abuse-benchmark.ts",
+    "benchmark:storage": "tsx storage-economics-benchmark.ts",
     "probe:indexer": "tsx indexer-capability-probe.ts",
     "probe:indexer-semantic": "tsx indexer-semantic-probe.ts"
   },
