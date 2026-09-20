@@ -71,7 +71,8 @@ const demoDiscovery = declareDiscoveryExtension({
    },
 });
 
-const watchDiscovery = declareDiscoveryExtension({
+function createWatchDiscovery(workUnitBudget: number) {
+   return declareDiscoveryExtension({
    bodyType: 'json',
    input: {
       idempotencyKey: 'invoice-2026-09-15-001',
@@ -98,11 +99,13 @@ const watchDiscovery = declareDiscoveryExtension({
    output: {
       example: {
          watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
+         workUnitBudget,
          message:
             'Durable watch activated after confirmed x402 settlement; incomplete coverage terminates as indeterminate, never expired',
       },
    },
-});
+   });
+}
 
 export function createApp(dependencies: AppDependencies): Hono {
    const {
@@ -117,6 +120,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       economicsMetrics,
    } = dependencies;
 
+   const workUnitBudget = store.configuredWorkUnitBudget();
+   const watchDiscovery = createWatchDiscovery(workUnitBudget);
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
    const watchRouteKey = `POST ${watchPath}`;
    const publicDemoResource = publicBaseUrl ? `${publicBaseUrl}/demo` : undefined;
@@ -312,7 +317,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                   },
                ],
                ...(publicWatchResource ? { resource: publicWatchResource } : {}),
-               description: `Create one durable RoundWatch ${networkConfig.name} watch with bounded background work; matched and expired are proofs, while exhausted work terminates as indeterminate`,
+               description: `Create one durable RoundWatch ${networkConfig.name} watch with a ${workUnitBudget}-turn background work budget; matched and expired are proofs, while exhausted work terminates as indeterminate`,
                mimeType: 'application/json',
                extensions: watchDiscovery,
             },
