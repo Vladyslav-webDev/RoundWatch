@@ -121,7 +121,6 @@ const app = createApp({
    store,
    indexer: {} as never,
    economicsMetrics: metrics,
-   syncFacilitatorOnStart: false,
 });
 
 const validBody = JSON.stringify({
