@@ -16,7 +16,7 @@ export type WatchTerminalReason = 'work_budget_exhausted';
 export const DEFAULT_WATCH_TTL_MILLISECONDS = 30 * 60 * 1_000;
 export const DEFAULT_MAX_OPEN_WATCHES = 50;
 export const DEFAULT_MAX_OPEN_WATCHES_PER_PAYER = 5;
-export const DEFAULT_WORK_UNIT_BUDGET = 100;
+export const DEFAULT_WORK_UNIT_BUDGET = 500;
 
 export interface RoundWatchStoreOptions {
    watchTtlMilliseconds?: number;
