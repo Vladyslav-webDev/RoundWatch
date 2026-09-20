@@ -602,6 +602,15 @@ function classifyFreeRequest(
       return 'watch-status';
    }
 
+   if (
+      method === 'POST' &&
+      path === watchPath &&
+      status >= 400 &&
+      hasPaymentSignature
+   ) {
+      return 'watch-create-payment-rejected';
+   }
+
    if (method === 'POST' && path === watchPath && status === 402) {
       return 'watch-create-402';
    }
@@ -609,8 +618,7 @@ function classifyFreeRequest(
    if (
       method === 'POST' &&
       path === watchPath &&
-      status >= 400 &&
-      !hasPaymentSignature
+      status >= 400
    ) {
       return 'watch-create-rejected';
    }
