@@ -111,7 +111,7 @@ At the hard 2,000-background-request ceiling, a $0.02 watch could absorb an Inde
 
 The original `$0.001` price is a challenge/proof-of-payment placeholder, not an economically justified commercial price.
 
-Recommended launch price: **$0.02 USDC per 30-minute watch**.
+Implemented release-candidate price: **$0.02 USDC per 30-minute watch** (`20000` atomic units). This becomes the live contract only after deployment and an unpaid MainNet `402` preflight confirms the advertised amount.
 
 Rationale:
 
