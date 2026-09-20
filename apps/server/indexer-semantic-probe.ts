@@ -42,7 +42,7 @@ const watch: WatchRecord = {
    expiresAt: '2100-01-01T00:00:00.000Z',
    evidenceVersion: 1,
    reconciliationAttempts: 0,
-   workUnitBudget: 100,
+   workUnitBudget: 500,
    workUnitsUsed: 0,
 };
 
