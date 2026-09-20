@@ -35,6 +35,7 @@ import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
    DEFAULT_WATCH_TTL_MILLISECONDS,
+   DEFAULT_WORK_UNIT_BUDGET,
    RoundWatchStore,
    type SettlementEvidence,
    type WatchRecord,
@@ -75,6 +76,7 @@ let publicBaseUrl;
 let watchTtlMilliseconds;
 let maxOpenWatches;
 let maxOpenWatchesPerPayer;
+let workUnitBudget;
 let indexerRequestsPerSecond;
 let indexerBurst;
 let indexerConcurrency;
@@ -103,6 +105,11 @@ try {
       process.env.ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER,
       DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
       'ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER',
+   );
+   workUnitBudget = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_WORK_UNIT_BUDGET,
+      DEFAULT_WORK_UNIT_BUDGET,
+      'ROUNDWATCH_WORK_UNIT_BUDGET',
    );
    indexerRequestsPerSecond = parseRequiredPositiveNumber(
       process.env.ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND,
@@ -201,6 +208,7 @@ const storeOptions = {
    watchTtlMilliseconds,
    maxOpenWatches,
    maxOpenWatchesPerPayer,
+   workUnitBudget,
 };
 const store = faultExitAfterSettle
    ? new TestnetExitAfterSettleStore(databasePath, storeOptions)
@@ -278,6 +286,9 @@ server.on('listening', () => {
    console.log(`Watch TTL: ${watchTtlMilliseconds} ms`);
    console.log(
       `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
+   );
+   console.log(
+      `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
    );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
    console.log(`Indexer scan query variant: ${scanQueryVariant}`);
