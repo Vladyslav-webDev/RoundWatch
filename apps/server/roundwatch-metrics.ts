@@ -36,6 +36,7 @@ export interface WatchWorkSnapshot {
    roundsCovered: number;
    reconciliationAttempts: number;
    closingRequests: number;
+   workUnitsClaimed: number;
    activeDurationMs?: number;
    timeToTerminalMs?: number;
    finalState?: WatchState;
@@ -123,6 +124,7 @@ interface MutableWatchWork {
    roundsCovered: number;
    reconciliationAttempts: number;
    closingRequests: number;
+   workUnitsClaimed: number;
    activeDurationMs?: number;
    timeToTerminalMs?: number;
    finalState?: WatchState;
@@ -213,6 +215,10 @@ export class RoundWatchEconomicsMetrics {
 
    recordClosingRequest(watchId: string): void {
       this.watch(watchId).closingRequests += 1;
+   }
+
+   recordWorkUnit(watchId: string): void {
+      this.watch(watchId).workUnitsClaimed += 1;
    }
 
    recordLifecycle(
@@ -339,6 +345,7 @@ function emptyWatchWork(): MutableWatchWork {
       roundsCovered: 0,
       reconciliationAttempts: 0,
       closingRequests: 0,
+      workUnitsClaimed: 0,
    };
 }
 
@@ -397,6 +404,7 @@ function snapshotWatch(metric: MutableWatchWork): WatchWorkSnapshot {
       roundsCovered: metric.roundsCovered,
       reconciliationAttempts: metric.reconciliationAttempts,
       closingRequests: metric.closingRequests,
+      workUnitsClaimed: metric.workUnitsClaimed,
       ...(metric.activeDurationMs === undefined
          ? {}
          : { activeDurationMs: metric.activeDurationMs }),
