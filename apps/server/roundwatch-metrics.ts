@@ -65,6 +65,7 @@ export const FREE_REQUEST_CATEGORIES = [
    'watch-status',
    'watch-create-402',
    'watch-create-rejected',
+   'watch-create-payment-rejected',
    'other',
 ] as const;
 
