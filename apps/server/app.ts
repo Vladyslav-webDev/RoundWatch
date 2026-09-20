@@ -21,6 +21,13 @@ import {
    declareDiscoveryExtension,
 } from '@x402-avm/extensions';
 
+import {
+   DEFAULT_SIGNED_PAYMENT_BURST,
+   DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+   DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+   SignedPaymentGate,
+   type SignedPaymentGateOptions,
+} from './free-payment-gate.js';
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
 import type {
    FreeRequestCategory,
@@ -48,6 +55,7 @@ export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
 
 const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 
 export interface AppDependencies {
    avmAddress: string;
@@ -59,6 +67,7 @@ export interface AppDependencies {
    syncFacilitatorOnStart?: boolean;
    requireSettlementIntent?: boolean;
    economicsMetrics?: RoundWatchEconomicsMetrics;
+   signedPaymentGateOptions?: SignedPaymentGateOptions;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -118,8 +127,17 @@ export function createApp(dependencies: AppDependencies): Hono {
       syncFacilitatorOnStart = true,
       requireSettlementIntent = networkConfig.name === 'mainnet',
       economicsMetrics,
+      signedPaymentGateOptions,
    } = dependencies;
 
+   const signedPaymentGate = new SignedPaymentGate(
+      signedPaymentGateOptions ?? {
+         requestsPerSecond:
+            DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+         burst: DEFAULT_SIGNED_PAYMENT_BURST,
+         concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      },
+   );
    const workUnitBudget = store.configuredWorkUnitBudget();
    const watchDiscovery = createWatchDiscovery(workUnitBudget);
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
@@ -278,6 +296,62 @@ export function createApp(dependencies: AppDependencies): Hono {
             }),
             { status: 500, headers },
          );
+      }
+   });
+
+   app.use(watchPath, async (c, next) => {
+      if (c.req.method !== 'POST') {
+         await next();
+         return;
+      }
+
+      const paymentHeader = c.req.header('payment-signature');
+      if (!paymentHeader) {
+         await next();
+         return;
+      }
+
+      if (
+         Buffer.byteLength(paymentHeader, 'utf8') >
+         MAX_PAYMENT_SIGNATURE_HEADER_BYTES
+      ) {
+         return c.json(
+            {
+               error: 'PAYMENT-SIGNATURE header is too large',
+               code: 'payment_signature_header_too_large',
+            },
+            400,
+         );
+      }
+
+      try {
+         decodePaymentSignatureHeader(paymentHeader);
+      } catch {
+         return c.json(
+            {
+               error: 'Invalid PAYMENT-SIGNATURE header',
+               code: 'invalid_payment_signature_header',
+            },
+            400,
+         );
+      }
+
+      const admission = signedPaymentGate.tryAcquire();
+      if (!admission.allowed) {
+         c.header('retry-after', '1');
+         return c.json(
+            {
+               error: 'Payment verification capacity is temporarily exhausted',
+               code: 'payment_verification_rate_limited',
+            },
+            429,
+         );
+      }
+
+      try {
+         await next();
+      } finally {
+         admission.release();
       }
    });
 
