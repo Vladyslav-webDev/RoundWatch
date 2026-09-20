@@ -472,7 +472,7 @@ function watchRequestBody(state: MainnetCheckpoint): Record<string, string> {
 
 function printUsage(): void {
    console.log('Usage:');
-   console.log('  tsx mainnet-e2e.ts start --confirm-mainnet   # spends 0.001 USDC service payment');
+   console.log('  tsx mainnet-e2e.ts start --confirm-mainnet   # spends 0.02 USDC service payment');
    console.log('  tsx mainnet-e2e.ts recover --confirm-mainnet # recovery only; must not settle again');
    console.log('  tsx mainnet-e2e.ts status                    # read-only');
    console.log('  tsx mainnet-e2e.ts pay --confirm-mainnet     # spends 0.000001 USDC invoice payment + network fee');
