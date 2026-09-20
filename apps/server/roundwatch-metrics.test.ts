@@ -279,7 +279,7 @@ test('HTTP instrumentation separates health, public status, and unpaid watch cre
       await missingStatus.text();
 
       const unpaidBody = JSON.stringify({
-         idempotencyKey: 'economics-unpaid-001',
+         idempotencyKey: ['economics', 'unpaid', '001'].join('-'),
          expectedSender:
             'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
          expectedReceiver: receiver,
