@@ -107,6 +107,69 @@ test('API root exposes RoundWatch merchant identity metadata without an x402 cha
    }
 });
 
+test('x402 payment headers are exposed to browser clients and preflight allows payment signatures', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [{ x402Version: 2, scheme: 'exact', network: ALGORAND_TESTNET }],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+      });
+
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            origin: 'https://roundwatch.observer',
+            'content-type': 'application/json',
+         },
+         body: JSON.stringify({
+            idempotencyKey: SPEC.idempotencyKey,
+            expectedSender: PAYER,
+            expectedReceiver: RECEIVER,
+            atomicAmount: SPEC.atomicAmount,
+            invoiceNote: SPEC.invoiceNote,
+         }),
+      });
+
+      assert.equal(unpaid.status, 402);
+      assert.equal(unpaid.headers.get('access-control-allow-origin'), '*');
+      const exposed = (unpaid.headers.get('access-control-expose-headers') ?? '')
+         .toLowerCase()
+         .split(',')
+         .map(value => value.trim());
+      assert.ok(exposed.includes('payment-required'));
+      assert.ok(exposed.includes('payment-response'));
+      assert.ok(exposed.includes('x-roundwatch-id'));
+
+      const preflight = await app.request('/spike/watch', {
+         method: 'OPTIONS',
+         headers: {
+            origin: 'https://example-browser-payer.test',
+            'access-control-request-method': 'POST',
+            'access-control-request-headers': 'content-type,payment-signature',
+         },
+      });
+
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+      const allowed = (preflight.headers.get('access-control-allow-headers') ?? '')
+         .toLowerCase()
+         .split(',')
+         .map(value => value.trim());
+      assert.ok(allowed.includes('content-type'));
+      assert.ok(allowed.includes('payment-signature'));
+   } finally {
+      store.close();
+   }
+});
+
 test('TestNet remains the default and the x402 requirement preserves network, asset, amount, and receiver', async () => {
    assert.equal(resolveRoundWatchNetwork(undefined).name, 'testnet');
    assert.equal(resolveRoundWatchNetwork('mainnet'), MAINNET_NETWORK_CONFIG);
