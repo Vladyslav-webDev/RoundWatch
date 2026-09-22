@@ -31,6 +31,7 @@ export function merchantIdentityHtml(): string {
     <link rel="icon" type="image/svg+xml" href="${ROUNDWATCH_ICON_URL}" />
     <link rel="alternate" type="application/json" href="/openapi.json" title="RoundWatch OpenAPI" />
     <link rel="alternate" type="text/plain" href="/llms.txt" title="RoundWatch LLM instructions" />
+    <link rel="alternate" type="application/json" href="/mcp" title="RoundWatch MCP endpoint" />
     <title>${ROUNDWATCH_TITLE}</title>
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="RoundWatch" />
@@ -75,6 +76,7 @@ export function merchantIdentityHtml(): string {
         <a href="${ROUNDWATCH_SITE_URL}/algorand-payment-monitoring-api">Technical guide</a>
         <a href="/openapi.json">OpenAPI</a>
         <a href="/llms.txt">LLMs</a>
+        <a href="/mcp">MCP</a>
       </nav>
       <div class="meta">Algorand · USDC · x402 · durable payment monitoring</div>
     </main>
