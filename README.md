@@ -163,7 +163,7 @@ The Hono resource server uses x402 v2 and the hosted GoPlausible facilitator. Be
 
 If the process stops after on-chain settlement but before activation is committed, the reconciliation worker looks up that exact transaction under persisted exponential backoff. It activates only when the original immutable terms agree. A bare 404 is retryable; only a sufficiently covered post-`LastValid` historical absence search can establish terminal nonpayment. A definitive confirmed mismatch fails closed.
 
-All Indexer calls share one token-bucket/concurrency dispatcher. Scans use finite round windows and page-level validation; each page and retry consumes capacity. Pagination tokens stay in memory, so restart replays the unfinished window from its durable cursor. When the deadline has passed, RoundWatch fixes an indexed block whose timestamp is at or after the deadline as `closingRound`; only complete validated coverage through that round can produce `expired`. Status reads never manufacture expiry from wall time.
+All Indexer calls share one token-bucket/concurrency dispatcher. Scans use finite round windows and page-level validation; each page and retry consumes capacity. Each durable work turn is additionally guarded to at most four logical Indexer request opportunities for active polling or three for settlement reconciliation, so the default 500-turn contract has a conservative 2,000-background-request ceiling. Validated historical scan pages may be reused across sweeps, but the process-local LRU is bounded by both entry count and serialized payload bytes. Pagination tokens stay in memory, so restart replays the unfinished window from its durable cursor. When the deadline has passed, RoundWatch fixes an indexed block whose timestamp is at or after the deadline as `closingRound`; only complete validated coverage through that round can produce `expired`. Status reads never manufacture expiry from wall time.
 
 ## Local development
 
@@ -191,10 +191,14 @@ ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
 ROUNDWATCH_WATCH_TTL_MS=1800000
 ROUNDWATCH_MAX_OPEN_WATCHES=50
 ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER=5
+ROUNDWATCH_WORK_UNIT_BUDGET=500
 ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND=4
 ROUNDWATCH_INDEXER_BURST=4
 ROUNDWATCH_INDEXER_CONCURRENCY=2
 ROUNDWATCH_SCAN_ROUND_WINDOW=100
+ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES=16
+ROUNDWATCH_SCAN_PAGE_CACHE_BYTES=8388608
+ROUNDWATCH_SCAN_QUERY_VARIANT=C
 PORT=4021
 ```
 
