@@ -674,7 +674,6 @@ test('all paid resources share the signed-payment verification admission gate', 
             facilitatorClient: facilitator,
             store,
             indexer: new FakeIndexer(100),
-            syncFacilitatorOnStart: false,
             signedPaymentGateOptions: {
                requestsPerSecond: 1_000,
                burst: 8,
