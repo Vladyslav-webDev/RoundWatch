@@ -5,6 +5,10 @@ import {
 } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
+import {
+   IndexerRequestTurnBudget,
+   MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN,
+} from './roundwatch-work-budget.js';
 
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
 export const DEFAULT_SCAN_PAGE_CACHE_ENTRIES = 16;
@@ -178,11 +182,20 @@ export class RoundWatchPoller {
          this.economicsMetrics?.recordWorkUnit(initial.id),
       );
 
+      const requestBudget = new IndexerRequestTurnBudget(
+         MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN,
+         'active polling turn',
+      );
+
       let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
       if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
          this.recordMetric(() => this.economicsMetrics?.recordClosingRequest(watch.id));
-         const tip = await this.indexer.getCurrentRound('checkpoint', watch.id);
-         const block = await this.indexer.getBlock(tip, watch.id);
+         const tip = await requestBudget.run(() =>
+            this.indexer.getCurrentRound('checkpoint', watch.id),
+         );
+         const block = await requestBudget.run(() =>
+            this.indexer.getBlock(tip, watch.id),
+         );
          if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
             this.store.setClosingRound(watch.id, block.round);
             watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
@@ -202,7 +215,7 @@ export class RoundWatchPoller {
          session = undefined;
       }
       if (!session) {
-         const tip = await getSweepTip();
+         const tip = await requestBudget.run(getSweepTip);
          const maxRound = Math.min(
             watch.scanAfterRound + this.roundWindow,
             tip,
@@ -217,11 +230,13 @@ export class RoundWatchPoller {
          this.sessions.set(watch.id, session);
       }
 
-      const page = await getSweepPage(
-         watch,
-         session.minRound,
-         session.maxRound,
-         session.nextToken,
+      const page = await requestBudget.run(() =>
+         getSweepPage(
+            watch,
+            session.minRound,
+            session.maxRound,
+            session.nextToken,
+         ),
       );
       let transactionsExamined = 0;
       const match = page.transactions.find(transaction => {
