@@ -521,9 +521,13 @@ The x402 payment buys the RoundWatch monitoring service. It is separate from the
 ## Machine-readable API
 
 - OpenAPI: ${base}/openapi.json
+- LLM instructions: ${base}/llms.txt
+- MCP Streamable HTTP: ${base}/mcp
 - Health: ${base}/health
 - API root: ${base || '/'}
 - GitHub: ${GITHUB_URL}
+
+The MCP server exposes read-only discovery and status tools plus a preparation tool that validates and returns the exact x402 HTTP request. The MCP layer does not hold a wallet and does not sign or settle the x402 payment.
 
 ## Human documentation
 
