@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 
 import { paymentMiddleware, x402ResourceServer } from '@x402/hono';
 import type {
@@ -290,6 +291,21 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    const app = new Hono();
+
+   app.use(
+      '*',
+      cors({
+         origin: '*',
+         allowMethods: ['GET', 'POST', 'OPTIONS'],
+         allowHeaders: ['Content-Type', 'Payment-Signature'],
+         exposeHeaders: [
+            'Payment-Required',
+            'Payment-Response',
+            'X-RoundWatch-Id',
+         ],
+         maxAge: 86_400,
+      }),
+   );
 
    if (economicsMetrics) {
       app.use(async (c, next) => {
