@@ -5,6 +5,7 @@ on:
     branches:
       - feat/roundwatch-landing
       - seo/landing-discoverability-v1
+      - seo/problem-intent-pages-v1
     paths:
       - "apps/landing/**"
       - "package.json"
@@ -53,10 +54,14 @@ jobs:
         run: |
           test -f apps/landing/dist/index.html
           test -f apps/landing/dist/start/index.html
+          test -f apps/landing/dist/algorand-payment-monitoring-api/index.html
           test -f apps/landing/dist/robots.txt
           test -f apps/landing/dist/sitemap.xml
           grep -Fq '<title>RoundWatch — Algorand x402 Payment Monitoring API</title>' apps/landing/dist/index.html
           grep -Fq 'name="description"' apps/landing/dist/index.html
           grep -Fq 'rel="canonical" href="https://roundwatch.observer/"' apps/landing/dist/index.html
           grep -Fq 'RoundWatch Quickstart — Algorand x402 Payment Monitoring API' apps/landing/dist/start/index.html
+          grep -Fq 'Algorand Payment Monitoring API for Future USDC Payments | RoundWatch' apps/landing/dist/algorand-payment-monitoring-api/index.html
+          grep -Fq 'rel="canonical" href="https://roundwatch.observer/algorand-payment-monitoring-api"' apps/landing/dist/algorand-payment-monitoring-api/index.html
+          grep -Fq 'Future payment with no txId yet.' apps/landing/dist/algorand-payment-monitoring-api/index.html
           grep -Fq 'https://roundwatch.observer/sitemap.xml' apps/landing/dist/robots.txt
