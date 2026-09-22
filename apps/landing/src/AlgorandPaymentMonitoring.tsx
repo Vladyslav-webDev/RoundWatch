@@ -1,6 +1,5 @@
 import { BrandMark, Icon } from "./graphics";
 
-const API_BASE = "https://roundwatch-api.onrender.com";
 const INDEXER_DOCS =
   "https://dev.algorand.co/reference/rest-api/indexer/operations/searchfortransactions/";
 const PENDING_DOCS =
