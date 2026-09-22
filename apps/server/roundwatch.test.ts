@@ -101,7 +101,127 @@ test('API root exposes RoundWatch merchant identity metadata without an x402 cha
       );
       assert.match(html, /RoundWatch — Algorand x402 Payment Monitoring API/);
       assert.match(html, /https:\/\/roundwatch\.observer\/start/);
+      assert.match(html, /href="\/openapi\.json"/);
+      assert.match(html, /href="\/llms\.txt"/);
       assert.match(html, /"@type":"WebAPI"/);
+   } finally {
+      store.close();
+   }
+});
+
+test('machine-readable OpenAPI describes the live MainNet RoundWatch contract without payment', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         networkConfig: MAINNET_NETWORK_CONFIG,
+         publicBaseUrl: 'https://roundwatch-api.onrender.com',
+         requireSettlementIntent: false,
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/openapi.json');
+
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-type') ?? '', /^application\/json/);
+      assert.equal(response.headers.get('payment-required'), null);
+      assert.equal(response.headers.get('cache-control'), 'public, max-age=300');
+
+      const document = await response.json() as {
+         openapi?: unknown;
+         servers?: Array<{ url?: unknown }>;
+         paths?: Record<string, {
+            post?: Record<string, unknown>;
+            get?: Record<string, unknown>;
+         }>;
+      };
+
+      assert.equal(document.openapi, '3.1.0');
+      assert.equal(document.servers?.[0]?.url, 'https://roundwatch-api.onrender.com');
+
+      const create = document.paths?.['/v1/watch']?.post as
+         | {
+              operationId?: unknown;
+              'x-x402'?: {
+                 version?: unknown;
+                 network?: unknown;
+                 asset?: unknown;
+                 servicePriceAtomicAmount?: unknown;
+                 payTo?: unknown;
+              };
+              responses?: Record<string, {
+                 headers?: Record<string, unknown>;
+              }>;
+           }
+         | undefined;
+
+      assert.equal(create?.operationId, 'createWatch');
+      assert.equal(create?.['x-x402']?.version, 2);
+      assert.equal(
+         create?.['x-x402']?.network,
+         MAINNET_NETWORK_CONFIG.network,
+      );
+      assert.equal(
+         create?.['x-x402']?.asset,
+         MAINNET_NETWORK_CONFIG.usdcAssetId,
+      );
+      assert.equal(create?.['x-x402']?.servicePriceAtomicAmount, '20000');
+      assert.equal(create?.['x-x402']?.payTo, RECEIVER);
+      assert.ok(create?.responses?.['402']?.headers?.['PAYMENT-REQUIRED']);
+      assert.equal(
+         document.paths?.['/v1/watch/{id}']?.get?.operationId,
+         'getWatch',
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('llms.txt explains when agents should and should not use RoundWatch', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         networkConfig: MAINNET_NETWORK_CONFIG,
+         publicBaseUrl: 'https://roundwatch-api.onrender.com',
+         requireSettlementIntent: false,
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/llms.txt');
+
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-type') ?? '', /^text\/plain/);
+      assert.equal(response.headers.get('payment-required'), null);
+      const body = await response.text();
+      assert.match(body, /no transaction ID exists yet/i);
+      assert.match(body, /RoundWatch is not a webhook delivery service/i);
+      assert.match(body, /POST \/v1\/watch/);
+      assert.match(body, /GET \/v1\/watch\/\{id\}/);
+      assert.match(
+         body,
+         /https:\/\/roundwatch-api\.onrender\.com\/openapi\.json/,
+      );
+      assert.match(body, /0\.02 USDC \(20000 atomic units\)/);
+      assert.match(body, /Vladyslav-webDev\/RoundWatch/);
    } finally {
       store.close();
    }
