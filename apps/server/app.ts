@@ -222,6 +222,7 @@ export function createApp(dependencies: AppDependencies): Hono {
    const workUnitBudget = store.configuredWorkUnitBudget();
    const watchDiscovery = createWatchDiscovery(workUnitBudget);
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
+   const watchRecoveryPath = `${watchPath}/recover`;
    const watchRouteKey = `POST ${watchPath}`;
    const publicDemoResource = publicBaseUrl ? `${publicBaseUrl}/demo` : undefined;
    const publicWatchResource = publicBaseUrl ? `${publicBaseUrl}${watchPath}` : undefined;
@@ -706,6 +707,73 @@ export function createApp(dependencies: AppDependencies): Hono {
          message:
             'The watch is returned only if x402 settlement and durable activation succeed',
       });
+   });
+
+   app.post(watchRecoveryPath, async c => {
+      let body: unknown;
+
+      try {
+         body = await readJsonBodyWithLimit(
+            c.req.raw,
+            MAX_WATCH_REQUEST_BODY_BYTES,
+         );
+      } catch (error) {
+         if (error instanceof RequestBodyTooLargeError) {
+            return c.json(
+               {
+                  error: 'Recovery request body is too large',
+                  code: 'watch_recovery_body_too_large',
+               },
+               413,
+            );
+         }
+
+         return c.json({ error: 'Expected a JSON request body' }, 400);
+      }
+
+      const parsed = parseWatchSpec(body, networkConfig.usdcAssetIdNumber);
+      const servicePayer =
+         body && typeof body === 'object' && !Array.isArray(body)
+            ? (body as Record<string, unknown>).servicePayer
+            : undefined;
+
+      if (
+         'error' in parsed ||
+         typeof servicePayer !== 'string' ||
+         !isValidAlgorandAddress(servicePayer)
+      ) {
+         return c.json({ error: 'Invalid recovery request' }, 400);
+      }
+
+      const existing = store.getByIdempotencyKey(parsed.spec.idempotencyKey);
+      const exactMatch =
+         existing !== undefined &&
+         existing.expectedSender === parsed.spec.expectedSender &&
+         existing.expectedReceiver === parsed.spec.expectedReceiver &&
+         existing.assetId === parsed.spec.assetId &&
+         existing.atomicAmount === parsed.spec.atomicAmount &&
+         (existing.invoiceNote ?? undefined) ===
+            (parsed.spec.invoiceNote ?? undefined) &&
+         existing.expectedServicePayer === servicePayer;
+
+      if (!exactMatch) {
+         c.header('cache-control', 'no-store');
+         return c.json({ error: 'Recoverable watch not found' }, 404);
+      }
+
+      if (existing.state !== 'active' && existing.state !== 'matched') {
+         c.header('cache-control', 'no-store');
+         return c.json(
+            {
+               error: 'Existing watch is not recoverable yet',
+               state: existing.state,
+            },
+            409,
+         );
+      }
+
+      c.header('cache-control', 'no-store');
+      return c.json({ watch: publicWatch(existing) });
    });
 
    app.get(`${watchPath}/:id`, c => {
