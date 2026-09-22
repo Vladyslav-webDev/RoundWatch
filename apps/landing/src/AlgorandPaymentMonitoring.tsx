@@ -1,4 +1,5 @@
 import { BrandMark, Icon } from "./graphics";
+import { SiteFooter } from "./SiteFooter";
 
 const INDEXER_DOCS =
   "https://dev.algorand.co/reference/rest-api/indexer/operations/searchfortransactions/";
@@ -81,7 +82,7 @@ function GuideHeader() {
 
 export default function AlgorandPaymentMonitoringPage() {
   return (
-    <div className="guide-site">
+    <div id="top" className="guide-site">
       <a className="skip-link" href="#guide-main">
         Skip to content
       </a>
@@ -419,15 +420,7 @@ export default function AlgorandPaymentMonitoringPage() {
         </div>
       </main>
 
-      <footer className="guide-footer container mono">
-        <span>© 2026 RoundWatch</span>
-        <nav aria-label="Guide footer navigation">
-          <a href="/">Product</a>
-          <a href="/start">Quickstart</a>
-          <a href="/impressum">Impressum</a>
-          <a href="/privacy">Datenschutz</a>
-        </nav>
-      </footer>
+      <SiteFooter rootedLinks />
     </div>
   );
 }
