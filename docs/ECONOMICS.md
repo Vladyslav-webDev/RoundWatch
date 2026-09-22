@@ -31,11 +31,13 @@ Representative production-style 50-watch runs over 300 synthetic rounds:
 
 The no-note path is intentionally more expensive because variant C cannot add the note filter when the buyer did not supply a note.
 
+Historical scan-page reuse is bounded in two dimensions. The process-local LRU retains at most 16 validated pages and at most 8 MiB of serialized page payload by default. An oversized page is not retained across sweeps, and setting either cache limit to 0 disables cross-sweep retention without changing correctness or within-sweep promise sharing. The byte limit bounds retained payload buffers, not every V8 object or Map-key overhead, so the entry cap remains part of the memory safety envelope.
+
 A unique adversarial collision sweep demonstrated linear pagination. At 75,000 returned candidates over 300 rounds, one watch required 75 scan pages and about 24.35 MB of synthetic Indexer response data. After removing synthetic-backend generation cost from the harness, the benchmark process consumed about 0.56 seconds of CPU for that case. These CPU figures are structural benchmark observations, not a Render SLA.
 
 The consensus block-byte limit provides a finite per-round collision ceiling, but the 30-minute chain-time contract did not provide a protocol-derived finite total-round ceiling. The durable 500-turn work budget closes that service-side economic gap without turning incomplete coverage into a false negative.
 
-With the current implementation a work turn is claimed before background Indexer work. Active polling performs at most four Indexer requests in one turn; reconciliation performs at most three. The conservative service-side request ceiling is therefore at most 2,000 background Indexer requests for the 500-turn budget, plus the bounded initial purchase/activation path.
+With the current implementation a work turn is claimed before background Indexer work. Active polling performs at most four logical Indexer request opportunities in one turn; reconciliation performs at most three. A runtime turn guard enforces those ceilings, and regression tests exercise the four-request active path and three-request reconciliation path. The conservative service-side ceiling is therefore at most 2,000 background Indexer request opportunities for the 500-turn budget, plus the bounded initial purchase/activation path. Shared-tip and page-cache reuse can only reduce physical provider requests below that logical ceiling.
 
 ## Free-work audit
 

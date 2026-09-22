@@ -5,9 +5,14 @@ import {
 } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
+import {
+   IndexerRequestTurnBudget,
+   MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN,
+} from './roundwatch-work-budget.js';
 
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
 export const DEFAULT_SCAN_PAGE_CACHE_ENTRIES = 16;
+export const DEFAULT_SCAN_PAGE_CACHE_BYTES = 8 * 1024 * 1024;
 
 interface ScanSession {
    minRound: number;
@@ -16,13 +21,19 @@ interface ScanSession {
    seenTokens: Set<string>;
 }
 
+interface CachedHistoricalPage {
+   encoded: Buffer;
+   bytes: number;
+}
+
 export class RoundWatchPoller {
    private timer?: NodeJS.Timeout;
    private running = false;
    private started = false;
    private nextWatchIndex = 0;
    private readonly sessions = new Map<string, ScanSession>();
-   private readonly historicalPageCache = new Map<string, TransactionPage>();
+   private readonly historicalPageCache = new Map<string, CachedHistoricalPage>();
+   private historicalPageCacheBytes = 0;
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -33,6 +44,8 @@ export class RoundWatchPoller {
       private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
       private readonly historicalPageCacheEntries =
          DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
+      private readonly historicalPageCacheByteBudget =
+         DEFAULT_SCAN_PAGE_CACHE_BYTES,
    ) {
       if (!Number.isSafeInteger(roundWindow) || roundWindow <= 0) {
          throw new Error('roundWindow must be a finite positive integer');
@@ -43,6 +56,14 @@ export class RoundWatchPoller {
       ) {
          throw new Error(
             'historicalPageCacheEntries must be a non-negative safe integer',
+         );
+      }
+      if (
+         !Number.isSafeInteger(historicalPageCacheByteBudget) ||
+         historicalPageCacheByteBudget < 0
+      ) {
+         throw new Error(
+            'historicalPageCacheByteBudget must be a non-negative safe integer',
          );
       }
    }
@@ -139,7 +160,7 @@ export class RoundWatchPoller {
             // later became invalid. Clear the bounded cache on any scan-path
             // failure so the next sweep restarts from fresh provider state
             // instead of replaying a stale token forever.
-            this.historicalPageCache.clear();
+            this.clearHistoricalPageCache();
             console.error(
                `RoundWatch poll failed for watch ${watch.id}:`,
                safeErrorMessage(error),
@@ -178,11 +199,20 @@ export class RoundWatchPoller {
          this.economicsMetrics?.recordWorkUnit(initial.id),
       );
 
+      const requestBudget = new IndexerRequestTurnBudget(
+         MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN,
+         'active polling turn',
+      );
+
       let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
       if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
          this.recordMetric(() => this.economicsMetrics?.recordClosingRequest(watch.id));
-         const tip = await this.indexer.getCurrentRound('checkpoint', watch.id);
-         const block = await this.indexer.getBlock(tip, watch.id);
+         const tip = await requestBudget.run(() =>
+            this.indexer.getCurrentRound('checkpoint', watch.id),
+         );
+         const block = await requestBudget.run(() =>
+            this.indexer.getBlock(tip, watch.id),
+         );
          if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
             this.store.setClosingRound(watch.id, block.round);
             watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
@@ -202,7 +232,7 @@ export class RoundWatchPoller {
          session = undefined;
       }
       if (!session) {
-         const tip = await getSweepTip();
+         const tip = await requestBudget.run(getSweepTip);
          const maxRound = Math.min(
             watch.scanAfterRound + this.roundWindow,
             tip,
@@ -217,11 +247,13 @@ export class RoundWatchPoller {
          this.sessions.set(watch.id, session);
       }
 
-      const page = await getSweepPage(
-         watch,
-         session.minRound,
-         session.maxRound,
-         session.nextToken,
+      const page = await requestBudget.run(() =>
+         getSweepPage(
+            watch,
+            session.minRound,
+            session.maxRound,
+            session.nextToken,
+         ),
       );
       let transactionsExamined = 0;
       const match = page.transactions.find(transaction => {
@@ -271,32 +303,65 @@ export class RoundWatchPoller {
    private getCachedHistoricalPage(
       queryKey: string,
    ): TransactionPage | undefined {
-      const page = this.historicalPageCache.get(queryKey);
-      if (!page) return undefined;
+      const cached = this.historicalPageCache.get(queryKey);
+      if (!cached) return undefined;
 
       // Refresh insertion order to maintain an LRU eviction policy.
       this.historicalPageCache.delete(queryKey);
-      this.historicalPageCache.set(queryKey, page);
-      return page;
+      this.historicalPageCache.set(queryKey, cached);
+
+      return JSON.parse(cached.encoded.toString('utf8')) as TransactionPage;
    }
 
    private cacheHistoricalPage(
       queryKey: string,
       page: TransactionPage,
    ): void {
-      if (this.historicalPageCacheEntries === 0) return;
+      if (
+         this.historicalPageCacheEntries === 0 ||
+         this.historicalPageCacheByteBudget === 0
+      ) {
+         return;
+      }
 
-      this.historicalPageCache.delete(queryKey);
-      this.historicalPageCache.set(queryKey, page);
+      const encoded = Buffer.from(JSON.stringify(page), 'utf8');
+      const bytes = encoded.byteLength;
+
+      // Never let one oversized response evict the whole useful cache only to
+      // remain resident itself. It simply remains eligible for within-sweep
+      // promise sharing and is fetched again on a later sweep.
+      if (bytes > this.historicalPageCacheByteBudget) return;
+
+      const existing = this.historicalPageCache.get(queryKey);
+      if (existing) {
+         this.historicalPageCacheBytes -= existing.bytes;
+         this.historicalPageCache.delete(queryKey);
+      }
+
+      this.historicalPageCache.set(queryKey, { encoded, bytes });
+      this.historicalPageCacheBytes += bytes;
 
       while (
-         this.historicalPageCache.size >
-         this.historicalPageCacheEntries
+         this.historicalPageCache.size > this.historicalPageCacheEntries ||
+         this.historicalPageCacheBytes >
+            this.historicalPageCacheByteBudget
       ) {
-         const oldest = this.historicalPageCache.keys().next().value;
-         if (oldest === undefined) break;
-         this.historicalPageCache.delete(oldest);
+         const oldestKey = this.historicalPageCache.keys().next().value as
+            | string
+            | undefined;
+         if (oldestKey === undefined) break;
+
+         const oldest = this.historicalPageCache.get(oldestKey);
+         if (oldest) {
+            this.historicalPageCacheBytes -= oldest.bytes;
+         }
+         this.historicalPageCache.delete(oldestKey);
       }
+   }
+
+   private clearHistoricalPageCache(): void {
+      this.historicalPageCache.clear();
+      this.historicalPageCacheBytes = 0;
    }
 
    private finishMetric(watch: WatchRecord, finalState: WatchState): void {

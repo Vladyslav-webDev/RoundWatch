@@ -12,6 +12,7 @@ import {
    type SettlementLookupIndexer,
 } from './roundwatch-reconciler.js';
 import { RoundWatchStore, type SettlementIntent, type WatchSpec } from './roundwatch-store.js';
+import { MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN } from './roundwatch-work-budget.js';
 
 const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
 const RECEIVER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAR7CWY';
@@ -111,6 +112,35 @@ test('covered historical absence after LastValid terminalizes nonpayment but ina
    } finally { store.close(); }
 });
 
+test('one settlement-reconciliation work turn cannot exceed the three-request invariant', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+
+   try {
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'reconcile-max-turn' },
+         terms('RECONCILE_MAX_TURN'),
+      ).watch;
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 901,
+      });
+
+      await reconciler(store, indexer).reconcileOnce();
+
+      const requests =
+         indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls;
+      assert.equal(
+         requests,
+         MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN,
+      );
+      assert.equal(store.getWatch(watch.id)?.state, 'settlement_unknown');
+   } finally {
+      store.close();
+   }
+});
+
 test('reconciliation pagination consumes bounded work units and exhausts indeterminate', async () => {
    const store = new RoundWatchStore(':memory:', {
       workUnitBudget: 1,
@@ -190,12 +220,18 @@ class FakeLookup implements SettlementLookupIndexer {
    lookups = new Map<string, IndexedAssetTransfer>();
    throwFor = new Set<string>();
    pages: TransactionIdPage[] = [];
+   lookupCalls = 0;
+   currentRoundCalls = 0;
    pageCalls = 0;
    async lookupAssetTransfer(transactionId: string): Promise<IndexedAssetTransfer | undefined> {
+      this.lookupCalls += 1;
       if (this.throwFor.has(transactionId)) throw new Error('synthetic lookup failure');
       return this.lookups.get(transactionId);
    }
-   async getCurrentRound(): Promise<number> { return this.round; }
+   async getCurrentRound(): Promise<number> {
+      this.currentRoundCalls += 1;
+      return this.round;
+   }
    async searchTransactionPage(): Promise<TransactionIdPage> {
       this.pageCalls += 1;
       const page = this.pages.shift(); if (!page) throw new Error('missing fake absence page'); return page;

@@ -33,9 +33,11 @@ import {
    IndexerRequestDispatcher,
 } from './roundwatch-scheduler.js';
 import {
+   DEFAULT_SCAN_PAGE_CACHE_BYTES,
    DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
    DEFAULT_SCAN_ROUND_WINDOW,
 } from './roundwatch-poller.js';
+import { maxBackgroundIndexerRequestsForWorkBudget } from './roundwatch-work-budget.js';
 import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
@@ -82,11 +84,13 @@ let watchTtlMilliseconds;
 let maxOpenWatches;
 let maxOpenWatchesPerPayer;
 let workUnitBudget;
+let backgroundIndexerRequestCeiling;
 let indexerRequestsPerSecond;
 let indexerBurst;
 let indexerConcurrency;
 let scanRoundWindow;
 let scanPageCacheEntries;
+let scanPageCacheBytes;
 let economicsSampleIntervalMilliseconds;
 let scanQueryVariant;
 let signedPaymentRequestsPerSecond;
@@ -119,6 +123,8 @@ try {
       DEFAULT_WORK_UNIT_BUDGET,
       'ROUNDWATCH_WORK_UNIT_BUDGET',
    );
+   backgroundIndexerRequestCeiling =
+      maxBackgroundIndexerRequestsForWorkBudget(workUnitBudget);
    indexerRequestsPerSecond = parseRequiredPositiveNumber(
       process.env.ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND,
       DEFAULT_INDEXER_REQUESTS_PER_SECOND,
@@ -135,6 +141,11 @@ try {
       process.env.ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES,
       DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
       'ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES',
+   );
+   scanPageCacheBytes = parseRequiredNonNegativeInteger(
+      process.env.ROUNDWATCH_SCAN_PAGE_CACHE_BYTES,
+      DEFAULT_SCAN_PAGE_CACHE_BYTES,
+      'ROUNDWATCH_SCAN_PAGE_CACHE_BYTES',
    );
    economicsSampleIntervalMilliseconds = parseRequiredPositiveInteger(
       process.env.ROUNDWATCH_ECONOMICS_SAMPLE_INTERVAL_MS,
@@ -260,6 +271,7 @@ const poller = new RoundWatchPoller(
    undefined,
    economicsMetrics,
    scanPageCacheEntries,
+   scanPageCacheBytes,
 );
 const reconciler = new SettlementReconciler(
    store,
@@ -319,12 +331,15 @@ server.on('listening', () => {
       `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
    );
    console.log(
+      `Conservative background Indexer ceiling: ${backgroundIndexerRequestCeiling} logical request opportunities / watch`,
+   );
+   console.log(
       `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
    );
    console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
    console.log(`Indexer scan query variant: ${scanQueryVariant}`);
    console.log(
-      `Historical scan-page cache: ${scanPageCacheEntries} entries`,
+      `Historical scan-page cache: ${scanPageCacheEntries} entries / ${scanPageCacheBytes} payload bytes`,
    );
    console.log(
       `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,

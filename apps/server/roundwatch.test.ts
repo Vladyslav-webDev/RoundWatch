@@ -38,6 +38,7 @@ import {
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
+import { MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN } from './roundwatch-work-budget.js';
 import {
    RoundWatchStore,
    WatchCapacityError,
@@ -992,6 +993,70 @@ test('validated historical pages are reused across staggered poll sweeps', async
    }
 });
 
+test('historical cache payload-byte budget prevents oversized cross-sweep retention', async () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 2,
+      maxOpenWatchesPerPayer: 2,
+   });
+   const indexer = new SharedPageFakeIndexer(101);
+
+   const createActiveWatch = (index: number): void => {
+      const tx = `BYTE_CACHE_SERVICE_${index}`;
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: `byte-cache-${index}` },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+   };
+
+   try {
+      createActiveWatch(0);
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 101,
+         nextToken: 'page-2',
+      });
+
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => new Date(),
+         undefined,
+         16,
+         1,
+      );
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 1);
+
+      createActiveWatch(1);
+      indexer.pages.push(
+         {
+            transactions: [],
+            currentRound: 101,
+         },
+         {
+            transactions: [],
+            currentRound: 101,
+            nextToken: 'page-2',
+         },
+      );
+
+      await poller.runOnce();
+
+      // A one-byte cache budget cannot retain either validated page, so the
+      // staggered watch must physically fetch page 1 instead of reusing it.
+      assert.equal(indexer.pageCalls.length, 3);
+   } finally {
+      store.close();
+   }
+});
+
 test('scan failure clears historical pages so stale provider tokens cannot loop forever', async () => {
    const store = new RoundWatchStore(':memory:', {
       maxOpenWatches: 1,
@@ -1082,6 +1147,55 @@ test('historical page cache can be disabled without disabling within-sweep reuse
 
       assert.equal(indexer.pageCalls.length, 2);
       assert.equal(store.getWatch(watch.id)?.scanAfterRound, 101);
+   } finally {
+      store.close();
+   }
+});
+
+test('one active polling work turn cannot exceed the four-request invariant', async () => {
+   let now = new Date('2026-09-18T09:29:59Z');
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 1,
+      maxOpenWatchesPerPayer: 1,
+      now: () => now,
+   });
+   const indexer = new FakeIndexer(200);
+
+   try {
+      const tx = 'MAX_ACTIVE_TURN_SERVICE';
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'max-active-turn' },
+         intent(tx),
+      ).watch;
+      store.activateWatch(
+         watch.id,
+         { transaction: tx, network: ALGORAND_TESTNET, payer: PAYER },
+         100,
+      );
+
+      now = new Date('2026-09-18T10:00:01Z');
+      indexer.block = {
+         round: 200,
+         timestamp: Math.floor(now.getTime() / 1_000),
+      };
+      indexer.pages.push({
+         transactions: [],
+         currentRound: 200,
+      });
+
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      );
+      await poller.runOnce();
+
+      const requests =
+         indexer.currentRoundCalls + indexer.blockCalls + indexer.pageCalls.length;
+      assert.equal(requests, MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN);
+      assert.equal(store.getWatch(watch.id)?.state, 'expired');
    } finally {
       store.close();
    }
@@ -1484,6 +1598,7 @@ class FakeIndexer implements RoundWatchIndexer {
    pageCalls: Array<{ min: number; max: number; nextToken?: string }> = [];
    failPageCalls = new Set<number>();
    currentRoundCalls = 0;
+   blockCalls = 0;
    block: IndexedBlock;
    constructor(public round: number) { this.block = { round, timestamp: 0 }; }
    async getCurrentRound(): Promise<number> {
@@ -1491,7 +1606,10 @@ class FakeIndexer implements RoundWatchIndexer {
       return this.round;
    }
    async lookupAssetTransfer(): Promise<undefined> { return undefined; }
-   async getBlock(): Promise<IndexedBlock> { return this.block; }
+   async getBlock(): Promise<IndexedBlock> {
+      this.blockCalls += 1;
+      return this.block;
+   }
    async searchWatchPage(_watch: WatchRecord, min: number, max: number, nextToken?: string): Promise<TransactionPage> {
       const callIndex = this.pageCalls.length;
       this.pageCalls.push({ min, max, ...(nextToken ? { nextToken } : {}) });
