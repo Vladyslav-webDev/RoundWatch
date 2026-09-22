@@ -38,15 +38,19 @@ ROUNDWATCH_RECONCILE_INTERVAL_MS=5000
 ROUNDWATCH_WATCH_TTL_MS=1800000
 ROUNDWATCH_MAX_OPEN_WATCHES=50
 ROUNDWATCH_MAX_OPEN_WATCHES_PER_PAYER=5
+ROUNDWATCH_WORK_UNIT_BUDGET=500
 ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND=4
 ROUNDWATCH_INDEXER_BURST=4
 ROUNDWATCH_INDEXER_CONCURRENCY=2
 ROUNDWATCH_SCAN_ROUND_WINDOW=100
+ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES=16
+ROUNDWATCH_SCAN_PAGE_CACHE_BYTES=8388608
+ROUNDWATCH_SCAN_QUERY_VARIANT=C
 ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=0
 PORT=<platform-provided port or 4021>
 ```
 
-`ALGORAND_INDEXER_URL`, worker intervals, watch TTL, capacity limits, dispatcher rate/burst/concurrency, finite scan round window, fault switch, and port have code defaults, but production should keep intended values explicit and reviewable. Dispatcher/window values are operational tuning, not public SLAs.
+`ALGORAND_INDEXER_URL`, worker intervals, watch TTL, capacity/work limits, dispatcher rate/burst/concurrency, finite scan round window, historical cache entry/payload-byte limits, scan strategy, fault switch, and port have code defaults, but production should keep intended values explicit and reviewable. Dispatcher/window/cache values are operational tuning, not public SLAs.
 
 Never set `AVM_MNEMONIC`, a private key, a recovery phrase, or a wallet export on the server. The resource server receives the signed x402 payload and needs only its public receiver address.
 
