@@ -47,6 +47,7 @@ import type {
 import { WatchCapacityError } from './roundwatch-store.js';
 import { merchantIdentityHtml } from './merchant-identity.js';
 import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
+import { handleMcpHttpRequest } from './mcp.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
@@ -309,11 +310,19 @@ export function createApp(dependencies: AppDependencies): Hono {
       cors({
          origin: '*',
          allowMethods: ['GET', 'POST', 'OPTIONS'],
-         allowHeaders: ['Content-Type', 'Payment-Signature'],
+         allowHeaders: [
+            'Content-Type',
+            'Payment-Signature',
+            'MCP-Protocol-Version',
+            'Mcp-Method',
+            'Mcp-Name',
+            'Mcp-Session-Id',
+         ],
          exposeHeaders: [
             'Payment-Required',
             'Payment-Response',
             'X-RoundWatch-Id',
+            'MCP-Protocol-Version',
          ],
          maxAge: 86_400,
       }),
@@ -377,6 +386,19 @@ export function createApp(dependencies: AppDependencies): Hono {
       c.header('cache-control', 'public, max-age=300');
       return c.text(llmsTxt);
    });
+
+   app.all('/mcp', c =>
+      handleMcpHttpRequest(c.req.raw, {
+         store,
+         networkConfig,
+         publicBaseUrl,
+         serviceReceiver: avmAddress,
+         servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
+         serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+         workUnitBudget,
+         watchPath,
+      }),
+   );
 
    // This resumes only after @x402/hono has finished settlement.
    app.use(watchPath, async (c, next) => {

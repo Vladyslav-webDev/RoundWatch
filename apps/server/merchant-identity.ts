@@ -75,6 +75,7 @@ export function merchantIdentityHtml(): string {
         <a href="${ROUNDWATCH_SITE_URL}/algorand-payment-monitoring-api">Technical guide</a>
         <a href="/openapi.json">OpenAPI</a>
         <a href="/llms.txt">LLMs</a>
+        <a href="https://github.com/Vladyslav-webDev/RoundWatch/blob/main/server.json">MCP Registry</a>
       </nav>
       <div class="meta">Algorand · USDC · x402 · durable payment monitoring</div>
     </main>

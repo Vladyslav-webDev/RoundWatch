@@ -227,6 +227,291 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
    }
 });
 
+test('MCP server supports modern discovery, deterministic tool listing, and watch preparation without payment', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         networkConfig: MAINNET_NETWORK_CONFIG,
+         publicBaseUrl: 'https://roundwatch-api.onrender.com',
+         requireSettlementIntent: false,
+         syncFacilitatorOnStart: false,
+      });
+
+      const modernHeaders = {
+         'content-type': 'application/json',
+         'mcp-protocol-version': '2026-07-28',
+      };
+
+      const discover = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            ...modernHeaders,
+            'mcp-method': 'server/discover',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'server/discover',
+            params: {
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                  'io.modelcontextprotocol/clientCapabilities': {},
+               },
+            },
+         }),
+      });
+
+      assert.equal(discover.status, 200);
+      assert.equal(discover.headers.get('payment-required'), null);
+      const discoverBody = await discover.json() as {
+         result?: {
+            resultType?: unknown;
+            supportedVersions?: unknown;
+            capabilities?: { tools?: unknown };
+            _meta?: Record<string, unknown>;
+         };
+      };
+      assert.equal(discoverBody.result?.resultType, 'complete');
+      assert.deepEqual(discoverBody.result?.supportedVersions, ['2026-07-28']);
+      assert.deepEqual(discoverBody.result?.capabilities?.tools, {});
+      assert.ok(
+         discoverBody.result?._meta?.['io.modelcontextprotocol/serverInfo'],
+      );
+
+      const list = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            ...modernHeaders,
+            'mcp-method': 'tools/list',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/list',
+            params: {
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                  'io.modelcontextprotocol/clientCapabilities': {},
+               },
+            },
+         }),
+      });
+
+      assert.equal(list.status, 200);
+      const listBody = await list.json() as {
+         result?: {
+            resultType?: unknown;
+            ttlMs?: unknown;
+            cacheScope?: unknown;
+            tools?: Array<{ name?: unknown }>;
+         };
+      };
+      assert.equal(listBody.result?.resultType, 'complete');
+      assert.equal(listBody.result?.ttlMs, 300000);
+      assert.equal(listBody.result?.cacheScope, 'public');
+      assert.deepEqual(
+         listBody.result?.tools?.map(tool => tool.name),
+         [
+            'roundwatch.service_info',
+            'roundwatch.prepare_watch',
+            'roundwatch.get_watch',
+         ],
+      );
+
+      const prepare = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            ...modernHeaders,
+            'mcp-method': 'tools/call',
+            'mcp-name': 'roundwatch.prepare_watch',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 3,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.prepare_watch',
+               arguments: {
+                  idempotencyKey: 'mcp-invoice-001',
+                  expectedSender: PAYER,
+                  expectedReceiver: RECEIVER,
+                  atomicAmount: '1000000',
+                  invoiceNote: 'roundwatch:mcp-invoice-001',
+               },
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                  'io.modelcontextprotocol/clientCapabilities': {},
+               },
+            },
+         }),
+      });
+
+      assert.equal(prepare.status, 200);
+      const prepareBody = await prepare.json() as {
+         result?: {
+            resultType?: unknown;
+            isError?: unknown;
+            structuredContent?: {
+               created?: unknown;
+               request?: { url?: unknown };
+               x402?: {
+                  servicePriceAtomicAmount?: unknown;
+                  network?: unknown;
+               };
+            };
+         };
+      };
+      assert.equal(prepareBody.result?.resultType, 'complete');
+      assert.equal(prepareBody.result?.isError, false);
+      assert.equal(prepareBody.result?.structuredContent?.created, false);
+      assert.equal(
+         prepareBody.result?.structuredContent?.request?.url,
+         'https://roundwatch-api.onrender.com/v1/watch',
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.x402?.servicePriceAtomicAmount,
+         '20000',
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.x402?.network,
+         MAINNET_NETWORK_CONFIG.network,
+      );
+      assert.equal(
+         store.getByIdempotencyKey('mcp-invoice-001'),
+         undefined,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('MCP get_watch returns free durable state and redacts internal fields', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const prepared = store.prepareWatch(SPEC);
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         publicBaseUrl: 'https://roundwatch-api.onrender.com',
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+            'mcp-method': 'tools/call',
+            'mcp-name': 'roundwatch.get_watch',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 4,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.get_watch',
+               arguments: { watchId: prepared.watch.id },
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                  'io.modelcontextprotocol/clientCapabilities': {},
+               },
+            },
+         }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('payment-required'), null);
+      const body = await response.json() as {
+         result?: {
+            isError?: unknown;
+            structuredContent?: {
+               watch?: Record<string, unknown>;
+               statusUrl?: unknown;
+            };
+         };
+      };
+
+      assert.equal(body.result?.isError, false);
+      assert.equal(body.result?.structuredContent?.watch?.id, prepared.watch.id);
+      assert.equal(
+         body.result?.structuredContent?.watch?.idempotencyKey,
+         undefined,
+      );
+      assert.equal(
+         body.result?.structuredContent?.statusUrl,
+         `https://roundwatch-api.onrender.com/spike/watch/${prepared.watch.id}`,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('MCP endpoint keeps stateless legacy initialize compatibility', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 5,
+            method: 'initialize',
+            params: {
+               protocolVersion: '2025-11-25',
+               capabilities: {},
+               clientInfo: { name: 'roundwatch-test', version: '1.0.0' },
+            },
+         }),
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.json() as {
+         result?: {
+            protocolVersion?: unknown;
+            capabilities?: { tools?: unknown };
+            serverInfo?: { name?: unknown };
+         };
+      };
+      assert.equal(body.result?.protocolVersion, '2025-11-25');
+      assert.deepEqual(body.result?.capabilities?.tools, {});
+      assert.equal(body.result?.serverInfo?.name, 'roundwatch');
+   } finally {
+      store.close();
+   }
+});
+
 test('x402 payment headers are exposed to browser clients and preflight allows payment signatures', async () => {
    const store = new RoundWatchStore(':memory:');
    try {
@@ -273,7 +558,8 @@ test('x402 payment headers are exposed to browser clients and preflight allows p
          headers: {
             origin: 'https://example-browser-payer.test',
             'access-control-request-method': 'POST',
-            'access-control-request-headers': 'content-type,payment-signature',
+            'access-control-request-headers':
+               'content-type,payment-signature,mcp-protocol-version,mcp-method,mcp-name',
          },
       });
 
@@ -285,6 +571,9 @@ test('x402 payment headers are exposed to browser clients and preflight allows p
          .map(value => value.trim());
       assert.ok(allowed.includes('content-type'));
       assert.ok(allowed.includes('payment-signature'));
+      assert.ok(allowed.includes('mcp-protocol-version'));
+      assert.ok(allowed.includes('mcp-method'));
+      assert.ok(allowed.includes('mcp-name'));
    } finally {
       store.close();
    }
