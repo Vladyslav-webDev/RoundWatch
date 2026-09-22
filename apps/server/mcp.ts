@@ -5,6 +5,10 @@ import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const LEGACY_PROTOCOL_VERSION = '2025-11-25';
+const LEGACY_PROTOCOL_VERSIONS = new Set([
+   '2025-11-25',
+   '2025-06-18',
+]);
 const SERVER_NAME = 'roundwatch';
 const SERVER_VERSION = '1.0.0';
 const TOOL_LIST_TTL_MS = 300_000;
@@ -223,7 +227,7 @@ export async function handleMcpHttpRequest(
             ? params.protocolVersion
             : undefined;
       const protocolVersion =
-         requested && requested < MODERN_PROTOCOL_VERSION
+         requested && LEGACY_PROTOCOL_VERSIONS.has(requested)
             ? requested
             : LEGACY_PROTOCOL_VERSION;
 
@@ -527,8 +531,16 @@ function validateModernHeaders(
       return 'Mcp-Method header must match the JSON-RPC method';
    }
 
+   const params = asObject(message.params);
+   const meta = asObject(params?._meta);
+   if (
+      meta?.['io.modelcontextprotocol/protocolVersion'] !==
+      MODERN_PROTOCOL_VERSION
+   ) {
+      return `params._meta.io.modelcontextprotocol/protocolVersion must be ${MODERN_PROTOCOL_VERSION}`;
+   }
+
    if (message.method === 'tools/call') {
-      const params = asObject(message.params);
       const expectedName =
          params && typeof params.name === 'string' ? params.name : undefined;
       if (!expectedName || request.headers.get('mcp-name') !== expectedName) {
