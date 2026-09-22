@@ -5,6 +5,7 @@ import type { IconName } from "./graphics";
 import WorkflowReplay from "./WorkflowReplay";
 import Resilience from "./Resilience";
 import VideoShowcase from "./VideoShowcase";
+import { SiteFooter } from "./SiteFooter";
 import { MotionProvider, useMotion } from "./motion";
 
 const navigation = [
@@ -856,32 +857,7 @@ function Landing() {
           </section>
         </div>
       </main>
-      <footer className="site-footer container">
-        <div className="footer-top">
-          <div>
-            <Brand />
-            <p>
-              Durable payment evidence
-              <br />
-              for autonomous work.
-            </p>
-          </div>
-          <nav aria-label="Footer navigation">
-            {navigation.map((item) => (
-              <a href={item.href} key={item.href}>
-                {item.label}
-              </a>
-            ))}
-          </nav>
-        </div>
-        <div className="footer-bottom mono">
-          <span>© 2026 RoundWatch</span>
-          <span>roundwatch.observer</span>
-          <a href="#top">
-            Back to top <span aria-hidden="true">↑</span>
-          </a>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }
