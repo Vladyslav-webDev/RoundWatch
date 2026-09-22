@@ -46,6 +46,7 @@ import type {
 } from './roundwatch-store.js';
 import { WatchCapacityError } from './roundwatch-store.js';
 import { merchantIdentityHtml } from './merchant-identity.js';
+import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
@@ -206,6 +207,17 @@ export function createApp(dependencies: AppDependencies): Hono {
    const watchRouteKey = `POST ${watchPath}`;
    const publicDemoResource = publicBaseUrl ? `${publicBaseUrl}/demo` : undefined;
    const publicWatchResource = publicBaseUrl ? `${publicBaseUrl}${watchPath}` : undefined;
+   const machineReadableDocsOptions = {
+      networkConfig,
+      publicBaseUrl,
+      serviceReceiver: avmAddress,
+      servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
+      serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+      workUnitBudget,
+      watchPath,
+   };
+   const openApiDocument = buildOpenApiDocument(machineReadableDocsOptions);
+   const llmsTxt = buildLlmsTxt(machineReadableDocsOptions);
    const resourceServer = new x402ResourceServer(facilitatorClient);
 
    resourceServer.register(networkConfig.network, new ExactAvmScheme());
@@ -354,6 +366,16 @@ export function createApp(dependencies: AppDependencies): Hono {
          status: 'ok',
          network: networkConfig.name,
       });
+   });
+
+   app.get('/openapi.json', c => {
+      c.header('cache-control', 'public, max-age=300');
+      return c.json(openApiDocument);
+   });
+
+   app.get('/llms.txt', c => {
+      c.header('cache-control', 'public, max-age=300');
+      return c.text(llmsTxt);
    });
 
    // This resumes only after @x402/hono has finished settlement.
