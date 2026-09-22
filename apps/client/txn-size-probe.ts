@@ -48,7 +48,7 @@ console.log(
    `minimum normal transaction fee: ${MIN_TXN_FEE_MICROALGOS} microAlgo`,
 );
 console.log(
-   'SignedTxnInBlock model: standard Ed25519 signature, empty ApplyData, genesis hash stripped by block encoding.',
+   'SignedTxnInBlock reconstruction: standard Ed25519 signature, empty ApplyData, no GenesisID, required matching genesis hash stripped by current block encoding.',
 );
 
 for (const probeCase of cases) {
@@ -102,9 +102,22 @@ function encodeCurrentProtocolSignedTxnInBlock(
       'signed transaction txn',
    );
 
-   // Current Algorand block encoding (SignedTxnInBlock) strips the required
-   // genesis hash when it matches the block header. Empty ApplyData and false
-   // hgi/hgh flags are omitted by canonical MsgPack encoding.
+   assertOwnKey(signed, 'sig', 'standard Ed25519 signature');
+   assertOwnKey(signed, 'txn', 'signed transaction');
+   rejectOwnKey(signed, 'msig', 'multisignature');
+   rejectOwnKey(signed, 'lsig', 'logic signature');
+   rejectOwnKey(signed, 'pqsig', 'post-quantum signature');
+   rejectOwnKey(signed, 'sgnr', 'auth-address override');
+   assertOwnKey(transaction, 'gh', 'required genesis hash');
+   rejectOwnKey(transaction, 'gen', 'GenesisID');
+
+   // Source equivalence for the current protocol family:
+   // go-algorand BlockHeader.EncodeSignedTxn removes a matching required
+   // GenesisHash. RequireGenesisHash has been enabled since v16, so it does
+   // not set the hgh compatibility flag. With empty ApplyData and false hgi,
+   // the generated SignedTxnInBlock MarshalMsg emits only the standard signed
+   // transaction fields ("sig" and "txn"), with the transaction's "gh"
+   // omitted. js-algorand-sdk encodeObj uses canonical sorted-key MsgPack.
    const blockTransaction = {
       ...signed,
       txn: {
@@ -125,4 +138,25 @@ function requireRecord(
    }
 
    return value as Record<string, unknown>;
+}
+
+
+function assertOwnKey(
+   object: Record<string, unknown>,
+   key: string,
+   label: string,
+): void {
+   if (!Object.prototype.hasOwnProperty.call(object, key)) {
+      throw new Error(`Expected ${label} field "${key}" in probe fixture`);
+   }
+}
+
+function rejectOwnKey(
+   object: Record<string, unknown>,
+   key: string,
+   label: string,
+): void {
+   if (Object.prototype.hasOwnProperty.call(object, key)) {
+      throw new Error(`Unexpected ${label} field "${key}" in probe fixture`);
+   }
 }
