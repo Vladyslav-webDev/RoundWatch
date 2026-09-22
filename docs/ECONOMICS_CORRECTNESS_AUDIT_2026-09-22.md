@@ -77,12 +77,12 @@ With the supplied fixed hosting assumption of about $7.25/month, fixed-cost brea
 
 At the conservative 2,000-background-request ceiling, an Indexer price of $10 per million requests would consume the full $0.02 service revenue in Indexer request charges alone. A 50% pre-fixed-cost contribution margin at that absolute ceiling corresponds to $5 per million requests. Normal measured watches are far below the ceiling, so this is a safety-envelope calculation rather than expected unit cost.
 
-## 6. Remaining engineering follow-ups
+## 6. Follow-up status
 
-1. The cross-sweep LRU is bounded by entry count (16) rather than retained bytes. This is finite, but it is not a measured heap envelope. A byte-aware cache cap is worth evaluating before raising page/cache limits or moving to a protocol with larger transaction payloads.
-2. The 2,000-request proof is a maintenance invariant of the current turn implementation, not a dispatcher-enforced per-watch request counter. Tests or a future request-level budget should guard against silently increasing requests per turn.
-3. The exact 203-byte `SignedTxnInBlock` probe result should be considered supporting capacity evidence, not the foundation of the service safety proof, until checked against the canonical Go codec.
-4. Production economics should be revisited using independent payer count, repeat buyers, terminal-state distribution, p95 work-unit usage, and actual provider charges. Synthetic benchmarks cannot substitute for those observations.
+1. Resolved after this audit: production hardening now bounds the historical cross-sweep LRU by both 16 entries and 8 MiB of serialized retained page payload by default.
+2. Resolved after this audit: active polling and settlement reconciliation now enforce runtime per-turn Indexer request ceilings of four and three respectively, with regression coverage. The default 500-turn contract therefore retains a conservative 2,000 logical background-request ceiling.
+3. Source-validated after this audit: `docs/COLLISION_CAPACITY_PROOF.md` traces the probe fixture through `BlockHeader.EncodeSignedTxn`, generated `SignedTxnInBlock.MarshalMsg`, and the JS SDK canonical MsgPack encoder. The 203-byte no-note fixture is now a source-equivalent capacity estimate. An executable Go byte-for-byte fixture remains optional cross-language regression coverage, not a prerequisite for the service safety bound.
+4. Still operational: production economics should be revisited using independent payer count, repeat buyers, terminal-state distribution, p95 work-unit usage, and actual provider charges. Synthetic benchmarks cannot substitute for those observations.
 
 ## Upstream source anchors
 
