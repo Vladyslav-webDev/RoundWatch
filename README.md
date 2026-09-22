@@ -15,7 +15,7 @@
   <a href="https://roundwatch-api.onrender.com/">Live API</a> ·
   <a href="https://roundwatch-api.onrender.com/openapi.json">OpenAPI</a> ·
   <a href="https://roundwatch-api.onrender.com/llms.txt">llms.txt</a> ·
-  <a href="https://roundwatch-api.onrender.com/mcp">MCP</a> ·
+  <a href="server.json">MCP Registry</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a>
 </p>
 
