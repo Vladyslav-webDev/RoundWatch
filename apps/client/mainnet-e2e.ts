@@ -12,17 +12,19 @@ import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { ExactAvmScheme, toClientAvmSigner } from '@x402/avm';
 import {
    ALGORAND_MAINNET,
+   assertApprovedRoundWatchPayment,
    assertMainnetRuntimeSafety,
-   CHALLENGE_TAG,
    DEFAULT_ALGOD_URL,
    DEFAULT_SERVER_URL,
    EXPECTED_RECEIVER,
    INVOICE_ATOMIC_AMOUNT,
-   SERVICE_ATOMIC_AMOUNT,
+   installRoundWatchPaymentSafety,
+   recoverExistingMainnetWatch,
    USDC_MAINNET_ASA_ID,
    validateMainnetCheckpoint,
    type MainnetCheckpoint,
    type MainnetWatchSnapshot,
+   type ReadyMainnetCheckpoint,
 } from './mainnet-safety.js';
 
 process.loadEnvFile(resolve('../server/.env'));
@@ -38,10 +40,6 @@ const algodUrl = process.env.ALGORAND_ALGOD_URL ?? DEFAULT_ALGOD_URL;
 const mnemonic = process.env.AVM_MNEMONIC;
 const configuredReceiver = process.env.AVM_ADDRESS;
 const statePath = resolve('data/roundwatch-mainnet-live.json');
-
-interface ReadyMainnetState extends MainnetCheckpoint {
-   watchId: string;
-}
 
 async function main(): Promise<void> {
    const mode = process.argv[2];
@@ -72,6 +70,16 @@ async function main(): Promise<void> {
       return;
    }
 
+   if (mode === 'recover') {
+      const state = validateMainnetCheckpoint(readState(), {
+         runtimeServerUrl: serverUrl,
+      });
+      const recovered = await recoverWatch(state);
+      writeState(recovered);
+      console.log(`Recovered MainNet checkpoint written to ${statePath}.`);
+      return;
+   }
+
    requireExplicitConfirmation();
    const account = getPayerAccount();
    const sender = account.addr.toString();
@@ -92,21 +100,10 @@ async function main(): Promise<void> {
    const state = validateMainnetCheckpoint(readState(), {
       runtimeServerUrl: serverUrl,
       payerAddress: sender,
-      requireWatchId: mode === 'pay',
+      requireWatchId: true,
    });
 
-   if (mode === 'recover') {
-      const recovered = await recoverWatch(account, state);
-      writeState(recovered);
-      console.log(`Recovered MainNet checkpoint written to ${statePath}.`);
-      return;
-   }
-
-   if (!state.watchId) {
-      throw new Error('Checkpoint has no watchId. Run recover first.');
-   }
-
-   await payInvoice(account, state as ReadyMainnetState);
+   await payInvoice(account, state as ReadyMainnetCheckpoint);
 }
 
 function assertStaticSafety(): void {
@@ -138,7 +135,7 @@ function getPayerAccount(): algosdk.Account {
 async function startWatch(
    account: algosdk.Account,
    sender: string,
-): Promise<ReadyMainnetState> {
+): Promise<ReadyMainnetCheckpoint> {
    const health = await fetch(`${serverUrl}/health`);
    const healthBody = await health.json() as { status?: string; network?: string };
 
@@ -180,10 +177,11 @@ async function startWatch(
       throw new Error('HTTP 402 did not contain PAYMENT-REQUIRED');
    }
 
-   assertPaymentRequirements(paymentRequiredHeader, watchUrl);
+   const paymentRequired = decodePaymentRequiredHeader(paymentRequiredHeader);
+   assertApprovedRoundWatchPayment(paymentRequired, watchUrl);
    console.log('MainNet unpaid preflight passed. No payment has been sent yet.');
 
-   const client = createPaymentClient(account);
+   const client = createPaymentClient(account, watchUrl);
    const fetchWithPayment = wrapFetchWithPayment(fetch, client);
    const paid = await fetchWithPayment(watchUrl, {
       method: 'POST',
@@ -234,60 +232,14 @@ async function startWatch(
    return completedCheckpoint;
 }
 
-function assertPaymentRequirements(header: string, watchUrl: string): void {
-   const decoded = decodePaymentRequiredHeader(header) as unknown as {
-      resource?: { url?: string };
-      accepts?: Array<{
-         scheme?: string;
-         network?: string;
-         amount?: string;
-         asset?: string;
-         payTo?: string;
-         extra?: Record<string, unknown>;
-      }>;
-   };
-
-   if (decoded.resource?.url !== watchUrl) {
-      throw new Error(
-         `SAFETY STOP: x402 resource URL mismatch. Expected ${watchUrl}, received ${decoded.resource?.url ?? 'missing'}`,
-      );
-   }
-
-   const option = decoded.accepts?.find(
-      candidate =>
-         candidate.scheme === 'exact' &&
-         candidate.network === ALGORAND_MAINNET,
-   );
-
-   if (!option) {
-      throw new Error('SAFETY STOP: no exact Algorand MainNet payment option');
-   }
-
-   const checks: Array<[string, unknown, string]> = [
-      ['amount', option.amount, SERVICE_ATOMIC_AMOUNT],
-      ['asset', option.asset, String(USDC_MAINNET_ASA_ID)],
-      ['payTo', option.payTo, EXPECTED_RECEIVER],
-      ['tag', option.extra?.tag, CHALLENGE_TAG],
-   ];
-
-   for (const [name, actual, expected] of checks) {
-      if (actual !== expected) {
-         throw new Error(
-            `SAFETY STOP: x402 ${name} mismatch. Expected ${expected}, received ${String(actual)}`,
-         );
-      }
-   }
-}
-
 async function recoverWatch(
-   account: algosdk.Account,
    state: MainnetCheckpoint,
-): Promise<ReadyMainnetState> {
+): Promise<ReadyMainnetCheckpoint> {
    if (state.watchId) {
       const existing = await readWatch(state.watchId);
       validateMainnetCheckpoint(state, {
          runtimeServerUrl: serverUrl,
-         payerAddress: account.addr.toString(),
+         payerAddress: state.expectedSender,
          requireWatchId: true,
          watch: existing,
       });
@@ -296,70 +248,25 @@ async function recoverWatch(
       }
 
       console.log(`Existing MainNet watch ${state.watchId} is ${existing.state}.`);
-      return state as ReadyMainnetState;
+      return state as ReadyMainnetCheckpoint;
    }
 
-   const client = createPaymentClient(account);
-   const fetchWithPayment = wrapFetchWithPayment(fetch, client);
-   const response = await fetchWithPayment(`${serverUrl}/v1/watch`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-         idempotencyKey: state.idempotencyKey,
-         expectedSender: state.expectedSender,
-         expectedReceiver: state.expectedReceiver,
-         atomicAmount: state.atomicAmount,
-         invoiceNote: state.invoiceNote,
-      }),
-   });
-
-   const unexpectedSettlement = new x402HTTPClient(client).getPaymentSettleResponse(
-      name => response.headers.get(name),
+   const recovered = await recoverExistingMainnetWatch(
+      fetch,
+      state,
+      serverUrl,
    );
-
-   if (unexpectedSettlement?.success) {
-      throw new Error(
-         `SAFETY STOP: recovery unexpectedly settled another payment: ${unexpectedSettlement.transaction}`,
-      );
-   }
-
-   if (response.status !== 409) {
-      throw new Error(
-         `Expected duplicate recovery HTTP 409 without a second settlement; received ${response.status}`,
-      );
-   }
-
-   const body = await response.json() as { watch?: MainnetWatchSnapshot };
-   if (!body.watch?.id) {
-      throw new Error('Recovery response did not expose the existing watchId');
-   }
-
-   if (body.watch.state !== 'active' && body.watch.state !== 'matched') {
-      throw new Error(`Recovered MainNet watch is ${body.watch.state}`);
-   }
 
    console.log(
-      `MAINNET WATCH RECOVERED: ${body.watch.id}; duplicate request did not settle again.`,
+      `MAINNET WATCH RECOVERED: ${recovered.watchId}; recovery lookup cannot sign or settle a payment.`,
    );
 
-   const recovered = {
-      ...state,
-      watchId: body.watch.id,
-   };
-
-   validateMainnetCheckpoint(recovered, {
-      runtimeServerUrl: serverUrl,
-      payerAddress: account.addr.toString(),
-      requireWatchId: true,
-      watch: body.watch,
-   });
-
-   return recovered as ReadyMainnetState;
+   return recovered;
 }
 
 async function payInvoice(
    account: algosdk.Account,
-   state: ReadyMainnetState,
+   state: ReadyMainnetCheckpoint,
 ): Promise<void> {
    const active = await readWatch(state.watchId);
    validateMainnetCheckpoint(state, {
@@ -409,10 +316,14 @@ async function payInvoice(
    );
 }
 
-function createPaymentClient(account: algosdk.Account): x402Client {
+function createPaymentClient(
+   account: algosdk.Account,
+   watchUrl: string,
+): x402Client {
    const signer = toClientAvmSigner(Buffer.from(account.sk).toString('base64'));
    const client = new x402Client();
    client.register(ALGORAND_MAINNET, new ExactAvmScheme(signer));
+   installRoundWatchPaymentSafety(client, watchUrl);
    return client;
 }
 
@@ -473,7 +384,7 @@ function watchRequestBody(state: MainnetCheckpoint): Record<string, string> {
 function printUsage(): void {
    console.log('Usage:');
    console.log('  tsx mainnet-e2e.ts start --confirm-mainnet   # spends 0.02 USDC service payment');
-   console.log('  tsx mainnet-e2e.ts recover --confirm-mainnet # recovery only; must not settle again');
+   console.log('  tsx mainnet-e2e.ts recover                   # read-only recovery; cannot sign or settle');
    console.log('  tsx mainnet-e2e.ts status                    # read-only');
    console.log('  tsx mainnet-e2e.ts pay --confirm-mainnet     # spends 0.000001 USDC invoice payment + network fee');
 }

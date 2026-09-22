@@ -1087,6 +1087,151 @@ test('route-level global and payer admission rejection occur before x402 settlem
    }
 });
 
+test('recovery lookup returns only an exact existing activated watch and never invokes x402', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const prepared = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'recovery-lookup-existing' },
+         intent('RECOVERY_LOOKUP_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'RECOVERY_LOOKUP_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         150,
+      );
+
+      let facilitatorCalls = 0;
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            verify: async () => {
+               facilitatorCalls += 1;
+               throw new Error('recovery lookup must not verify payment');
+            },
+            settle: async () => {
+               facilitatorCalls += 1;
+               throw new Error('recovery lookup must not settle payment');
+            },
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+      });
+
+      const exact = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: 'recovery-lookup-existing',
+            expectedSender: SPEC.expectedSender,
+            expectedReceiver: SPEC.expectedReceiver,
+            atomicAmount: SPEC.atomicAmount,
+            invoiceNote: SPEC.invoiceNote,
+            servicePayer: PAYER,
+         }),
+      });
+
+      assert.equal(exact.status, 200);
+      assert.equal(exact.headers.get('payment-required'), null);
+      assert.equal(exact.headers.get('cache-control'), 'no-store');
+      const exactBody = await exact.json() as {
+         watch?: Record<string, unknown>;
+      };
+      assert.equal(exactBody.watch?.id, prepared.id);
+      assert.equal(exactBody.watch?.idempotencyKey, undefined);
+      assert.equal(facilitatorCalls, 0);
+
+      const wrongPayer = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: 'recovery-lookup-existing',
+            expectedSender: SPEC.expectedSender,
+            expectedReceiver: SPEC.expectedReceiver,
+            atomicAmount: SPEC.atomicAmount,
+            invoiceNote: SPEC.invoiceNote,
+            servicePayer: RECEIVER,
+         }),
+      });
+      assert.equal(wrongPayer.status, 404);
+      assert.equal(facilitatorCalls, 0);
+
+      const missing = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: 'recovery-lookup-missing',
+            expectedSender: SPEC.expectedSender,
+            expectedReceiver: SPEC.expectedReceiver,
+            atomicAmount: SPEC.atomicAmount,
+            invoiceNote: SPEC.invoiceNote,
+            servicePayer: PAYER,
+         }),
+      });
+      assert.equal(missing.status, 404);
+      assert.equal(missing.headers.get('payment-required'), null);
+      assert.equal(facilitatorCalls, 0);
+   } finally {
+      store.close();
+   }
+});
+
+test('recovery lookup refuses non-active obligations without exposing a watch ID', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'recovery-lookup-pending' },
+         intent('RECOVERY_LOOKUP_PENDING_TX'),
+      );
+
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: 'recovery-lookup-pending',
+            expectedSender: SPEC.expectedSender,
+            expectedReceiver: SPEC.expectedReceiver,
+            atomicAmount: SPEC.atomicAmount,
+            invoiceNote: SPEC.invoiceNote,
+            servicePayer: PAYER,
+         }),
+      });
+
+      assert.equal(response.status, 409);
+      const body = await response.json() as {
+         state?: string;
+         watchId?: string;
+      };
+      assert.equal(body.state, 'settlement_pending');
+      assert.equal(body.watchId, undefined);
+   } finally {
+      store.close();
+   }
+});
+
 test('MainNet public base URL remains required, HTTPS-only, loopback-safe, and normalized', () => {
    assert.throws(
       () => resolveRoundWatchPublicBaseUrl(undefined, 'mainnet'),
