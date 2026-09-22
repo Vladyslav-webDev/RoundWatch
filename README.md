@@ -15,6 +15,7 @@
   <a href="https://roundwatch-api.onrender.com/">Live API</a> ·
   <a href="https://roundwatch-api.onrender.com/openapi.json">OpenAPI</a> ·
   <a href="https://roundwatch-api.onrender.com/llms.txt">llms.txt</a> ·
+  <a href="https://roundwatch-api.onrender.com/mcp">MCP</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a>
 </p>
 
@@ -30,7 +31,7 @@
 
 RoundWatch watches **one exact future Algorand MainNet USDC payment when no transaction ID exists yet**. A caller defines the expected payment, pays a one-time x402 service fee, receives a durable watch ID, and can exit. RoundWatch persists the obligation and scan progress, then exposes verified on-chain evidence for later retrieval.
 
-**Production:** Algorand MainNet · Circle USDC · x402 v2 · GoPlausible facilitator · Bazaar cataloged · durable restart recovery.
+**Production:** Algorand MainNet · Circle USDC · x402 v2 · GoPlausible facilitator · Bazaar cataloged · remote MCP endpoint · durable restart recovery.
 
 ## What it solves
 
