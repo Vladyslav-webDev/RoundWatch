@@ -26,7 +26,7 @@ jobs:
             -e GIT_CONFIG_VALUE_0=/repo \
             -v "$GITHUB_WORKSPACE:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.29.1 \
-            git --redact --no-banner --log-opts="--full-history --diff-filter=tuxdb HEAD" /repo
+            git --redact --no-banner --verbose --no-color --log-opts="--full-history --diff-filter=tuxdb HEAD" /repo
 
       - name: Reject tracked environment secrets
         shell: bash
