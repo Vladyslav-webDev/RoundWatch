@@ -1,4 +1,9 @@
 import { isValidAlgorandAddress } from '@x402/avm';
+import type { x402Client } from '@x402/fetch';
+import type {
+   PaymentRequired,
+   PaymentRequirements,
+} from '@x402/core/types';
 
 export const ALGORAND_MAINNET =
    'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=' as const;
@@ -42,6 +47,152 @@ export interface CheckpointValidationOptions {
    payerAddress?: string;
    requireWatchId?: boolean;
    watch?: MainnetWatchSnapshot;
+}
+
+
+export interface ReadyMainnetCheckpoint extends MainnetCheckpoint {
+   watchId: string;
+}
+
+export function isApprovedRoundWatchRequirement(
+   requirement: PaymentRequirements,
+): boolean {
+   return (
+      requirement.scheme === 'exact' &&
+      requirement.network === ALGORAND_MAINNET &&
+      requirement.amount === SERVICE_ATOMIC_AMOUNT &&
+      requirement.asset === String(USDC_MAINNET_ASA_ID) &&
+      requirement.payTo === EXPECTED_RECEIVER &&
+      requirement.extra?.tag === CHALLENGE_TAG &&
+      (requirement.extra?.paymentFlow === undefined ||
+         requirement.extra.paymentFlow === 'authorization')
+   );
+}
+
+export function assertApprovedRoundWatchPayment(
+   paymentRequired: PaymentRequired,
+   watchUrl: string,
+   selectedRequirements?: PaymentRequirements,
+): void {
+   if (paymentRequired.x402Version !== 2) {
+      throw new Error(
+         `SAFETY STOP: expected x402 version 2, received ${String(paymentRequired.x402Version)}`,
+      );
+   }
+
+   if (paymentRequired.resource?.url !== watchUrl) {
+      throw new Error(
+         `SAFETY STOP: x402 resource URL mismatch. Expected ${watchUrl}, received ${paymentRequired.resource?.url ?? 'missing'}`,
+      );
+   }
+
+   const approved =
+      selectedRequirements ??
+      paymentRequired.accepts.find(isApprovedRoundWatchRequirement);
+
+   if (!approved || !isApprovedRoundWatchRequirement(approved)) {
+      throw new Error(
+         'SAFETY STOP: no exact approved RoundWatch MainNet payment requirement',
+      );
+   }
+}
+
+export function installRoundWatchPaymentSafety(
+   client: x402Client,
+   watchUrl: string,
+): x402Client {
+   client.setSpendControls({
+      maxAmountPerPayment: '$0.02',
+   });
+
+   client.registerPolicy((x402Version, requirements) => {
+      if (x402Version !== 2) return [];
+      return requirements.filter(isApprovedRoundWatchRequirement);
+   });
+
+   client.onBeforePaymentCreation(async context => {
+      try {
+         assertApprovedRoundWatchPayment(
+            context.paymentRequired,
+            watchUrl,
+            context.selectedRequirements,
+         );
+      } catch (error) {
+         return {
+            abort: true,
+            reason:
+               error instanceof Error
+                  ? error.message
+                  : 'RoundWatch MainNet payment safety check failed',
+         };
+      }
+   });
+
+   return client;
+}
+
+export async function recoverExistingMainnetWatch(
+   fetchImpl: typeof fetch,
+   state: MainnetCheckpoint,
+   runtimeServerUrl: string,
+): Promise<ReadyMainnetCheckpoint> {
+   const checkpoint = validateMainnetCheckpoint(state, {
+      runtimeServerUrl,
+   });
+
+   if (checkpoint.watchId) {
+      throw new Error(
+         'Recovery lookup is only for checkpoints that do not already contain a watchId',
+      );
+   }
+
+   const response = await fetchImpl(`${runtimeServerUrl}/v1/watch/recover`, {
+      method: 'POST',
+      headers: {
+         'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+         idempotencyKey: checkpoint.idempotencyKey,
+         expectedSender: checkpoint.expectedSender,
+         expectedReceiver: checkpoint.expectedReceiver,
+         atomicAmount: checkpoint.atomicAmount,
+         invoiceNote: checkpoint.invoiceNote,
+         servicePayer: checkpoint.expectedSender,
+      }),
+   });
+
+   if (response.status === 404) {
+      throw new Error(
+         'SAFETY STOP: no existing durable MainNet watch was found for this checkpoint. Recovery will not sign or purchase a new watch.',
+      );
+   }
+
+   if (!response.ok) {
+      throw new Error(
+         `MainNet recovery lookup failed with HTTP ${response.status}; no payment was attempted`,
+      );
+   }
+
+   const body = await response.json() as { watch?: MainnetWatchSnapshot };
+   if (!body.watch?.id) {
+      throw new Error(
+         'MainNet recovery lookup did not return an existing watchId',
+      );
+   }
+
+   const recovered: ReadyMainnetCheckpoint = {
+      ...checkpoint,
+      watchId: body.watch.id,
+   };
+
+   validateMainnetCheckpoint(recovered, {
+      runtimeServerUrl,
+      payerAddress: checkpoint.expectedSender,
+      requireWatchId: true,
+      watch: body.watch,
+   });
+
+   return recovered;
 }
 
 export function assertMainnetRuntimeSafety(
