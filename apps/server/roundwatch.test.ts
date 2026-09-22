@@ -66,6 +66,47 @@ const SIGNED_SERVICE_TX_ID = getTransactionId(
    Buffer.from(SIGNED_SERVICE_PAYMENT, 'base64'),
 );
 
+test('API root exposes RoundWatch merchant identity metadata without an x402 challenge', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [{ x402Version: 2, scheme: 'exact', network: ALGORAND_TESTNET }],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+      });
+
+      const response = await app.request('/');
+
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-type') ?? '', /^text\/html/);
+      assert.equal(response.headers.get('payment-required'), null);
+      assert.equal(response.headers.get('cache-control'), 'public, max-age=300');
+
+      const html = await response.text();
+      assert.match(html, /<meta property="og:site_name" content="RoundWatch"/);
+      assert.match(
+         html,
+         /<meta property="og:image" content="https:\/\/roundwatch\.observer\/roundwatch-og\.jpg"/,
+      );
+      assert.match(
+         html,
+         /<link rel="icon" type="image\/svg\+xml" href="https:\/\/roundwatch\.observer\/favicon\.svg"/,
+      );
+      assert.match(html, /RoundWatch — Algorand x402 Payment Monitoring API/);
+      assert.match(html, /https:\/\/roundwatch\.observer\/start/);
+      assert.match(html, /"@type":"WebAPI"/);
+   } finally {
+      store.close();
+   }
+});
+
 test('TestNet remains the default and the x402 requirement preserves network, asset, amount, and receiver', async () => {
    assert.equal(resolveRoundWatchNetwork(undefined).name, 'testnet');
    assert.equal(resolveRoundWatchNetwork('mainnet'), MAINNET_NETWORK_CONFIG);

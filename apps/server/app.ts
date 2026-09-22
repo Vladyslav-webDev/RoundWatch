@@ -44,6 +44,7 @@ import type {
    WatchSpec,
 } from './roundwatch-store.js';
 import { WatchCapacityError } from './roundwatch-store.js';
+import { merchantIdentityHtml } from './merchant-identity.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
@@ -326,6 +327,11 @@ export function createApp(dependencies: AppDependencies): Hono {
          }
       });
    }
+
+   app.get('/', c => {
+      c.header('cache-control', 'public, max-age=300');
+      return c.html(merchantIdentityHtml());
+   });
 
    app.get('/health', c => {
       return c.json({
