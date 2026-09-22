@@ -2,6 +2,11 @@ import { isValidAlgorandAddress } from '@x402/avm';
 
 import type { RoundWatchNetworkConfig } from './network-config.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
+import {
+   MAX_MCP_REQUEST_BODY_BYTES,
+   RequestBodyTooLargeError,
+   readJsonBodyWithLimit,
+} from './request-body.js';
 
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const LEGACY_PROTOCOL_VERSION = '2025-11-25';
@@ -13,6 +18,11 @@ const SERVER_NAME = 'roundwatch';
 const SERVER_VERSION = '1.0.0';
 const TOOL_LIST_TTL_MS = 300_000;
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
+const MAX_JSON_RPC_ID_BYTES = 128;
+const MAX_MCP_METHOD_BYTES = 128;
+const MAX_MCP_TOOL_NAME_BYTES = 128;
+const MAX_MCP_WATCH_ID_BYTES = 128;
 
 interface McpDependencies {
    store: RoundWatchStore;
@@ -174,17 +184,34 @@ export async function handleMcpHttpRequest(
    let message: JsonRpcRequest;
 
    try {
-      const parsed = await request.json();
+      const parsed = await readJsonBodyWithLimit(
+         request,
+         MAX_MCP_REQUEST_BODY_BYTES,
+      );
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
          return jsonRpcHttpError(null, -32600, 'Invalid Request', 400);
       }
       message = parsed as JsonRpcRequest;
-   } catch {
+   } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+         return jsonRpcHttpError(
+            null,
+            -32021,
+            'MCP request body is too large',
+            413,
+         );
+      }
       return jsonRpcHttpError(null, -32700, 'Parse error', 400);
    }
 
-   if (message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
-      return jsonRpcHttpError(normalizeId(message.id), -32600, 'Invalid Request', 400);
+   if (
+      message.jsonrpc !== '2.0' ||
+      typeof message.method !== 'string' ||
+      utf8Bytes(message.method) > MAX_MCP_METHOD_BYTES ||
+      (typeof message.id === 'string' &&
+         utf8Bytes(message.id) > MAX_JSON_RPC_ID_BYTES)
+   ) {
+      return jsonRpcHttpError(null, -32600, 'Invalid Request', 400);
    }
 
    const id = normalizeId(message.id);
@@ -266,7 +293,11 @@ export async function handleMcpHttpRequest(
 
    if (method === 'tools/call') {
       const params = asObject(message.params);
-      if (!params || typeof params.name !== 'string') {
+      if (
+         !params ||
+         typeof params.name !== 'string' ||
+         utf8Bytes(params.name) > MAX_MCP_TOOL_NAME_BYTES
+      ) {
          return jsonRpcHttpError(id, -32602, 'Invalid tools/call params', 400);
       }
 
@@ -333,8 +364,16 @@ export async function handleMcpHttpRequest(
 
          case 'roundwatch.get_watch': {
             const watchId = args.watchId;
-            if (typeof watchId !== 'string' || watchId.length === 0) {
-               return toolError(id, 'watchId must be a non-empty string', modern);
+            if (
+               typeof watchId !== 'string' ||
+               watchId.length === 0 ||
+               utf8Bytes(watchId) > MAX_MCP_WATCH_ID_BYTES
+            ) {
+               return toolError(
+                  id,
+                  `watchId must be a non-empty string no larger than ${MAX_MCP_WATCH_ID_BYTES} UTF-8 bytes`,
+                  modern,
+               );
             }
 
             const watch = dependencies.store.getWatch(watchId);
@@ -473,8 +512,12 @@ function validatePrepareArguments(
       return { error: 'expectedReceiver must be a valid Algorand address' };
    }
 
-   if (typeof atomicAmount !== 'string' || !/^[1-9]\d*$/.test(atomicAmount)) {
-      return { error: 'atomicAmount must be a positive integer string' };
+   if (
+      typeof atomicAmount !== 'string' ||
+      atomicAmount.length > MAX_SAFE_ATOMIC_AMOUNT_DIGITS ||
+      !/^[1-9]\d*$/.test(atomicAmount)
+   ) {
+      return { error: 'atomicAmount must be a positive safe-integer string' };
    }
 
    if (BigInt(atomicAmount) > MAX_SAFE_ATOMIC_AMOUNT) {
@@ -640,6 +683,10 @@ function jsonRpcHttpError(
          },
       },
    );
+}
+
+function utf8Bytes(value: string): number {
+   return Buffer.byteLength(value, 'utf8');
 }
 
 function normalizeId(value: unknown): JsonRpcId {

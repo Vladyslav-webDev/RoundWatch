@@ -40,6 +40,10 @@ import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 import { MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN } from './roundwatch-work-budget.js';
 import {
+   MAX_MCP_REQUEST_BODY_BYTES,
+   MAX_WATCH_REQUEST_BODY_BYTES,
+} from './request-body.js';
+import {
    RoundWatchStore,
    WatchCapacityError,
    type SettlementIntent,
@@ -509,6 +513,240 @@ test('MCP endpoint keeps stateless legacy initialize compatibility', async () =>
       assert.equal(body.result?.serverInfo?.name, 'roundwatch');
    } finally {
       store.close();
+   }
+});
+
+test('MCP rejects oversized bodies before JSON-RPC dispatch and bounds reflected identifiers', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const oversized = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'ping',
+            padding: 'x'.repeat(MAX_MCP_REQUEST_BODY_BYTES),
+         }),
+      });
+      assert.equal(oversized.status, 413);
+      assert.equal(oversized.headers.get('payment-required'), null);
+
+      const reflectedId = 'r'.repeat(129);
+      const bounded = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: reflectedId,
+            method: 'ping',
+         }),
+      });
+      assert.equal(bounded.status, 400);
+      const boundedText = await bounded.text();
+      assert.equal(boundedText.includes(reflectedId), false);
+      assert.ok(Buffer.byteLength(boundedText, 'utf8') < 512);
+   } finally {
+      store.close();
+   }
+});
+
+test('MCP anonymous request gate rate-limits free parsing work', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+         mcpRequestGateOptions: {
+            requestsPerSecond: 0.001,
+            burst: 1,
+            concurrency: 1,
+         },
+      });
+
+      const pingBody = JSON.stringify({
+         jsonrpc: '2.0',
+         id: 1,
+         method: 'ping',
+      });
+
+      const first = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: pingBody,
+      });
+      assert.equal(first.status, 200);
+
+      const second = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: pingBody,
+      });
+      assert.equal(second.status, 429);
+      assert.equal(second.headers.get('retry-after'), '1');
+      const secondBody = await second.json() as { code?: string };
+      assert.equal(secondBody.code, 'mcp_request_rate_limited');
+   } finally {
+      store.close();
+   }
+});
+
+test('watch creation rejects oversized JSON before payment verification middleware', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const facilitator = new DelayedRejectingFacilitator();
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: facilitator,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': encodePaymentSignatureHeader({
+               x402Version: 2,
+               accepted: {
+                  scheme: 'exact',
+                  network: ALGORAND_TESTNET,
+                  amount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+                  asset: String(TESTNET_USDC_ASSET_ID),
+                  payTo: RECEIVER,
+                  maxTimeoutSeconds: 60,
+                  extra: {},
+               },
+               payload: {
+                  paymentGroup: [SIGNED_SERVICE_PAYMENT],
+                  paymentIndex: 0,
+               },
+            } as PaymentPayload),
+         },
+         body: JSON.stringify({
+            idempotencyKey: 'oversized-watch-body',
+            expectedSender: PAYER,
+            expectedReceiver: RECEIVER,
+            atomicAmount: '1',
+            padding: 'x'.repeat(MAX_WATCH_REQUEST_BODY_BYTES),
+         }),
+      });
+
+      assert.equal(response.status, 413);
+      assert.equal(facilitator.verifyCalls, 0);
+      assert.equal(store.getByIdempotencyKey('oversized-watch-body'), undefined);
+   } finally {
+      store.close();
+   }
+});
+
+test('all paid resources share the signed-payment verification admission gate', async () => {
+   for (const route of ['demo', 'watch'] as const) {
+      const store = new RoundWatchStore(':memory:');
+      const facilitator = new DelayedRejectingFacilitator();
+      try {
+         const app = createApp({
+            avmAddress: RECEIVER,
+            facilitatorClient: facilitator,
+            store,
+            indexer: new FakeIndexer(100),
+            signedPaymentGateOptions: {
+               requestsPerSecond: 1_000,
+               burst: 8,
+               concurrency: 1,
+            },
+         });
+
+         const path = route === 'demo' ? '/demo' : '/spike/watch';
+         const method = route === 'demo' ? 'GET' : 'POST';
+         const unpaid = await app.request(path, {
+            method,
+            ...(route === 'watch'
+               ? {
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({
+                       idempotencyKey: 'gate-regression-watch',
+                       expectedSender: PAYER,
+                       expectedReceiver: RECEIVER,
+                       atomicAmount: '1',
+                    }),
+                 }
+               : {}),
+         });
+         assert.equal(unpaid.status, 402);
+         const encoded = unpaid.headers.get('payment-required');
+         assert.ok(encoded);
+         const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+         const paymentHeader = encodePaymentSignatureHeader({
+            x402Version: 2,
+            accepted: required,
+            payload: {
+               paymentGroup: [SIGNED_SERVICE_PAYMENT],
+               paymentIndex: 0,
+            },
+         });
+
+         const requests = Array.from({ length: 6 }, () =>
+            app.request(path, {
+               method,
+               headers: {
+                  'payment-signature': paymentHeader,
+                  ...(route === 'watch'
+                     ? { 'content-type': 'application/json' }
+                     : {}),
+               },
+               ...(route === 'watch'
+                  ? {
+                       body: JSON.stringify({
+                          idempotencyKey: 'gate-regression-watch',
+                          expectedSender: PAYER,
+                          expectedReceiver: RECEIVER,
+                          atomicAmount: '1',
+                       }),
+                    }
+                  : {}),
+            }),
+         );
+
+         const responses = await Promise.all(requests);
+         assert.equal(
+            responses.filter(response => response.status === 429).length,
+            5,
+            `${route} must reject five concurrent verification attempts`,
+         );
+         assert.equal(
+            facilitator.verifyCalls,
+            1,
+            `${route} must admit only one facilitator verification`,
+         );
+         assert.equal(facilitator.peakVerifyCalls, 1);
+      } finally {
+         store.close();
+      }
    }
 });
 
@@ -2039,6 +2277,55 @@ function paymentTransactionId(payload: PaymentPayload): string {
    return getTransactionId(
       Buffer.from(exact.paymentGroup[exact.paymentIndex as number] as string, 'base64'),
    );
+}
+
+class DelayedRejectingFacilitator implements FacilitatorClient {
+   verifyCalls = 0;
+   peakVerifyCalls = 0;
+   private inFlightVerifyCalls = 0;
+
+   async verify(
+      _paymentPayload: PaymentPayload,
+      _paymentRequirements: PaymentRequirements,
+   ): Promise<VerifyResponse> {
+      this.verifyCalls += 1;
+      this.inFlightVerifyCalls += 1;
+      this.peakVerifyCalls = Math.max(
+         this.peakVerifyCalls,
+         this.inFlightVerifyCalls,
+      );
+
+      try {
+         await new Promise(resolve => setTimeout(resolve, 25));
+         return {
+            isValid: false,
+            invalidReason: 'synthetic rejection',
+         } as VerifyResponse;
+      } finally {
+         this.inFlightVerifyCalls -= 1;
+      }
+   }
+
+   async settle(
+      _paymentPayload: PaymentPayload,
+      _paymentRequirements: PaymentRequirements,
+   ): Promise<SettleResponse> {
+      throw new Error('settle must not run after rejected verification');
+   }
+
+   async getSupported(): Promise<SupportedResponse> {
+      return {
+         kinds: [
+            {
+               x402Version: 2,
+               scheme: 'exact',
+               network: ALGORAND_TESTNET,
+            },
+         ],
+         extensions: [],
+         signers: {},
+      };
+   }
 }
 
 class MiddlewareFacilitator implements FacilitatorClient {
