@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Vladyslav-webDev/roundwatch",
+  "title": "RoundWatch",
+  "description": "Durable Algorand USDC payment monitoring for autonomous workflows.",
+  "version": "1.0.0",
+  "websiteUrl": "https://roundwatch.observer/",
+  "repository": {
+    "url": "https://github.com/Vladyslav-webDev/RoundWatch",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://roundwatch.observer/favicon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+        "any"
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://roundwatch-api.onrender.com/mcp"
+    }
+  ]
+}
