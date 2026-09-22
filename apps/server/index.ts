@@ -84,6 +84,7 @@ let watchTtlMilliseconds;
 let maxOpenWatches;
 let maxOpenWatchesPerPayer;
 let workUnitBudget;
+let backgroundIndexerRequestCeiling;
 let indexerRequestsPerSecond;
 let indexerBurst;
 let indexerConcurrency;
@@ -122,6 +123,8 @@ try {
       DEFAULT_WORK_UNIT_BUDGET,
       'ROUNDWATCH_WORK_UNIT_BUDGET',
    );
+   backgroundIndexerRequestCeiling =
+      maxBackgroundIndexerRequestsForWorkBudget(workUnitBudget);
    indexerRequestsPerSecond = parseRequiredPositiveNumber(
       process.env.ROUNDWATCH_INDEXER_REQUESTS_PER_SECOND,
       DEFAULT_INDEXER_REQUESTS_PER_SECOND,
@@ -328,7 +331,7 @@ server.on('listening', () => {
       `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
    );
    console.log(
-      `Conservative background Indexer ceiling: ${maxBackgroundIndexerRequestsForWorkBudget(workUnitBudget)} logical request opportunities / watch`,
+      `Conservative background Indexer ceiling: ${backgroundIndexerRequestCeiling} logical request opportunities / watch`,
    );
    console.log(
       `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
