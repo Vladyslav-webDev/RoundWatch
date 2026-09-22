@@ -60,7 +60,7 @@ If the process stops or the round lookup fails, the watch remains non-active and
 - configured network;
 - service receiver;
 - network-selected USDC ASA;
-- exact `1000` atomic-unit service amount; and
+- exact `20000` atomic-unit service amount; and
 - prepared payer, when available.
 
 An absent transaction remains an ambiguous, retryable outcome. A found on-chain transfer with a definitive mismatch is marked terminal and remains fail-closed in public state `settlement_unknown`.
@@ -103,9 +103,11 @@ The repository's MainNet runner is deliberately narrow:
 
 - it accepts only the approved production base URL and HTTPS Algod URL;
 - it validates checkpoint network, asset, receiver, sender, amount, invoice note, UUIDs, and watch response;
-- it checks unpaid x402 requirements for resource URL, exact scheme, MainNet CAIP-2, amount, asset, payee, and challenge tag before signing;
-- it refuses to start a second paid watch while its checkpoint exists; and
-- every mode that may sign or spend (`start`, `recover`, or `pay`) requires `--confirm-mainnet`. `status` is read-only.
+- it checks the unpaid x402 preflight and independently revalidates the fresh challenge selected at the actual payment-creation boundary for resource URL, exact scheme, MainNet CAIP-2, amount, asset, payee, challenge tag, and authorization flow before signing;
+- it caps the x402 client itself at the approved `0.02 USDC` service spend;
+- it refuses to start a second paid watch while its checkpoint exists;
+- `recover` uses a free existing-watch lookup, does not load a wallet signer, and cannot create or settle a new watch; and
+- only modes that can spend (`start` and `pay`) require `--confirm-mainnet`. `status` and `recover` are non-spending.
 
 This runner is for explicitly authorized evidence collection, not routine health checking or CI. Automated tests use synthetic data and must never make MainNet payments.
 
