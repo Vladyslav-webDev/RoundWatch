@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Vladyslav-webDev/x402-challenge/actions/workflows/ci.yml">
-    <img src="https://github.com/Vladyslav-webDev/x402-challenge/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" />
+  <a href="https://github.com/Vladyslav-webDev/RoundWatch/actions/workflows/ci.yml">
+    <img src="https://github.com/Vladyslav-webDev/RoundWatch/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" />
   </a>
   <img src="https://img.shields.io/badge/Algorand-MainNet-000000" alt="Algorand MainNet" />
   <img src="https://img.shields.io/badge/x402-v2-6f42c1" alt="x402 v2" />
