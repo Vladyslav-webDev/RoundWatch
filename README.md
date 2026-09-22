@@ -1,6 +1,34 @@
-# RoundWatch
+<p align="center">
+  <img src="https://roundwatch.observer/roundwatch-og.jpg" alt="RoundWatch — durable Algorand payment monitoring" width="900" />
+</p>
 
-RoundWatch is an x402-paid service that durably watches for one exact future Algorand USDC payment.
+<h1 align="center">RoundWatch</h1>
+
+<p align="center">
+  <strong>Durable Algorand USDC payment monitoring for autonomous x402 workflows.</strong>
+</p>
+
+<p align="center">
+  <a href="https://roundwatch.observer/">Website</a> ·
+  <a href="https://roundwatch.observer/start">Quickstart</a> ·
+  <a href="https://roundwatch.observer/algorand-payment-monitoring-api">Technical guide</a> ·
+  <a href="https://roundwatch-api.onrender.com/">Live API</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Vladyslav-webDev/x402-challenge/actions/workflows/ci.yml">
+    <img src="https://github.com/Vladyslav-webDev/x402-challenge/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" />
+  </a>
+  <img src="https://img.shields.io/badge/Algorand-MainNet-000000" alt="Algorand MainNet" />
+  <img src="https://img.shields.io/badge/x402-v2-6f42c1" alt="x402 v2" />
+  <img src="https://img.shields.io/badge/USDC-ASA%2031566704-2775CA" alt="Circle USDC ASA 31566704" />
+  <img src="https://img.shields.io/badge/license-MIT-2ea44f" alt="MIT license" />
+</p>
+
+RoundWatch watches **one exact future Algorand MainNet USDC payment when no transaction ID exists yet**. A caller defines the expected payment, pays a one-time x402 service fee, receives a durable watch ID, and can exit. RoundWatch persists the obligation and scan progress, then exposes verified on-chain evidence for later retrieval.
+
+**Production:** Algorand MainNet · Circle USDC · x402 v2 · GoPlausible facilitator · Bazaar cataloged · durable restart recovery.
 
 ## What it solves
 
