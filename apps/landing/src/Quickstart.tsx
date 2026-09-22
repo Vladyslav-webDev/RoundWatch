@@ -1,7 +1,7 @@
 import { BrandMark, Icon } from "./graphics";
 
 const API_BASE = "https://roundwatch-api.onrender.com";
-const REPOSITORY = "https://github.com/Vladyslav-webDev/x402-challenge";
+const REPOSITORY = "https://github.com/Vladyslav-webDev/RoundWatch";
 const EXAMPLE_SENDER = "3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ";
 const EXAMPLE_RECEIVER = "EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY";
 
