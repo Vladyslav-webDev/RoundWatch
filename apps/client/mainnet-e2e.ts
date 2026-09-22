@@ -248,7 +248,7 @@ async function recoverWatch(
       }
 
       console.log(`Existing MainNet watch ${state.watchId} is ${existing.state}.`);
-      return state as ReadyMainnetState;
+      return state as ReadyMainnetCheckpoint;
    }
 
    const recovered = await recoverExistingMainnetWatch(
