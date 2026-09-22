@@ -63,5 +63,8 @@ jobs:
       - name: MainNet client safety tests
         run: pnpm -C apps/client test
 
+      - name: Canonical transaction-size probe
+        run: pnpm -C apps/client probe:txn-size
+
       - name: Build production container
         run: docker build -t roundwatch-ci .
