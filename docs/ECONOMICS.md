@@ -1,6 +1,6 @@
 # RoundWatch Economics Audit v1
 
-Status: measured on `feat/economics-instrumentation-v1`. Pricing below is a launch recommendation, not a statement that the current production deployment has already been repriced.
+Status: Economics v1 is deployed on production `main`; the live RoundWatch contract is `0.02 USDC` (`20000` atomic units) with an immutable 500-turn background work budget. Measurements below were collected during the `feat/economics-instrumentation-v1` audit and remain benchmark evidence rather than a hosting SLA.
 
 ## Objective
 
