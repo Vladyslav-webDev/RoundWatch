@@ -1,0 +1,62 @@
+name: Landing CI
+
+on:
+  push:
+    branches:
+      - feat/roundwatch-landing
+      - seo/landing-discoverability-v1
+    paths:
+      - "apps/landing/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "netlify.toml"
+      - ".github/workflows/landing-ci.yml"
+  pull_request:
+    branches:
+      - feat/roundwatch-landing
+    paths:
+      - "apps/landing/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "netlify.toml"
+      - ".github/workflows/landing-ci.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and prerender landing
+        run: pnpm run build:landing
+
+      - name: Verify SEO artifacts
+        shell: bash
+        run: |
+          test -f apps/landing/dist/index.html
+          test -f apps/landing/dist/start/index.html
+          test -f apps/landing/dist/robots.txt
+          test -f apps/landing/dist/sitemap.xml
+          grep -Fq '<title>RoundWatch — Algorand x402 Payment Monitoring API</title>' apps/landing/dist/index.html
+          grep -Fq 'name="description"' apps/landing/dist/index.html
+          grep -Fq 'rel="canonical" href="https://roundwatch.observer/"' apps/landing/dist/index.html
+          grep -Fq 'RoundWatch Quickstart — Algorand x402 Payment Monitoring API' apps/landing/dist/start/index.html
+          grep -Fq 'https://roundwatch.observer/sitemap.xml' apps/landing/dist/robots.txt
