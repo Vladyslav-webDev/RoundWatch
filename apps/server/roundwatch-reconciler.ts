@@ -1,6 +1,10 @@
 import type { TransactionIdPage } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
+import {
+   IndexerRequestTurnBudget,
+   MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN,
+} from './roundwatch-work-budget.js';
 
 export interface IndexedAssetTransfer {
    transaction: string;
@@ -114,6 +118,11 @@ export class SettlementReconciler {
          this.economicsMetrics?.recordReconciliationAttempt(watch.id);
       });
 
+      const requestBudget = new IndexerRequestTurnBudget(
+         MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN,
+         'settlement reconciliation turn',
+      );
+
       const expectedTransaction = watch.expectedServiceTransaction;
       if (!expectedTransaction) return;
       if (!hasImmutableTerms(watch)) {
@@ -125,10 +134,12 @@ export class SettlementReconciler {
       let session = this.absenceProofSessions.get(watch.id);
 
       if (!session) {
-         const transfer = await this.indexer.lookupAssetTransfer(
-            expectedTransaction,
-            'reconciliation',
-            watch.id,
+         const transfer = await requestBudget.run(() =>
+            this.indexer.lookupAssetTransfer(
+               expectedTransaction,
+               'reconciliation',
+               watch.id,
+            ),
          );
          if (transfer) {
             this.absenceProofSessions.delete(watch.id);
@@ -136,9 +147,11 @@ export class SettlementReconciler {
             return;
          }
 
-         const currentRound = await this.indexer.getCurrentRound(
-            'reconciliation',
-            watch.id,
+         const currentRound = await requestBudget.run(() =>
+            this.indexer.getCurrentRound(
+               'reconciliation',
+               watch.id,
+            ),
          );
          if (currentRound <= watch.serviceLastValid) {
             this.defer(watch);
@@ -151,10 +164,12 @@ export class SettlementReconciler {
          this.absenceProofSessions.set(watch.id, session);
       }
 
-      const page = await this.indexer.searchTransactionPage(
-         expectedTransaction,
-         session.nextToken,
-         watch.id,
+      const page = await requestBudget.run(() =>
+         this.indexer.searchTransactionPage(
+            expectedTransaction,
+            session.nextToken,
+            watch.id,
+         ),
       );
       session.coverage =
          session.coverage === undefined
