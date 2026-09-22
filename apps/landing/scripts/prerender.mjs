@@ -27,6 +27,15 @@ const routes = [
     canonical: "https://roundwatch.observer/start",
   },
   {
+    path: "/algorand-payment-monitoring-api",
+    output: "dist/algorand-payment-monitoring-api/index.html",
+    title:
+      "Algorand Payment Monitoring API for Future USDC Payments | RoundWatch",
+    description:
+      "Monitor an exact future Algorand USDC payment when no transaction ID exists yet. Compare Indexer polling with a durable RoundWatch payment watch.",
+    canonical: "https://roundwatch.observer/algorand-payment-monitoring-api",
+  },
+  {
     path: "/impressum",
     output: "dist/impressum/index.html",
     title: "Impressum — RoundWatch",

@@ -6,6 +6,7 @@ import "./interaction.css";
 import "./legal.css";
 import "./launch-polish.css";
 import "./system-map.css";
+import "./payment-guide.css";
 
 const root = document.getElementById("root")!;
 const app = (
