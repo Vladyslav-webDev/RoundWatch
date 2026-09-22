@@ -37,6 +37,7 @@ import {
    DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
    DEFAULT_SCAN_ROUND_WINDOW,
 } from './roundwatch-poller.js';
+import { maxBackgroundIndexerRequestsForWorkBudget } from './roundwatch-work-budget.js';
 import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
@@ -325,6 +326,9 @@ server.on('listening', () => {
    );
    console.log(
       `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
+   );
+   console.log(
+      `Conservative background Indexer ceiling: ${maxBackgroundIndexerRequestsForWorkBudget(workUnitBudget)} logical request opportunities / watch`,
    );
    console.log(
       `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
