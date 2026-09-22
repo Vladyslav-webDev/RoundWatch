@@ -56,6 +56,15 @@ export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
 const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
+const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
+const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
+const ROUNDWATCH_DISCOVERY_TAGS = [
+   'algorand',
+   'usdc',
+   'payment-monitoring',
+   'ai-agents',
+   'x402',
+] as const;
 
 export interface AppDependencies {
    avmAddress: string;
@@ -82,37 +91,88 @@ const demoDiscovery = declareDiscoveryExtension({
 
 function createWatchDiscovery(workUnitBudget: number) {
    return declareDiscoveryExtension({
-   bodyType: 'json',
-   input: {
-      idempotencyKey: 'invoice-2026-09-15-001',
-      expectedSender: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
-      expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
-      atomicAmount: '1000',
-      invoiceNote: 'roundwatch:invoice-2026-09-15-001',
-   },
-   inputSchema: {
-      properties: {
-         idempotencyKey: { type: 'string', minLength: 8, maxLength: 128 },
-         expectedSender: { type: 'string', minLength: 58, maxLength: 58 },
-         expectedReceiver: { type: 'string', minLength: 58, maxLength: 58 },
-         atomicAmount: { type: 'string', pattern: '^[1-9]\\d*$' },
-         invoiceNote: { type: 'string', minLength: 1, maxLength: 128 },
+      bodyType: 'json',
+      input: {
+         idempotencyKey: 'invoice-2026-09-15-001',
+         expectedSender: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
+         expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
+         atomicAmount: '1000000',
+         invoiceNote: 'roundwatch:invoice-2026-09-15-001',
       },
-      required: [
-         'idempotencyKey',
-         'expectedSender',
-         'expectedReceiver',
-         'atomicAmount',
-      ],
-   },
-   output: {
-      example: {
-         watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
-         workUnitBudget,
-         message:
-            'Durable watch activated after confirmed x402 settlement; incomplete coverage terminates as indeterminate, never expired',
+      inputSchema: {
+         properties: {
+            idempotencyKey: {
+               type: 'string',
+               minLength: 8,
+               maxLength: 128,
+               description:
+                  'Stable caller-supplied key used to prevent duplicate durable watches for the same payment intent',
+            },
+            expectedSender: {
+               type: 'string',
+               minLength: 58,
+               maxLength: 58,
+               description:
+                  'Algorand address expected to send the future USDC payment',
+            },
+            expectedReceiver: {
+               type: 'string',
+               minLength: 58,
+               maxLength: 58,
+               description:
+                  'Algorand address expected to receive the future USDC payment',
+            },
+            atomicAmount: {
+               type: 'string',
+               pattern: '^[1-9]\\d*$',
+               description:
+                  'Exact USDC amount in atomic units; Algorand USDC uses 6 decimals, so 1000000 means 1 USDC',
+            },
+            invoiceNote: {
+               type: 'string',
+               minLength: 1,
+               maxLength: 128,
+               description:
+                  'Optional exact UTF-8 Algorand transaction note used to disambiguate the expected payment',
+            },
+         },
+         required: [
+            'idempotencyKey',
+            'expectedSender',
+            'expectedReceiver',
+            'atomicAmount',
+         ],
       },
-   },
+      output: {
+         example: {
+            watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
+            workUnitBudget,
+            message:
+               'The watch is returned only if x402 settlement and durable activation succeed',
+         },
+         schema: {
+            type: 'object',
+            properties: {
+               watchId: {
+                  type: 'string',
+                  description:
+                     'Durable identifier used to retrieve the watch status and eventual on-chain evidence',
+               },
+               workUnitBudget: {
+                  type: 'integer',
+                  minimum: 1,
+                  description:
+                     'Maximum durable background work units allocated to this watch',
+               },
+               message: {
+                  type: 'string',
+                  description:
+                     'Human-readable confirmation that durable activation succeeded',
+               },
+            },
+            required: ['watchId', 'workUnitBudget', 'message'],
+         },
+      },
    });
 }
 
@@ -391,8 +451,12 @@ export function createApp(dependencies: AppDependencies): Hono {
                   },
                ],
                ...(publicWatchResource ? { resource: publicWatchResource } : {}),
-               description: `Create one durable RoundWatch ${networkConfig.name} watch with a ${workUnitBudget}-turn background work budget; matched and expired are proofs, while exhausted work terminates as indeterminate`,
+               description:
+                  `Monitor one exact future Algorand USDC payment on ${networkConfig.name} when no transaction ID exists yet. RoundWatch persists scan progress across restarts and returns a watch ID for later verified on-chain evidence; the watch has a ${workUnitBudget}-turn bounded background work budget.`,
                mimeType: 'application/json',
+               serviceName: ROUNDWATCH_SERVICE_NAME,
+               tags: [...ROUNDWATCH_DISCOVERY_TAGS],
+               iconUrl: ROUNDWATCH_ICON_URL,
                extensions: watchDiscovery,
             },
          },

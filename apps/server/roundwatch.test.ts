@@ -128,6 +128,12 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
       const encoded = response.headers.get('payment-required');
       assert.ok(encoded);
       const decoded = decodePaymentRequiredHeader(encoded) as unknown as {
+         resource?: {
+            serviceName?: unknown;
+            tags?: unknown;
+            iconUrl?: unknown;
+            description?: unknown;
+         };
          extensions?: {
             bazaar?: {
                info?: {
@@ -141,6 +147,24 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
             };
          };
       };
+
+      assert.equal(decoded.resource?.serviceName, 'RoundWatch');
+      assert.deepEqual(decoded.resource?.tags, [
+         'algorand',
+         'usdc',
+         'payment-monitoring',
+         'ai-agents',
+         'x402',
+      ]);
+      assert.equal(
+         decoded.resource?.iconUrl,
+         'https://roundwatch.observer/favicon.svg',
+      );
+      assert.match(
+         String(decoded.resource?.description),
+         /future Algorand USDC payment/i,
+      );
+
       const example = decoded.extensions?.bazaar?.info?.input?.body;
       assert.ok(example);
       const expectedSender = example.expectedSender;
