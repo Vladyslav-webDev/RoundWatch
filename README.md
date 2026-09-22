@@ -13,6 +13,8 @@
   <a href="https://roundwatch.observer/start">Quickstart</a> ·
   <a href="https://roundwatch.observer/algorand-payment-monitoring-api">Technical guide</a> ·
   <a href="https://roundwatch-api.onrender.com/">Live API</a> ·
+  <a href="https://roundwatch-api.onrender.com/openapi.json">OpenAPI</a> ·
+  <a href="https://roundwatch-api.onrender.com/llms.txt">llms.txt</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a>
 </p>
 
