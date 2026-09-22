@@ -650,8 +650,8 @@ function Landing() {
           <section className="hero" aria-labelledby="hero-title">
             <div className="hero-copy">
               <p className="eyebrow hero-eyebrow">
-                AI agents <span>×</span> Payments <span>×</span> Verified
-                continuity
+                Algorand <span>×</span> x402 <span>×</span> USDC payment
+                monitoring
               </p>
               <h1 id="hero-title">
                 Agents do the work.
