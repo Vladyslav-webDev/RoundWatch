@@ -48,6 +48,11 @@ import { WatchCapacityError } from './roundwatch-store.js';
 import { merchantIdentityHtml } from './merchant-identity.js';
 import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
 import { handleMcpHttpRequest } from './mcp.js';
+import {
+   MAX_WATCH_REQUEST_BODY_BYTES,
+   RequestBodyTooLargeError,
+   readJsonBodyWithLimit,
+} from './request-body.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
@@ -59,6 +64,7 @@ export const ROUNDWATCH_SERVICE_ATOMIC_AMOUNT = convertToTokenAmount(
 
 const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
 const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
@@ -81,6 +87,7 @@ export interface AppDependencies {
    requireSettlementIntent?: boolean;
    economicsMetrics?: RoundWatchEconomicsMetrics;
    signedPaymentGateOptions?: SignedPaymentGateOptions;
+   mcpRequestGateOptions?: SignedPaymentGateOptions;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -192,6 +199,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       requireSettlementIntent = networkConfig.name === 'mainnet',
       economicsMetrics,
       signedPaymentGateOptions,
+      mcpRequestGateOptions,
    } = dependencies;
 
    const signedPaymentGate = new SignedPaymentGate(
@@ -202,6 +210,15 @@ export function createApp(dependencies: AppDependencies): Hono {
          concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
       },
    );
+   const mcpRequestGate = new SignedPaymentGate(
+      mcpRequestGateOptions ?? {
+         requestsPerSecond:
+            DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+         burst: DEFAULT_SIGNED_PAYMENT_BURST,
+         concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      },
+   );
+   const parsedWatchBodies = new WeakMap<Request, unknown>();
    const workUnitBudget = store.configuredWorkUnitBudget();
    const watchDiscovery = createWatchDiscovery(workUnitBudget);
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
@@ -387,18 +404,76 @@ export function createApp(dependencies: AppDependencies): Hono {
       return c.text(llmsTxt);
    });
 
-   app.all('/mcp', c =>
-      handleMcpHttpRequest(c.req.raw, {
-         store,
-         networkConfig,
-         publicBaseUrl,
-         serviceReceiver: avmAddress,
-         servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
-         serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
-         workUnitBudget,
-         watchPath,
-      }),
-   );
+   app.all('/mcp', async c => {
+      if (c.req.method !== 'POST') {
+         return handleMcpHttpRequest(c.req.raw, {
+            store,
+            networkConfig,
+            publicBaseUrl,
+            serviceReceiver: avmAddress,
+            servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
+            serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+            workUnitBudget,
+            watchPath,
+         });
+      }
+
+      const admission = mcpRequestGate.tryAcquire();
+      if (!admission.allowed) {
+         c.header('retry-after', '1');
+         return c.json(
+            {
+               error: 'MCP request capacity is temporarily exhausted',
+               code: 'mcp_request_rate_limited',
+            },
+            429,
+         );
+      }
+
+      try {
+         return await handleMcpHttpRequest(c.req.raw, {
+            store,
+            networkConfig,
+            publicBaseUrl,
+            serviceReceiver: avmAddress,
+            servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
+            serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+            workUnitBudget,
+            watchPath,
+         });
+      } finally {
+         admission.release();
+      }
+   });
+
+   app.use(watchPath, async (c, next) => {
+      if (c.req.method !== 'POST') {
+         await next();
+         return;
+      }
+
+      try {
+         const body = await readJsonBodyWithLimit(
+            c.req.raw,
+            MAX_WATCH_REQUEST_BODY_BYTES,
+         );
+         parsedWatchBodies.set(c.req.raw, body);
+      } catch (error) {
+         if (error instanceof RequestBodyTooLargeError) {
+            return c.json(
+               {
+                  error: 'Watch request body is too large',
+                  code: 'watch_request_body_too_large',
+               },
+               413,
+            );
+         }
+
+         return c.json({ error: 'Expected a JSON request body' }, 400);
+      }
+
+      await next();
+   });
 
    // This resumes only after @x402/hono has finished settlement.
    app.use(watchPath, async (c, next) => {
@@ -425,8 +500,12 @@ export function createApp(dependencies: AppDependencies): Hono {
       }
    });
 
-   app.use(watchPath, async (c, next) => {
-      if (c.req.method !== 'POST') {
+   app.use('*', async (c, next) => {
+      const isPaidVerificationRoute =
+         (c.req.path === watchPath && c.req.method === 'POST') ||
+         (c.req.path === '/demo' && c.req.method === 'GET');
+
+      if (!isPaidVerificationRoute) {
          await next();
          return;
       }
@@ -543,14 +622,11 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    app.post(watchPath, async c => {
-      let body: unknown;
-
-      try {
-         body = await c.req.json();
-      } catch {
+      if (!parsedWatchBodies.has(c.req.raw)) {
          return c.json({ error: 'Expected a JSON request body' }, 400);
       }
 
+      const body = parsedWatchBodies.get(c.req.raw);
       const parsed = parseWatchSpec(body, networkConfig.usdcAssetIdNumber);
 
       if ('error' in parsed) {
@@ -759,8 +835,12 @@ function parseWatchSpec(
       return { error: 'expectedReceiver must be a valid Algorand address' };
    }
 
-   if (typeof atomicAmount !== 'string' || !/^[1-9]\d*$/.test(atomicAmount)) {
-      return { error: 'atomicAmount must be a positive integer string' };
+   if (
+      typeof atomicAmount !== 'string' ||
+      atomicAmount.length > MAX_SAFE_ATOMIC_AMOUNT_DIGITS ||
+      !/^[1-9]\d*$/.test(atomicAmount)
+   ) {
+      return { error: 'atomicAmount must be a positive safe-integer string' };
    }
 
    if (BigInt(atomicAmount) > MAX_SAFE_ATOMIC_AMOUNT) {
