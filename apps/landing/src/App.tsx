@@ -533,6 +533,14 @@ function Technology() {
             <span className="signal-dot" />
             Live and verified on Algorand MainNet.
           </p>
+          <a
+            className="technology-guide-link"
+            href="/algorand-payment-monitoring-api"
+          >
+            <span className="mono">Technical guide</span>
+            <strong>How to monitor a future Algorand USDC payment</strong>
+            <Icon name="arrow" />
+          </a>
           <aside className="reasoning-note">
             <span className="mono">An open path for reasoning</span>
             <div className="reasoning-path">
