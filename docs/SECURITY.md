@@ -63,7 +63,7 @@ If the process stops or the round lookup fails, the watch remains non-active and
 - exact `20000` atomic-unit service amount; and
 - prepared payer, when available.
 
-An absent transaction remains an ambiguous, retryable outcome. A found on-chain transfer with a definitive mismatch is marked terminal and remains fail-closed in public state `settlement_unknown`.
+An absent transaction remains an ambiguous, retryable outcome. A found on-chain transfer with a definitive mismatch is marked terminal and remains fail-closed in public state `settlement_unknown`. Public watch records expose `settlementReconciliationTerminal`, so callers can distinguish a retryable unknown from a final reconciliation outcome without relying on a private database flag.
 
 ## Future-payment matching
 
@@ -81,7 +81,7 @@ The request parser accepts only checksum-valid addresses and positive integer am
 
 If any page, checkpoint, or watermark validation fails, the cursor is not advanced. Pagination tokens are process-local; restart replays the unfinished finite round window. Conditional cursor updates prevent stale work from moving coverage backward or skipping a range.
 
-Each new watch persists `expiresAt = createdAt + 30 minutes`. This is an exclusive chain-time eligibility boundary, not a wall-clock state transition. Expiry requires a fixed indexed block timestamped at or after the deadline plus complete validated coverage through that closing round. Status/idempotency reads have no expiry side effects, and Indexer lag or failure leaves the watch unresolved.
+Each new watch persists `expiresAt = createdAt + 30 minutes`. The 30-minute duration is advertised before purchase, and `createdAt` is fixed when the durable watch is prepared before x402 settlement completes. Settlement delay therefore consumes part of the advertised eligibility window. This is an exclusive chain-time eligibility boundary, not a wall-clock state transition. Expiry requires a fixed indexed block timestamped at or after the deadline plus complete validated coverage through that closing round. Status/idempotency reads have no expiry side effects, and Indexer lag or failure leaves the watch unresolved.
 
 Every Indexer HTTP attempt, including pagination, activation, reconciliation, absence proof, health, block lookup, failure, and timeout, passes through one finite token bucket and aggregate concurrency gate. Tokens are capped at the configured burst, so delayed timers and restart cannot accumulate unlimited capacity. Dispatcher token exhaustion only delays work and never proves absence, coverage, expiry, or nonpayment.
 
@@ -115,6 +115,8 @@ This runner is for explicitly authorized evidence collection, not routine health
 
 ## Availability and privacy assumptions
 
+- `GET /health` is a liveness signal only. `GET /ready` is the paid-traffic readiness signal and fails when durable storage is unavailable or production background workers have not started.
+- Watch-specific HTTP responses use `Cache-Control: no-store` so intermediary/browser caches are not asked to retain evolving payment metadata.
 - The current service is a single instance with in-process workers and local SQLite. It has no multi-instance leader election or distributed queue.
 - Availability depends on Render, its persistent disk, GoPlausible, the configured AlgoNode Indexer, and Algorand MainNet.
 - The current 30-minute eligibility deadline, 500-turn work budget, and 50-global/5-per-payer admission limits are challenge-release operational policy, not an SLA or final commercial capacity policy.

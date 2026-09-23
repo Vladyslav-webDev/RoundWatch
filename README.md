@@ -62,7 +62,8 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 | API | `https://roundwatch-api.onrender.com` |
 | Create a watch | `POST /v1/watch` |
 | Read a watch | `GET /v1/watch/:id` |
-| Health | `GET /health` |
+| Liveness | `GET /health` |
+| Readiness | `GET /ready` |
 | Network | Algorand MainNet |
 | CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
 | Asset | Circle USDC, ASA `31566704` |
@@ -135,7 +136,7 @@ Request fields:
 
 The watched asset is not a request field. The server selects the USDC ASA from its explicit network configuration: MainNet ASA `31566704` or TestNet ASA `10458941`.
 
-The server controls the lifetime, work budget, and admission policy. New watches have an immutable eligibility deadline 30 minutes after `createdAt` and a durable 500-turn background work budget; callers cannot override either value. Passing the wall-clock deadline does not itself expire a watch; proof requires complete chain coverage through a closing checkpoint. If the work budget is exhausted first, the watch terminates as `indeterminate` with `terminalReason=work_budget_exhausted`, never as a false `expired`. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` before settlement.
+The server controls the lifetime, work budget, and admission policy. Before purchase, RoundWatch advertises the 30-minute eligibility window and 500-turn background work budget. The eligibility clock starts when the durable obligation is prepared, before x402 settlement completes, so settlement delay consumes part of that 30-minute window. Callers cannot override either bound. Passing the wall-clock deadline does not itself expire a watch; proof requires complete chain coverage through a closing checkpoint. If the work budget is exhausted first, the watch terminates as `indeterminate` with `terminalReason=work_budget_exhausted`, never as a false `expired`. At most 50 unfinished obligations may be open globally and at most 5 may be open for the verified service payer. Capacity exhaustion returns HTTP `429` before settlement.
 
 ### Read a watch
 
@@ -172,7 +173,7 @@ Unknown IDs return HTTP `404`.
 | `settlement_pending` | The watch specification and deterministic service-payment identity are persisted, but activation is not yet proven. Reconciliation can recover a settlement/activation crash window. |
 | `active` | The exact service-payment transaction is confirmed; its confirmed round is the activation baseline and initial scan cursor. The poller is looking for the future invoice payment. |
 | `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
-| `settlement_unknown` | Settlement did not produce an immediately usable activation. An ambiguous outcome remains eligible for exact reconciliation; a definitive on-chain mismatch is terminal and remains fail-closed in this public state. |
+| `settlement_unknown` | Settlement did not produce an immediately usable activation. `settlementReconciliationTerminal=false` means exact reconciliation may still recover it; `true` means reconciliation reached a final fail-closed outcome and will not retry. |
 | `expired` | The deadline's complete eligible chain range was scanned through a fixed closing checkpoint with no exact match. The terminal record remains readable. |
 | `indeterminate` | The durable per-watch work budget was exhausted before a positive match or complete expiry proof. The record is terminal and does not claim absence. |
 
@@ -289,7 +290,7 @@ GitHub Actions performs a full-depth checkout, scans complete Git history with G
 - Transactional global/per-payer admission and the shared finite Indexer dispatcher bound persistent and external work; capacity rejection happens before settlement.
 - `.env` files and wallet material must never be committed; CI enforces tracked-env and full-history secret checks.
 
-The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. See [Security](docs/SECURITY.md) for trust boundaries and operational assumptions.
+The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Status and other watch-specific responses use `Cache-Control: no-store`. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. `/health` is liveness only; use `/ready` to check durable storage and background-worker readiness before directing paid traffic. See [Security](docs/SECURITY.md) for trust boundaries and operational assumptions.
 
 ## MainNet proof
 

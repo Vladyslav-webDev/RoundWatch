@@ -80,6 +80,7 @@ export interface WatchRecord extends WatchSpec {
    serviceLastValid?: number;
    reconciliationAttempts: number;
    reconciliationNextAttemptAt?: string;
+   settlementReconciliationTerminal: boolean;
    workUnitBudget?: number;
    workUnitsUsed: number;
    terminalReason?: WatchTerminalReason;
@@ -205,6 +206,25 @@ export class RoundWatchStore {
          CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_expected_service_tx_unique
          ON roundwatch_watches(expected_service_transaction)
          WHERE expected_service_transaction IS NOT NULL;
+
+         CREATE INDEX IF NOT EXISTS roundwatch_active_created_idx
+         ON roundwatch_watches(state, created_at);
+
+         CREATE INDEX IF NOT EXISTS roundwatch_reconcile_due_idx
+         ON roundwatch_watches(
+            settlement_reconciliation_terminal,
+            reconciliation_next_attempt_at,
+            created_at
+         )
+         WHERE state IN ('settlement_pending', 'settlement_unknown')
+           AND expected_service_transaction IS NOT NULL;
+
+         CREATE INDEX IF NOT EXISTS roundwatch_open_payer_idx
+         ON roundwatch_watches(
+            COALESCE(expected_service_payer, service_payer),
+            state,
+            settlement_reconciliation_terminal
+         );
       `);
 
       // evidence_version=0 rows are legacy. No new proof fields are fabricated.
@@ -579,6 +599,24 @@ export class RoundWatchStore {
       return this.workUnitBudget;
    }
 
+   configuredWatchTtlMilliseconds(): number {
+      return this.watchTtlMilliseconds;
+   }
+
+   readinessCheck(): boolean {
+      try {
+         const row = this.database.prepare(`
+            SELECT COUNT(*) AS count
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'roundwatch_watches'
+         `).get() as unknown as { count: number };
+
+         return row.count === 1;
+      } catch {
+         return false;
+      }
+   }
+
    close(): void {
       this.database.close();
    }
@@ -873,6 +911,8 @@ function mapRow(row: WatchRow): WatchRecord {
       ...(row.service_last_valid === null ? {} : { serviceLastValid: row.service_last_valid }),
       reconciliationAttempts: row.reconciliation_attempts,
       ...(row.reconciliation_next_attempt_at === null ? {} : { reconciliationNextAttemptAt: row.reconciliation_next_attempt_at }),
+      settlementReconciliationTerminal:
+         row.settlement_reconciliation_terminal === 1,
       ...(row.work_unit_budget === null ? {} : { workUnitBudget: row.work_unit_budget }),
       workUnitsUsed: row.work_units_used,
       ...(row.terminal_reason === null ? {} : { terminalReason: row.terminal_reason }),
