@@ -2086,9 +2086,178 @@ test('recovery lookup refuses non-active obligations without exposing a watch ID
       const body = await response.json() as {
          state?: string;
          watchId?: string;
+         recovery?: {
+            retryable?: boolean;
+            terminal?: boolean;
+            reason?: string;
+            nextAction?: string;
+         };
       };
       assert.equal(body.state, 'settlement_pending');
       assert.equal(body.watchId, undefined);
+      assert.equal(body.recovery?.retryable, true);
+      assert.equal(body.recovery?.terminal, false);
+      assert.equal(
+         body.recovery?.reason,
+         'settlement_reconciliation_pending',
+      );
+      assert.equal(
+         body.recovery?.nextAction,
+         'retry_recovery_later',
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('recovery lookup distinguishes retryable from terminal settlement reconciliation without disclosing watch ID', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const watch = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'recovery-terminal-distinction',
+         },
+         intent('RECOVERY_TERMINAL_DISTINCTION_TX'),
+      ).watch;
+      store.markSettlementUnknown(watch.id);
+
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+      });
+
+      const recoveryRequest = () =>
+         app.request('/spike/watch/recover', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+               idempotencyKey: 'recovery-terminal-distinction',
+               expectedSender: SPEC.expectedSender,
+               expectedReceiver: SPEC.expectedReceiver,
+               atomicAmount: SPEC.atomicAmount,
+               invoiceNote: SPEC.invoiceNote,
+               servicePayer: PAYER,
+            }),
+         });
+
+      const retryable = await recoveryRequest();
+      assert.equal(retryable.status, 409);
+      assert.equal(retryable.headers.get('cache-control'), 'no-store');
+      const retryableBody = await retryable.json() as {
+         state?: string;
+         watchId?: string;
+         recovery?: {
+            retryable?: boolean;
+            terminal?: boolean;
+            reason?: string;
+            nextAction?: string;
+         };
+      };
+      assert.equal(retryableBody.state, 'settlement_unknown');
+      assert.equal(retryableBody.watchId, undefined);
+      assert.equal(retryableBody.recovery?.retryable, true);
+      assert.equal(retryableBody.recovery?.terminal, false);
+      assert.equal(
+         retryableBody.recovery?.reason,
+         'settlement_reconciliation_pending',
+      );
+      assert.equal(
+         retryableBody.recovery?.nextAction,
+         'retry_recovery_later',
+      );
+
+      store.markSettlementInvalid(watch.id);
+
+      const terminal = await recoveryRequest();
+      assert.equal(terminal.status, 409);
+      assert.equal(terminal.headers.get('cache-control'), 'no-store');
+      const terminalBody = await terminal.json() as {
+         state?: string;
+         watchId?: string;
+         recovery?: {
+            retryable?: boolean;
+            terminal?: boolean;
+            reason?: string;
+            nextAction?: string;
+         };
+      };
+      assert.equal(terminalBody.state, 'settlement_unknown');
+      assert.equal(terminalBody.watchId, undefined);
+      assert.equal(terminalBody.recovery?.retryable, false);
+      assert.equal(terminalBody.recovery?.terminal, true);
+      assert.equal(
+         terminalBody.recovery?.reason,
+         'settlement_reconciliation_terminal',
+      );
+      assert.equal(
+         terminalBody.recovery?.nextAction,
+         'retain_checkpoint_and_investigate',
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('free recovery lookup has independent bounded admission before body parsing', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+         recoveryRequestGateOptions: {
+            requestsPerSecond: 0.001,
+            burst: 1,
+            concurrency: 1,
+         },
+      });
+
+      const body = JSON.stringify({
+         idempotencyKey: 'bounded-recovery-missing',
+         expectedSender: SPEC.expectedSender,
+         expectedReceiver: SPEC.expectedReceiver,
+         atomicAmount: SPEC.atomicAmount,
+         invoiceNote: SPEC.invoiceNote,
+         servicePayer: PAYER,
+      });
+
+      const first = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body,
+      });
+      assert.equal(first.status, 404);
+
+      const second = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body,
+      });
+      assert.equal(second.status, 429);
+      assert.equal(second.headers.get('retry-after'), '1');
+      const secondBody = await second.json() as { code?: string };
+      assert.equal(
+         secondBody.code,
+         'watch_recovery_rate_limited',
+      );
    } finally {
       store.close();
    }
