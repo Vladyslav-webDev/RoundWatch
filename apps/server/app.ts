@@ -76,6 +76,11 @@ const ROUNDWATCH_DISCOVERY_TAGS = [
    'x402',
 ] as const;
 
+export interface ReadinessSnapshot {
+   ready: boolean;
+   checks: Record<string, boolean>;
+}
+
 export interface AppDependencies {
    avmAddress: string;
    facilitatorClient: FacilitatorClient;
@@ -88,6 +93,7 @@ export interface AppDependencies {
    economicsMetrics?: RoundWatchEconomicsMetrics;
    signedPaymentGateOptions?: SignedPaymentGateOptions;
    mcpRequestGateOptions?: SignedPaymentGateOptions;
+   readinessCheck?: () => ReadinessSnapshot;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -100,7 +106,10 @@ const demoDiscovery = declareDiscoveryExtension({
    },
 });
 
-function createWatchDiscovery(workUnitBudget: number) {
+function createWatchDiscovery(
+   workUnitBudget: number,
+   watchTtlMilliseconds: number,
+) {
    return declareDiscoveryExtension({
       bodyType: 'json',
       input: {
@@ -158,6 +167,8 @@ function createWatchDiscovery(workUnitBudget: number) {
          example: {
             watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
             workUnitBudget,
+            eligibilityTtlMs: watchTtlMilliseconds,
+            expiresAt: '2026-09-22T12:30:00.000Z',
             message:
                'The watch is returned only if x402 settlement and durable activation succeed',
          },
@@ -175,13 +186,30 @@ function createWatchDiscovery(workUnitBudget: number) {
                   description:
                      'Maximum durable background work units allocated to this watch',
                },
+               eligibilityTtlMs: {
+                  type: 'integer',
+                  minimum: 1,
+                  description:
+                     'Eligibility window in milliseconds, measured from durable watch preparation before x402 settlement completes',
+               },
+               expiresAt: {
+                  type: 'string',
+                  description:
+                     'Creation-based eligibility deadline for the watched future payment',
+               },
                message: {
                   type: 'string',
                   description:
                      'Human-readable confirmation that durable activation succeeded',
                },
             },
-            required: ['watchId', 'workUnitBudget', 'message'],
+            required: [
+               'watchId',
+               'workUnitBudget',
+               'eligibilityTtlMs',
+               'expiresAt',
+               'message',
+            ],
          },
       },
    });
@@ -200,6 +228,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       economicsMetrics,
       signedPaymentGateOptions,
       mcpRequestGateOptions,
+      readinessCheck,
    } = dependencies;
 
    const signedPaymentGate = new SignedPaymentGate(
@@ -220,7 +249,11 @@ export function createApp(dependencies: AppDependencies): Hono {
    );
    const parsedWatchBodies = new WeakMap<Request, unknown>();
    const workUnitBudget = store.configuredWorkUnitBudget();
-   const watchDiscovery = createWatchDiscovery(workUnitBudget);
+   const watchTtlMilliseconds = store.configuredWatchTtlMilliseconds();
+   const watchDiscovery = createWatchDiscovery(
+      workUnitBudget,
+      watchTtlMilliseconds,
+   );
    const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
    const watchRecoveryPath = `${watchPath}/recover`;
    const watchRouteKey = `POST ${watchPath}`;
@@ -233,6 +266,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
       serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
       workUnitBudget,
+      watchTtlMilliseconds,
       watchPath,
    };
    const openApiDocument = buildOpenApiDocument(machineReadableDocsOptions);
@@ -389,10 +423,56 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    app.get('/health', c => {
+      c.header('cache-control', 'no-store');
       return c.json({
          status: 'ok',
+         purpose: 'liveness',
          network: networkConfig.name,
       });
+   });
+
+   app.get('/ready', c => {
+      c.header('cache-control', 'no-store');
+
+      try {
+         const snapshot = readinessCheck?.() ?? {
+            ready: store.readinessCheck(),
+            checks: {
+               storage: store.readinessCheck(),
+            },
+         };
+
+         return c.json(
+            {
+               status: snapshot.ready ? 'ready' : 'not_ready',
+               network: networkConfig.name,
+               checks: snapshot.checks,
+            },
+            snapshot.ready ? 200 : 503,
+         );
+      } catch {
+         return c.json(
+            {
+               status: 'not_ready',
+               network: networkConfig.name,
+               checks: {
+                  readinessCheck: false,
+               },
+            },
+            503,
+         );
+      }
+   });
+
+   app.use('*', async (c, next) => {
+      await next();
+
+      if (
+         c.req.path === watchPath ||
+         c.req.path.startsWith(`${watchPath}/`)
+      ) {
+         c.header('cache-control', 'no-store');
+      }
    });
 
    app.get('/openapi.json', c => {
@@ -415,6 +495,7 @@ export function createApp(dependencies: AppDependencies): Hono {
             servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
             serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
             workUnitBudget,
+            watchTtlMilliseconds,
             watchPath,
          });
       }
@@ -440,6 +521,7 @@ export function createApp(dependencies: AppDependencies): Hono {
             servicePriceUsd: ROUNDWATCH_SERVICE_PRICE_USD,
             serviceAtomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
             workUnitBudget,
+            watchTtlMilliseconds,
             watchPath,
          });
       } finally {
@@ -598,7 +680,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                ],
                ...(publicWatchResource ? { resource: publicWatchResource } : {}),
                description:
-                  `Monitor one exact future Algorand USDC payment on ${networkConfig.name} when no transaction ID exists yet. RoundWatch persists scan progress across restarts and returns a watch ID for later verified on-chain evidence; the watch has a ${workUnitBudget}-turn bounded background work budget.`,
+                  `Monitor one exact future Algorand USDC payment on ${networkConfig.name} when no transaction ID exists yet. RoundWatch persists scan progress across restarts and returns a watch ID for later verified on-chain evidence. The watch has a ${workUnitBudget}-turn bounded background work budget and a ${watchTtlMilliseconds} ms eligibility window measured from durable watch preparation before settlement completes.`,
                mimeType: 'application/json',
                serviceName: ROUNDWATCH_SERVICE_NAME,
                tags: [...ROUNDWATCH_DISCOVERY_TAGS],
@@ -704,6 +786,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       return c.json({
          watchId: prepared.watch.id,
          workUnitBudget: prepared.watch.workUnitBudget,
+         eligibilityTtlMs: watchTtlMilliseconds,
+         expiresAt: prepared.watch.expiresAt,
          message:
             'The watch is returned only if x402 settlement and durable activation succeed',
       });
