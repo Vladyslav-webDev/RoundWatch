@@ -51,7 +51,7 @@ ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE=0
 PORT=<platform-provided port or 4021>
 ```
 
-`ALGORAND_INDEXER_URL`, worker intervals, watch TTL, capacity/work limits, dispatcher rate/burst/concurrency, finite scan round window, historical cache entry/payload-byte limits, scan strategy, fault switch, and port have code defaults, but production should keep intended values explicit and reviewable. Dispatcher/window/cache values are operational tuning, not public SLAs.
+`ALGORAND_INDEXER_URL`, worker intervals, watch TTL, capacity/work limits, dispatcher rate/burst/concurrency, finite scan round window, historical cache entry/payload-byte limits, scan strategy, readiness disk-headroom floor, fault switch, and port have code defaults, but production should keep intended values explicit and reviewable. Dispatcher/window/cache values are operational tuning, not public SLAs.
 
 Never set `AVM_MNEMONIC`, a private key, a recovery phrase, or a wallet export on the server. The resource server receives the signed x402 payload and needs only its public receiver address.
 
@@ -105,7 +105,7 @@ GET  /demo
 
 Production `/v1/watch` is priced at `0.02 USDC` (`20000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`. This contract was externally confirmed after the 2026-09-20 Economics v1 deployment with an unsigned HTTP `402` preflight.
 
-The challenge-release policy gives each accepted watch a chain-time eligibility deadline 30 minutes from durable creation and an immutable 500-turn durable background work budget, with at most 50 unfinished obligations globally and 5 per verified service payer. Wall time alone does not expire it; validated chain coverage through a fixed closing checkpoint does. Work-budget exhaustion terminates as `indeterminate`, never as a fabricated `expired`. Capacity exhaustion returns HTTP `429` before x402 settlement. These values are operational safeguards, not a commercial SLA.
+The challenge-release policy gives each accepted watch a chain-time eligibility deadline 30 minutes from durable creation and an immutable 500-turn durable background work budget, with at most 50 unfinished obligations globally and 5 per verified service payer. A watched invoice is eligible only when `confirmed-round > activationRound` and `round-time < expiresAt`; same-round and exact-deadline payments are excluded. Wall time alone does not expire it; validated chain coverage through a fixed closing checkpoint does. Work-budget exhaustion terminates as `indeterminate`, never as a fabricated `expired`. Capacity exhaustion returns HTTP `429` before x402 settlement. These values are operational safeguards, not a commercial SLA.
 
 TestNet is a separate configuration and uses `/spike/watch`. Do not use a TestNet route or asset as a production smoke-test substitute.
 
@@ -135,6 +135,7 @@ Before deployment, verify:
 - the receiver, facilitator, public base URL, Indexer, ASA implied by network config, and service price match the approved production values;
 - the watch TTL is `1800000`, durable work budget is `500`, global capacity is `50`, and per-payer capacity is `5`;
 - `/data` is still mounted and the database path has not changed;
+- `ROUNDWATCH_MIN_FREE_DISK_BYTES` is set to the reviewed floor (currently 67108864 bytes);
 - the deployment remains single-instance; and
 - no mnemonic/private key has been added to the service environment.
 
@@ -172,7 +173,7 @@ Readiness:
 curl -i https://roundwatch-api.onrender.com/ready
 ```
 
-Expected result is HTTP 200 with `status: "ready"`, `storage: true`, and `backgroundWorkers: true`. HTTP 200 from `/health` is not sufficient to accept paid traffic.
+Expected result is HTTP 200 with `status: "ready"`, `storage: true`, `poller: true`, `reconciler: true`, `backgroundWorkers: true`, and `diskHeadroom: true`. `storage` represents a cached real SQLite write/rollback probe. Worker checks require recent successful cycles and go red after an error until a later successful cycle, or when a cycle becomes stale. HTTP 200 from `/health` is not sufficient to accept paid traffic.
 
 Unpaid x402 preflight:
 
@@ -182,7 +183,7 @@ curl -i -X POST https://roundwatch-api.onrender.com/v1/watch \
   --data '{"idempotencyKey":"smoke-readonly-20260916","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-Do not attach a payment signature. The expected production result is HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `20000`, approved service receiver, and `x402-global-challenge` tag. A response advertising a different amount is a production-contract regression and should block release acceptance.
+Do not attach a payment signature. The expected production result is HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `20000`, approved service receiver, and `x402-global-challenge` tag. The challenge description/discovery metadata must also state the strict watched-payment boundaries: confirmed round strictly greater than `activationRound`, and block `round-time` strictly earlier than `expiresAt`. A response advertising a different amount is a production-contract regression and should block release acceptance.
 
 Also decode the `payment-required` header and inspect the Bazaar discovery example. Both `expectedSender` and `expectedReceiver` must be checksum-valid Algorand addresses. The current receiver example is `AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI`. Discovery examples are not payment authority, but malformed examples can break autonomous clients before they ever reach settlement.
 
