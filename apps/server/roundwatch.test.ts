@@ -1439,12 +1439,22 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '20000');
       assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
-      assert.match(
-         String((decodePaymentRequiredHeader(encoded) as unknown as {
+      const description = String(
+         (decodePaymentRequiredHeader(encoded) as unknown as {
             resource?: { description?: unknown };
-         }).resource?.description),
-         /1800000 ms eligibility window/,
+         }).resource?.description,
       );
+      assert.match(description, /Eligibility lasts 1800000 ms/i);
+      assert.match(
+         description,
+         /round strictly greater than activationRound/i,
+      );
+      assert.match(
+         description,
+         /round-time must be strictly earlier than expiresAt/i,
+      );
+      assert.match(description, /same-round payment is ineligible/i);
+      assert.match(description, /exactly at the deadline is ineligible/i);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
    } finally { store.close(); }
