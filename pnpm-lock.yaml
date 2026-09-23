@@ -118,8 +118,8 @@ importers:
         specifier: 2.25.0
         version: 2.25.0
       '@x402/fetch':
-        specifier: 2.25.0
-        version: 2.25.0
+        specifier: 2.26.0
+        version: 2.26.0
       algosdk:
         specifier: ^3.7.0
         version: 3.7.0
@@ -559,11 +559,14 @@ packages:
   '@x402/core@2.25.0':
     resolution: {integrity: sha512-5Ys0XYz3FKutxVKoXC46R/XPT/oaAbuj7ahzrlVHwQxZJPH9u6u91IOh0ztz+7G/zYGsaXR8l3ety205QtEnUw==}
 
+  '@x402/core@2.26.0':
+    resolution: {integrity: sha512-8dlXip9u0JjyELzzFz48vntuMajvUjA8IYpitfaW423m53bR49amZDIn3n4gXRYoNEKzGB9Rtn8at35WHz61cA==}
+
   '@x402/extensions@2.25.0':
     resolution: {integrity: sha512-7gXpYoHX8CkQ4bwUfzx0GS6VQlx810+GiGOAYhwsbTtIZFt/ahz/5CjCs7qfoKYcgAWcVyvBCl9U3FYYBX01nA==}
 
-  '@x402/fetch@2.25.0':
-    resolution: {integrity: sha512-kpmxnMTjxZJD5r4yVhRDtCrBVfGhum+XwrUUUdffi3Y91eAm9ZiWCDNHLtahOS2kmuzTR2NPbbIoohZQJmQsxg==}
+  '@x402/fetch@2.26.0':
+    resolution: {integrity: sha512-pXwFGaWkc76+3ZGKfi9Xjay4h3KfdnbiRMwPC+J2+XGQDP1OVQvyvdyVEDuEtdrVPDYVP6rqq6f+hq1aaFql8g==}
 
   '@x402/hono@2.25.0':
     resolution: {integrity: sha512-wjDY8dW3fY0VsKLkbGWtjqxfYbgRH1lUu+vACRx6jDyy5R6rS0GnHFcenEBvhjKgH1jCzyP32anp4+tRv1S3jg==}
@@ -1035,6 +1038,10 @@ snapshots:
     dependencies:
       zod: 3.25.76
 
+  '@x402/core@2.26.0':
+    dependencies:
+      zod: 3.25.76
+
   '@x402/extensions@2.25.0(ethers@6.17.0)(typescript@7.0.2)':
     dependencies:
       '@noble/curves': 1.9.7
@@ -1052,9 +1059,9 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@x402/fetch@2.25.0':
+  '@x402/fetch@2.26.0':
     dependencies:
-      '@x402/core': 2.25.0
+      '@x402/core': 2.26.0
 
   '@x402/hono@2.25.0(ethers@6.17.0)(hono@4.13.7)(typescript@7.0.2)':
     dependencies:
