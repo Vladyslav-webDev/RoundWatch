@@ -185,6 +185,10 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
          document.paths?.['/v1/watch/{id}']?.get?.operationId,
          'getWatch',
       );
+      assert.equal(
+         document.paths?.['/ready']?.get?.operationId,
+         'getReadiness',
+      );
    } finally {
       store.close();
    }
@@ -220,6 +224,9 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
       assert.match(body, /RoundWatch is not a webhook delivery service/i);
       assert.match(body, /POST \/v1\/watch/);
       assert.match(body, /GET \/v1\/watch\/\{id\}/);
+      assert.match(body, /Readiness: .*\/ready/);
+      assert.match(body, /1800000 ms/);
+      assert.match(body, /settlement delay therefore consumes part/i);
       assert.match(
          body,
          /https:\/\/roundwatch-api\.onrender\.com\/openapi\.json/,
@@ -368,6 +375,10 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
             structuredContent?: {
                created?: unknown;
                request?: { url?: unknown };
+               eligibility?: {
+                  ttlMs?: unknown;
+                  settlementTimeConsumesEligibilityWindow?: unknown;
+               };
                x402?: {
                   servicePriceAtomicAmount?: unknown;
                   network?: unknown;
@@ -389,6 +400,15 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
       assert.equal(
          prepareBody.result?.structuredContent?.x402?.network,
          MAINNET_NETWORK_CONFIG.network,
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.eligibility?.ttlMs,
+         1_800_000,
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.eligibility
+            ?.settlementTimeConsumesEligibilityWindow,
+         true,
       );
       assert.equal(
          store.getByIdempotencyKey('mcp-invoice-001'),
@@ -513,6 +533,228 @@ test('MCP endpoint keeps stateless legacy initialize compatibility', async () =>
       assert.equal(body.result?.serverInfo?.name, 'roundwatch');
    } finally {
       store.close();
+   }
+});
+
+test('MCP rejects unsupported and conflicting protocol-version signals', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const unsupportedInitialize = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 50,
+            method: 'initialize',
+            params: {
+               protocolVersion: '2099-01-01',
+               capabilities: {},
+               clientInfo: { name: 'bad-version', version: '1' },
+            },
+         }),
+      });
+      assert.equal(unsupportedInitialize.status, 400);
+      assert.match(
+         await unsupportedInitialize.text(),
+         /Unsupported initialize protocolVersion/,
+      );
+
+      const unsupportedHeader = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2099-01-01',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 51,
+            method: 'ping',
+         }),
+      });
+      assert.equal(unsupportedHeader.status, 400);
+      assert.match(
+         await unsupportedHeader.text(),
+         /Unsupported MCP-Protocol-Version/,
+      );
+
+      const conflicting = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+            'mcp-method': 'ping',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 52,
+            method: 'ping',
+            params: {
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2025-11-25',
+               },
+            },
+         }),
+      });
+      assert.equal(conflicting.status, 400);
+      assert.match(
+         await conflicting.text(),
+         /protocol-version signals disagree/,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('liveness and readiness are separate service signals', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      let workersReady = false;
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+         readinessCheck: () => {
+            const storage = store.readinessCheck();
+            return {
+               ready: storage && workersReady,
+               checks: {
+                  storage,
+                  backgroundWorkers: workersReady,
+               },
+            };
+         },
+      });
+
+      const live = await app.request('/health');
+      assert.equal(live.status, 200);
+      assert.equal(live.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(await live.json(), {
+         status: 'ok',
+         purpose: 'liveness',
+         network: 'testnet',
+      });
+
+      const notReady = await app.request('/ready');
+      assert.equal(notReady.status, 503);
+      assert.equal(notReady.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(await notReady.json(), {
+         status: 'not_ready',
+         network: 'testnet',
+         checks: {
+            storage: true,
+            backgroundWorkers: false,
+         },
+      });
+
+      workersReady = true;
+      const ready = await app.request('/ready');
+      assert.equal(ready.status, 200);
+      assert.deepEqual(await ready.json(), {
+         status: 'ready',
+         network: 'testnet',
+         checks: {
+            storage: true,
+            backgroundWorkers: true,
+         },
+      });
+   } finally {
+      store.close();
+   }
+});
+
+test('watch status is no-store and exposes terminal settlement reconciliation explicitly', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const prepared = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'terminal-settlement-public' },
+         intent('TERMINAL_SETTLEMENT_TX'),
+      ).watch;
+      store.markSettlementUnknown(prepared.id);
+      store.markSettlementInvalid(prepared.id);
+
+      const stored = store.getWatch(prepared.id);
+      assert.equal(stored?.state, 'settlement_unknown');
+      assert.equal(stored?.settlementReconciliationTerminal, true);
+
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const status = await app.request(`/spike/watch/${prepared.id}`);
+      assert.equal(status.status, 200);
+      assert.equal(status.headers.get('cache-control'), 'no-store');
+      const body = await status.json() as {
+         watch?: {
+            state?: string;
+            settlementReconciliationTerminal?: boolean;
+         };
+      };
+      assert.equal(body.watch?.state, 'settlement_unknown');
+      assert.equal(body.watch?.settlementReconciliationTerminal, true);
+
+      const missing = await app.request(
+         '/spike/watch/00000000-0000-0000-0000-000000000000',
+      );
+      assert.equal(missing.status, 404);
+      assert.equal(missing.headers.get('cache-control'), 'no-store');
+   } finally {
+      store.close();
+   }
+});
+
+test('store creates indexes for active, reconciliation, and payer-capacity queries', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-indexes-'));
+   const path = join(directory, 'watch.sqlite');
+
+   try {
+      const store = new RoundWatchStore(path);
+      store.close();
+
+      const database = new DatabaseSync(path);
+      const rows = database.prepare(
+         'PRAGMA index_list(roundwatch_watches)',
+      ).all() as unknown as Array<{ name: string }>;
+      const names = new Set(rows.map(row => row.name));
+
+      assert.ok(names.has('roundwatch_active_created_idx'));
+      assert.ok(names.has('roundwatch_reconcile_due_idx'));
+      assert.ok(names.has('roundwatch_open_payer_idx'));
+
+      database.close();
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
    }
 });
 
@@ -846,6 +1088,13 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '20000');
       assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
+      assert.match(
+         String((decodePaymentRequiredHeader(encoded) as unknown as {
+            resource?: { description?: unknown };
+         }).resource?.description),
+         /1800000 ms eligibility window/,
+      );
+      assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
    } finally { store.close(); }
 });
