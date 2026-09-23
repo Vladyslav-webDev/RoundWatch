@@ -53,6 +53,8 @@ A backend that already operates durable Indexer or subscriber infrastructure may
 
 See [Architecture](docs/ARCHITECTURE.md) for the normal, recovery, and matching paths.
 
+See [Operations](docs/OPERATIONS.md) for readiness, backup/restore, retention, and incident procedures.
+
 See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 
 ## Live production service
@@ -81,7 +83,9 @@ The production server does not contain or need a wallet mnemonic or private key.
 
 ## API
 
-### Health
+### Health and readiness
+
+`GET /health` is liveness only. Use `GET /ready` to decide whether the durable service is ready for paid traffic.
 
 ```http
 GET /health
@@ -92,7 +96,27 @@ Production response:
 ```json
 {
   "status": "ok",
+  "purpose": "liveness",
   "network": "mainnet"
+}
+```
+
+Readiness:
+
+```http
+GET /ready
+```
+
+A ready production instance returns HTTP 200:
+
+```json
+{
+  "status": "ready",
+  "network": "mainnet",
+  "checks": {
+    "storage": true,
+    "backgroundWorkers": true
+  }
 }
 ```
 
@@ -120,6 +144,9 @@ An ordinary request receives `402 Payment Required`. An x402-capable client read
 ```json
 {
   "watchId": "f5d2fb6f-b224-4aae-989c-87a5418fd2ae",
+  "workUnitBudget": 500,
+  "eligibilityTtlMs": 1800000,
+  "expiresAt": "2026-09-16T12:30:00.000Z",
   "message": "The watch is returned only if x402 settlement and durable activation succeed"
 }
 ```
@@ -195,7 +222,7 @@ The Hono resource server uses x402 v2 and the hosted GoPlausible facilitator. Be
 
 If the process stops after on-chain settlement but before activation is committed, the reconciliation worker looks up that exact transaction under persisted exponential backoff. It activates only when the original immutable terms agree. A bare 404 is retryable; only a sufficiently covered post-`LastValid` historical absence search can establish terminal nonpayment. A definitive confirmed mismatch fails closed.
 
-All Indexer calls share one token-bucket/concurrency dispatcher. Scans use finite round windows and page-level validation; each page and retry consumes capacity. Each durable work turn is additionally guarded to at most four logical Indexer request opportunities for active polling or three for settlement reconciliation, so the default 500-turn contract has a conservative 2,000-background-request ceiling. Validated historical scan pages may be reused across sweeps, but the process-local LRU is bounded by both entry count and serialized payload bytes. Pagination tokens stay in memory, so restart replays the unfinished window from its durable cursor. When the deadline has passed, RoundWatch fixes an indexed block whose timestamp is at or after the deadline as `closingRound`; only complete validated coverage through that round can produce `expired`. Status reads never manufacture expiry from wall time.
+All Indexer calls share one token-bucket/concurrency dispatcher. Scans use finite round windows and page-level validation; each page and retry consumes capacity. Each durable work turn is additionally guarded to at most four logical Indexer request opportunities for active polling or three for settlement reconciliation, so the default 500-turn contract has a conservative 2,000-background-request ceiling. Indexer response bodies are capped at 8 MiB before JSON parsing and continuation tokens are capped at 4 KiB, so a malformed or hostile upstream cannot allocate unbounded parser/token memory. Validated historical scan pages may be reused across sweeps, but the process-local LRU is bounded by both entry count and serialized payload bytes. Pagination tokens stay in memory, so restart replays the unfinished window from its durable cursor. When the deadline has passed, RoundWatch fixes an indexed block whose timestamp is at or after the deadline as `closingRound`; only complete validated coverage through that round can produce `expired`. Status reads never manufacture expiry from wall time.
 
 ## Local development
 
@@ -278,7 +305,7 @@ pnpm -C apps/client test
 docker build -t roundwatch-local .
 ```
 
-GitHub Actions performs a full-depth checkout, scans complete Git history with Gitleaks, rejects tracked `.env` files other than examples, installs from the frozen lockfile, typechecks both workspaces, runs server and MainNet safety tests, and builds the production image. Tests are synthetic/read-only and do not authorize MainNet spending.
+GitHub Actions runs with read-only repository permissions, pins third-party actions and the Gitleaks image by immutable revisions, performs a full-depth history scan, rejects tracked `.env` files other than examples, installs from the frozen lockfile, audits production dependencies for High/Critical advisories, typechecks both workspaces, runs server and MainNet safety tests, and builds the production image. Dependabot monitors both npm/pnpm dependencies and GitHub Actions. Tests are synthetic/read-only and do not authorize MainNet spending.
 
 ## Security model
 
@@ -290,7 +317,7 @@ GitHub Actions performs a full-depth checkout, scans complete Git history with G
 - Transactional global/per-payer admission and the shared finite Indexer dispatcher bound persistent and external work; capacity rejection happens before settlement.
 - `.env` files and wallet material must never be committed; CI enforces tracked-env and full-history secret checks.
 
-The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Status and other watch-specific responses use `Cache-Control: no-store`. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. `/health` is liveness only; use `/ready` to check durable storage and background-worker readiness before directing paid traffic. See [Security](docs/SECURITY.md) for trust boundaries and operational assumptions.
+The status API is not an authenticated vault: anyone who knows a watch ID can query its public record. Status and other watch-specific responses use `Cache-Control: no-store`. Do not put sensitive information in `invoiceNote` or use RoundWatch metadata as a secret store. `/health` is liveness only; use `/ready` to check durable storage and background-worker readiness before directing paid traffic. The challenge release retains terminal rows until deliberate operator maintenance; there is no public deletion API. See [Security](docs/SECURITY.md) and [Operations](docs/OPERATIONS.md) for trust boundaries and operational procedures.
 
 ## MainNet proof
 
@@ -331,6 +358,7 @@ Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 │   ├── ARCHITECTURE.md
 │   ├── DEPLOYMENT.md
 │   ├── MAINNET_READINESS.md
+│   ├── OPERATIONS.md
 │   ├── SECURITY.md
 │   ├── FAULT_INJECTION.md
 │   └── ROUNDWATCH_SPIKE.md

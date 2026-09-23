@@ -10,6 +10,8 @@ import {
 export type ScanQueryVariant = 'A' | 'B' | 'C' | 'D';
 
 export const DEFAULT_SCAN_QUERY_VARIANT: ScanQueryVariant = 'C';
+export const MAX_INDEXER_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
+export const MAX_INDEXER_NEXT_TOKEN_BYTES = 4 * 1024;
 
 export function resolveScanQueryVariant(
    value: string | undefined,
@@ -86,7 +88,18 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       private readonly timeoutMilliseconds = 10_000,
       private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
       private readonly scanQueryVariant: ScanQueryVariant = 'A',
-   ) {}
+      private readonly maxResponseBodyBytes =
+         MAX_INDEXER_RESPONSE_BODY_BYTES,
+   ) {
+      if (
+         !Number.isSafeInteger(maxResponseBodyBytes) ||
+         maxResponseBodyBytes <= 0
+      ) {
+         throw new Error(
+            'maxResponseBodyBytes must be a positive safe integer',
+         );
+      }
+   }
 
    async getCurrentRound(
       purpose: IndexerRequestPurpose = 'health',
@@ -327,8 +340,20 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                   );
                }
 
-               const rawBody = await response.text();
-               responseBytes = Buffer.byteLength(rawBody, 'utf8');
+               const declaredBytes = headerContentLength(response);
+               if (declaredBytes > this.maxResponseBodyBytes) {
+                  responseBytes = declaredBytes;
+                  throw new Error(
+                     `Indexer ${purpose} response exceeded ${this.maxResponseBodyBytes} byte limit`,
+                  );
+               }
+
+               const boundedBody = await readBoundedResponseText(
+                  response,
+                  this.maxResponseBodyBytes,
+               );
+               const rawBody = boundedBody.text;
+               responseBytes = boundedBody.bytes;
 
                let body: unknown;
                try {
@@ -622,7 +647,15 @@ function safeRange(minRound: number, maxRound: number): void {
 function optionalToken(body: unknown): { nextToken?: string } {
    const value = field(body, 'next-token', false);
    if (value === undefined || value === null || value === '') return {};
-   return { nextToken: nonEmptyString(value, 'next-token') };
+
+   const nextToken = nonEmptyString(value, 'next-token');
+   if (Buffer.byteLength(nextToken, 'utf8') > MAX_INDEXER_NEXT_TOKEN_BYTES) {
+      throw new Error(
+         `Indexer next-token exceeds ${MAX_INDEXER_NEXT_TOKEN_BYTES} byte limit`,
+      );
+   }
+
+   return { nextToken };
 }
 function requiredArray(body: unknown, name: string): unknown[] {
    const value = field(body, name); if (!Array.isArray(value)) throw new Error(`Indexer ${name} is not an array`); return value;
@@ -669,9 +702,59 @@ function isCanonicalBase64(value: string): boolean {
 
 function headerContentLength(response: Response): number {
    const raw = response.headers.get('content-length');
-   if (!raw) return 0;
+   if (!raw || !/^\d+$/.test(raw)) return 0;
    const value = Number(raw);
    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+async function readBoundedResponseText(
+   response: Response,
+   limitBytes: number,
+): Promise<{ text: string; bytes: number }> {
+   if (!response.body) {
+      return { text: '', bytes: 0 };
+   }
+
+   const reader = response.body.getReader();
+   const chunks: Uint8Array[] = [];
+   let totalBytes = 0;
+
+   try {
+      while (true) {
+         const { done, value } = await reader.read();
+         if (done) break;
+
+         totalBytes += value.byteLength;
+         if (totalBytes > limitBytes) {
+            await reader.cancel('indexer response body limit exceeded');
+            throw new Error(
+               `Indexer response exceeded ${limitBytes} byte limit`,
+            );
+         }
+
+         chunks.push(value);
+      }
+   } finally {
+      reader.releaseLock();
+   }
+
+   const body = new Uint8Array(totalBytes);
+   let offset = 0;
+   for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+   }
+
+   let text: string;
+   try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(body);
+   } catch (error) {
+      throw new Error('Indexer response was not valid UTF-8', {
+         cause: error,
+      });
+   }
+
+   return { text, bytes: totalBytes };
 }
 
 function isTimeoutError(error: unknown): boolean {

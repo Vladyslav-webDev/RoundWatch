@@ -14,6 +14,8 @@ The guarded MainNet utility under `apps/client` is an operator tool, not server 
 - Root and workspace `.gitignore` rules exclude `.env` and `.env.*` while allowing `.env.example`.
 - CI rejects any tracked `.env` or `.env.*` file except `.env.example`.
 - CI checks out full Git history and runs Gitleaks v8.29.1 over that history with redaction enabled.
+- CI uses read-only repository permissions, pins third-party GitHub Actions and the Gitleaks container by immutable revisions, and audits production dependencies for High/Critical advisories.
+- Dependabot monitors npm/pnpm dependencies and GitHub Actions for updates.
 - Examples contain public addresses and transaction IDs only. Public blockchain identifiers are not secrets.
 - Client `.env` files should use the minimum-funded, network-appropriate account and remain local.
 
@@ -40,7 +42,7 @@ These guards reduce accidental cross-network or ephemeral production operation. 
 
 MainNet requires an explicit absolute SQLite path on persistent storage. Production uses `/data/roundwatch.sqlite` on a Render persistent disk. The database, `-wal`, and `-shm` files must remain on the same persistent filesystem.
 
-An ephemeral or lost database can lose paid watch obligations. A rolled-back database can also rewind scan cursors. Backups, restore tests, disk monitoring, and controlled migrations are operator responsibilities.
+An ephemeral or lost database can lose paid watch obligations. A rolled-back database can also rewind scan cursors. Backups, restore tests, disk monitoring, and controlled migrations are operator responsibilities. The concrete challenge-release procedure is documented in [OPERATIONS.md](OPERATIONS.md); copying only the live main SQLite file while WAL data exists is explicitly not considered a valid backup.
 
 ## Service-payment verification and reconciliation
 
@@ -77,7 +79,7 @@ An active watch has a safe `scanAfterRound` baseline. RoundWatch considers only 
 
 Inner asset transfers, clawback transfers (`asset-transfer-transaction.sender`), and asset close-out transfers (`close-to`) are outside the RoundWatch payment contract and never count as a match. Indexer search may return a parent transaction when an inner transaction satisfies the query; structurally valid parent results are therefore ignored deliberately instead of being misclassified as direct payments. Search requests also set `exclude-close-to=true` so close destinations are not treated as ordinary receivers.
 
-The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage. A malformed envelope, including an unexplained non-`axfer` result, still fails closed and cannot advance coverage.
+The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer HTTP response body is capped at 8 MiB before JSON parsing, and continuation tokens are capped at 4 KiB before they can enter pagination/session state. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage. A malformed envelope, oversized body/token, or unexplained non-`axfer` result fails closed and cannot advance coverage.
 
 If any page, checkpoint, or watermark validation fails, the cursor is not advanced. Pagination tokens are process-local; restart replays the unfinished finite round window. Conditional cursor updates prevent stale work from moving coverage backward or skipping a range.
 
@@ -122,13 +124,15 @@ This runner is for explicitly authorized evidence collection, not routine health
 - The current 30-minute eligibility deadline, 500-turn work budget, and 50-global/5-per-payer admission limits are challenge-release operational policy, not an SLA or final commercial capacity policy.
 - Watch status is unauthenticated. Anyone who knows a UUID can retrieve its record, including addresses, amounts, optional notes, settlement metadata, and transaction IDs.
 - Algorand transfers and public addresses are already public, but an invoice note can add application-specific information. Do not place confidential or personal data in it.
-- There is no cancellation or deletion API and no documented retention policy.
+- There is no cancellation or deletion API. The documented challenge-release retention policy is to keep terminal rows until deliberate operator maintenance; a finite commercial retention/deletion policy remains future work.
 - Polling isolates individual failures but remains sequential within one process; this does not establish capacity for arbitrary load.
 
 ## Operational rules
 
 - Keep production on a persistent database path and verify that the volume remains mounted after every deployment.
-- Use free `/health`, unpaid HTTP 402, and existing-watch status checks for routine smoke testing.
+- Treat `/health` as liveness only and require `/ready` before directing paid traffic.
+- Use free `/health`, `/ready`, unpaid HTTP 402, and existing-watch status checks for routine smoke testing.
+- Follow [OPERATIONS.md](OPERATIONS.md) for consistent backup/restore drills, disk monitoring, retention, and incident handling.
 - Do not run a paid MainNet test without explicit human authorization for that exact spend.
 - Review payment requirements before signing; do not trust environment configuration alone.
 - Treat database backup and restore as security-relevant because the database represents paid obligations and scan progress.
