@@ -9,6 +9,10 @@ import {
    IndexerRequestTurnBudget,
    MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN,
 } from './roundwatch-work-budget.js';
+import {
+   WorkerHealthTracker,
+   type WorkerHealthSnapshot,
+} from './roundwatch-worker-health.js';
 
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
 export const DEFAULT_SCAN_PAGE_CACHE_ENTRIES = 16;
@@ -34,6 +38,7 @@ export class RoundWatchPoller {
    private readonly sessions = new Map<string, ScanSession>();
    private readonly historicalPageCache = new Map<string, CachedHistoricalPage>();
    private historicalPageCacheBytes = 0;
+   private readonly workerHealth = new WorkerHealthTracker();
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -71,13 +76,25 @@ export class RoundWatchPoller {
    start(): void {
       if (this.started) return;
       this.started = true;
+      this.workerHealth.markStarted();
       void this.tick();
    }
 
    stop(): void {
       this.started = false;
+      this.workerHealth.markStopped();
       if (this.timer) clearTimeout(this.timer);
       this.timer = undefined;
+   }
+
+   healthSnapshot(): WorkerHealthSnapshot {
+      return this.workerHealth.snapshot(
+         Math.max(this.intervalMilliseconds * 3, 15_000),
+      );
+   }
+
+   readinessCheck(): boolean {
+      return this.healthSnapshot().ready;
    }
 
    async runOnce(): Promise<void> {
@@ -401,12 +418,20 @@ export class RoundWatchPoller {
    private async tick(): Promise<void> {
       if (this.running) return;
       this.running = true;
-      try { await this.runOnce(); }
-      catch (error) { console.error('RoundWatch poll failed:', safeErrorMessage(error)); }
-      finally {
+      this.workerHealth.markCycleStarted();
+      try {
+         await this.runOnce();
+         this.workerHealth.markCycleSucceeded();
+      } catch (error) {
+         this.workerHealth.markCycleFailed();
+         console.error('RoundWatch poll failed:', safeErrorMessage(error));
+      } finally {
          this.running = false;
          if (this.started) {
-            this.timer = setTimeout(() => void this.tick(), this.intervalMilliseconds);
+            this.timer = setTimeout(
+               () => void this.tick(),
+               this.intervalMilliseconds,
+            );
             this.timer.unref();
          }
       }

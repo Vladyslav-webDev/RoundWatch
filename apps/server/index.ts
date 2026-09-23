@@ -39,6 +39,10 @@ import {
 } from './roundwatch-poller.js';
 import { maxBackgroundIndexerRequestsForWorkBudget } from './roundwatch-work-budget.js';
 import {
+   DEFAULT_MIN_FREE_DISK_BYTES,
+   hasDatabaseDiskHeadroom,
+} from './roundwatch-readiness.js';
+import {
    DEFAULT_MAX_OPEN_WATCHES,
    DEFAULT_MAX_OPEN_WATCHES_PER_PAYER,
    DEFAULT_WATCH_TTL_MILLISECONDS,
@@ -96,6 +100,7 @@ let scanQueryVariant;
 let signedPaymentRequestsPerSecond;
 let signedPaymentBurst;
 let signedPaymentConcurrency;
+let minimumFreeDiskBytes;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -169,6 +174,11 @@ try {
       process.env.ROUNDWATCH_SIGNED_PAYMENT_CONCURRENCY,
       DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
       'ROUNDWATCH_SIGNED_PAYMENT_CONCURRENCY',
+   );
+   minimumFreeDiskBytes = parseRequiredNonNegativeInteger(
+      process.env.ROUNDWATCH_MIN_FREE_DISK_BYTES,
+      DEFAULT_MIN_FREE_DISK_BYTES,
+      'ROUNDWATCH_MIN_FREE_DISK_BYTES',
    );
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
@@ -282,7 +292,6 @@ const reconciler = new SettlementReconciler(
    },
    economicsMetrics,
 );
-let workersStarted = false;
 const app = createApp({
    avmAddress,
    facilitatorClient,
@@ -298,11 +307,22 @@ const app = createApp({
    },
    readinessCheck: () => {
       const storage = store.readinessCheck();
+      const pollerReady = poller.readinessCheck();
+      const reconcilerReady = reconciler.readinessCheck();
+      const backgroundWorkers = pollerReady && reconcilerReady;
+      const diskHeadroom = hasDatabaseDiskHeadroom(
+         databasePath,
+         minimumFreeDiskBytes,
+      );
+
       return {
-         ready: storage && workersStarted,
+         ready: storage && backgroundWorkers && diskHeadroom,
          checks: {
             storage,
-            backgroundWorkers: workersStarted,
+            poller: pollerReady,
+            reconciler: reconcilerReady,
+            backgroundWorkers,
+            diskHeadroom,
          },
       };
    },
@@ -327,7 +347,6 @@ server.on('listening', () => {
    reconciler.start();
    poller.start();
    runtimeSampler?.start();
-   workersStarted = true;
    console.log(
       `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
    );
@@ -354,6 +373,9 @@ server.on('listening', () => {
       `Historical scan-page cache: ${scanPageCacheEntries} entries / ${scanPageCacheBytes} payload bytes`,
    );
    console.log(
+      `Readiness disk headroom floor: ${minimumFreeDiskBytes} bytes`,
+   );
+   console.log(
       `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
    );
    if (economicsInstrumentationEnabled) {
@@ -370,7 +392,6 @@ server.on('listening', () => {
 });
 
 server.on('close', () => {
-   workersStarted = false;
    reconciler.stop();
    poller.stop();
    runtimeSampler?.stop();

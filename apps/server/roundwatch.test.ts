@@ -37,6 +37,8 @@ import {
    type TransactionPage,
 } from './roundwatch-indexer.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
+import { hasDatabaseDiskHeadroom } from './roundwatch-readiness.js';
+import { WorkerHealthTracker } from './roundwatch-worker-health.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 import { MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN } from './roundwatch-work-budget.js';
@@ -45,6 +47,7 @@ import {
    MAX_WATCH_REQUEST_BODY_BYTES,
 } from './request-body.js';
 import {
+   probeSqliteWriteReadiness,
    RoundWatchStore,
    WatchCapacityError,
    type SettlementIntent,
@@ -162,6 +165,16 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
                  asset?: unknown;
                  servicePriceAtomicAmount?: unknown;
                  payTo?: unknown;
+                 watchEligibility?: {
+                    roundBoundary?: {
+                       operator?: unknown;
+                       sameActivationRoundEligible?: unknown;
+                    };
+                    timeBoundary?: {
+                       operator?: unknown;
+                       exactDeadlineEligible?: unknown;
+                    };
+                 };
               };
               responses?: Record<string, {
                  headers?: Record<string, unknown>;
@@ -181,6 +194,24 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
       );
       assert.equal(create?.['x-x402']?.servicePriceAtomicAmount, '20000');
       assert.equal(create?.['x-x402']?.payTo, RECEIVER);
+      assert.equal(
+         create?.['x-x402']?.watchEligibility?.roundBoundary?.operator,
+         '>',
+      );
+      assert.equal(
+         create?.['x-x402']?.watchEligibility?.roundBoundary
+            ?.sameActivationRoundEligible,
+         false,
+      );
+      assert.equal(
+         create?.['x-x402']?.watchEligibility?.timeBoundary?.operator,
+         '<',
+      );
+      assert.equal(
+         create?.['x-x402']?.watchEligibility?.timeBoundary
+            ?.exactDeadlineEligible,
+         false,
+      );
       assert.ok(create?.responses?.['402']?.headers?.['PAYMENT-REQUIRED']);
       assert.equal(
          document.paths?.['/v1/watch/{id}']?.get?.operationId,
@@ -227,7 +258,17 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
       assert.match(body, /GET \/v1\/watch\/\{id\}/);
       assert.match(body, /Readiness: .*\/ready/);
       assert.match(body, /1800000 ms/);
-      assert.match(body, /settlement delay therefore consumes part/i);
+      assert.match(body, /settlement time consumes (?:part of )?(?:this |the )?window/i);
+      assert.match(
+         body,
+         /confirmed-round must be strictly greater than activationRound/i,
+      );
+      assert.match(
+         body,
+         /round-time must be strictly earlier than expiresAt/i,
+      );
+      assert.match(body, /same-round payment is ineligible/i);
+      assert.match(body, /exactly at the deadline is ineligible/i);
       assert.match(
          body,
          /https:\/\/roundwatch-api\.onrender\.com\/openapi\.json/,
@@ -379,6 +420,14 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
                eligibility?: {
                   ttlMs?: unknown;
                   settlementTimeConsumesEligibilityWindow?: unknown;
+                  roundBoundary?: {
+                     operator?: unknown;
+                     sameActivationRoundEligible?: unknown;
+                  };
+                  timeBoundary?: {
+                     operator?: unknown;
+                     exactDeadlineEligible?: unknown;
+                  };
                };
                x402?: {
                   servicePriceAtomicAmount?: unknown;
@@ -410,6 +459,26 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
          prepareBody.result?.structuredContent?.eligibility
             ?.settlementTimeConsumesEligibilityWindow,
          true,
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.eligibility?.roundBoundary
+            ?.operator,
+         '>',
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.eligibility?.roundBoundary
+            ?.sameActivationRoundEligible,
+         false,
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.eligibility?.timeBoundary
+            ?.operator,
+         '<',
+      );
+      assert.equal(
+         prepareBody.result?.structuredContent?.eligibility?.timeBoundary
+            ?.exactDeadlineEligible,
+         false,
       );
       assert.equal(
          store.getByIdempotencyKey('mcp-invoice-001'),
@@ -680,6 +749,174 @@ test('liveness and readiness are separate service signals', async () => {
             backgroundWorkers: true,
          },
       });
+   } finally {
+      store.close();
+   }
+});
+
+test('SQLite readiness requires a real write-capable transaction and fails query-only mode', () => {
+   const database = new DatabaseSync(':memory:');
+   try {
+      database.exec(`
+         CREATE TABLE roundwatch_readiness_probe (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            checked_at TEXT NOT NULL
+         );
+      `);
+
+      assert.equal(
+         probeSqliteWriteReadiness(
+            database,
+            '2026-09-23T18:00:00.000Z',
+         ),
+         true,
+      );
+
+      database.exec('PRAGMA query_only = ON;');
+      assert.equal(
+         probeSqliteWriteReadiness(
+            database,
+            '2026-09-23T18:00:01.000Z',
+         ),
+         false,
+      );
+   } finally {
+      database.close();
+   }
+});
+
+test('store readiness is cached, writable, and fails after close', () => {
+   const store = new RoundWatchStore(':memory:', {
+      readinessProbeIntervalMilliseconds: 60_000,
+   });
+
+   assert.equal(store.readinessCheck(true), true);
+   assert.equal(store.readinessCheck(), true);
+   store.close();
+   assert.equal(store.readinessCheck(), false);
+});
+
+test('worker health requires successful fresh progress and fails on errors or stalls', () => {
+   let now = 1_000;
+   const tracker = new WorkerHealthTracker(() => now);
+
+   tracker.markStarted();
+   assert.equal(tracker.snapshot(1_000).ready, false);
+
+   tracker.markCycleStarted();
+   now = 1_100;
+   tracker.markCycleSucceeded();
+   assert.equal(tracker.snapshot(1_000).ready, true);
+
+   now = 1_200;
+   tracker.markCycleStarted();
+   tracker.markCycleFailed();
+   assert.equal(tracker.snapshot(1_000).ready, false);
+
+   tracker.markCycleStarted();
+   now = 1_300;
+   tracker.markCycleSucceeded();
+   assert.equal(tracker.snapshot(1_000).ready, true);
+
+   tracker.markCycleStarted();
+   now = 2_401;
+   assert.equal(tracker.snapshot(1_000).ready, false);
+
+   tracker.markStopped();
+   assert.equal(tracker.snapshot(1_000).ready, false);
+});
+
+test('disk-headroom readiness uses available filesystem blocks and fails closed on stat errors', () => {
+   assert.equal(
+      hasDatabaseDiskHeadroom(
+         '/data/roundwatch.sqlite',
+         1_000,
+         () => ({ bavail: 10, bsize: 200 }),
+      ),
+      true,
+   );
+   assert.equal(
+      hasDatabaseDiskHeadroom(
+         '/data/roundwatch.sqlite',
+         2_001,
+         () => ({ bavail: 10, bsize: 200 }),
+      ),
+      false,
+   );
+   assert.equal(
+      hasDatabaseDiskHeadroom(
+         '/data/roundwatch.sqlite',
+         1,
+         () => {
+            throw new Error('statfs unavailable');
+         },
+      ),
+      false,
+   );
+   assert.equal(hasDatabaseDiskHeadroom(':memory:', Number.MAX_SAFE_INTEGER), true);
+});
+
+test('non-ready durable service refuses paid watch admission before x402 verification', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let facilitatorCalls = 0;
+
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            verify: async () => {
+               facilitatorCalls += 1;
+               throw new Error('not-ready request must not verify payment');
+            },
+            settle: async () => {
+               facilitatorCalls += 1;
+               throw new Error('not-ready request must not settle payment');
+            },
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+         readinessCheck: () => ({
+            ready: false,
+            checks: {
+               storage: true,
+               poller: false,
+               reconciler: true,
+               backgroundWorkers: false,
+               diskHeadroom: true,
+            },
+         }),
+      });
+
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: 'not-ready-watch',
+            expectedSender: PAYER,
+            expectedReceiver: RECEIVER,
+            atomicAmount: '1',
+         }),
+      });
+
+      assert.equal(response.status, 503);
+      assert.equal(response.headers.get('payment-required'), null);
+      const body = await response.json() as {
+         code?: string;
+         checks?: Record<string, boolean>;
+      };
+      assert.equal(body.code, 'service_not_ready');
+      assert.equal(body.checks?.backgroundWorkers, false);
+      assert.equal(facilitatorCalls, 0);
+      assert.equal(
+         store.getByIdempotencyKey('not-ready-watch'),
+         undefined,
+      );
    } finally {
       store.close();
    }
@@ -1202,12 +1439,22 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '20000');
       assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
-      assert.match(
-         String((decodePaymentRequiredHeader(encoded) as unknown as {
+      const description = String(
+         (decodePaymentRequiredHeader(encoded) as unknown as {
             resource?: { description?: unknown };
-         }).resource?.description),
-         /1800000 ms eligibility window/,
+         }).resource?.description,
       );
+      assert.match(description, /Eligibility lasts 1800000 ms/i);
+      assert.match(
+         description,
+         /round strictly greater than activationRound/i,
+      );
+      assert.match(
+         description,
+         /round-time must be strictly earlier than expiresAt/i,
+      );
+      assert.match(description, /same-round payment is ineligible/i);
+      assert.match(description, /exactly at the deadline is ineligible/i);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.equal(store.getByIdempotencyKey(SPEC.idempotencyKey), undefined);
    } finally { store.close(); }

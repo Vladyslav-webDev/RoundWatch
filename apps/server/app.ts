@@ -47,6 +47,10 @@ import type {
 import { WatchCapacityError } from './roundwatch-store.js';
 import { merchantIdentityHtml } from './merchant-identity.js';
 import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
+import {
+   buildWatchEligibilityContract,
+   eligibilityBoundarySummary,
+} from './roundwatch-contract.js';
 import { handleMcpHttpRequest } from './mcp.js';
 import {
    MAX_WATCH_REQUEST_BODY_BYTES,
@@ -173,6 +177,10 @@ function createWatchDiscovery(
    workUnitBudget: number,
    watchTtlMilliseconds: number,
 ) {
+   const eligibility = buildWatchEligibilityContract(
+      watchTtlMilliseconds,
+   );
+
    return declareDiscoveryExtension({
       bodyType: 'json',
       input: {
@@ -231,6 +239,7 @@ function createWatchDiscovery(
             watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
             workUnitBudget,
             eligibilityTtlMs: watchTtlMilliseconds,
+            eligibility,
             expiresAt: '2026-09-22T12:30:00.000Z',
             message:
                'The watch is returned only if x402 settlement and durable activation succeed',
@@ -255,6 +264,11 @@ function createWatchDiscovery(
                   description:
                      'Eligibility window in milliseconds, measured from durable watch preparation before x402 settlement completes',
                },
+               eligibility: {
+                  type: 'object',
+                  description:
+                     'Strict pre-purchase eligibility boundaries. The payment must confirm after activationRound and strictly before expiresAt.',
+               },
                expiresAt: {
                   type: 'string',
                   description:
@@ -270,6 +284,7 @@ function createWatchDiscovery(
                'watchId',
                'workUnitBudget',
                'eligibilityTtlMs',
+               'eligibility',
                'expiresAt',
                'message',
             ],
@@ -313,6 +328,12 @@ export function createApp(dependencies: AppDependencies): Hono {
    const parsedWatchBodies = new WeakMap<Request, unknown>();
    const workUnitBudget = store.configuredWorkUnitBudget();
    const watchTtlMilliseconds = store.configuredWatchTtlMilliseconds();
+   const eligibilityContract = buildWatchEligibilityContract(
+      watchTtlMilliseconds,
+   );
+   const eligibilitySummary = eligibilityBoundarySummary(
+      watchTtlMilliseconds,
+   );
    const watchDiscovery = createWatchDiscovery(
       workUnitBudget,
       watchTtlMilliseconds,
@@ -498,10 +519,11 @@ export function createApp(dependencies: AppDependencies): Hono {
       c.header('cache-control', 'no-store');
 
       try {
+         const storageReady = store.readinessCheck();
          const snapshot = readinessCheck?.() ?? {
-            ready: store.readinessCheck(),
+            ready: storageReady,
             checks: {
-               storage: store.readinessCheck(),
+               storage: storageReady,
             },
          };
 
@@ -613,6 +635,51 @@ export function createApp(dependencies: AppDependencies): Hono {
                canonicalPath: paidResource.canonicalPath,
             },
             404,
+         );
+      }
+
+      await next();
+   });
+
+   // Do not even advertise or verify a paid watch purchase while the durable
+   // service cannot safely accept a new obligation. This runs before body
+   // parsing and x402 middleware. The injected production readiness check is
+   // cached/bounded by its storage and worker components.
+   app.use(watchPath, async (c, next) => {
+      if (c.req.method !== 'POST') {
+         await next();
+         return;
+      }
+
+      try {
+         const storageReady = store.readinessCheck();
+         const snapshot = readinessCheck?.() ?? {
+            ready: storageReady,
+            checks: { storage: storageReady },
+         };
+
+         if (!snapshot.ready) {
+            c.header('cache-control', 'no-store');
+            return c.json(
+               {
+                  error:
+                     'RoundWatch is not ready to accept paid watch obligations',
+                  code: 'service_not_ready',
+                  checks: snapshot.checks,
+               },
+               503,
+            );
+         }
+      } catch {
+         c.header('cache-control', 'no-store');
+         return c.json(
+            {
+               error:
+                  'RoundWatch is not ready to accept paid watch obligations',
+               code: 'service_not_ready',
+               checks: { readinessCheck: false },
+            },
+            503,
          );
       }
 
@@ -773,7 +840,7 @@ export function createApp(dependencies: AppDependencies): Hono {
                ],
                ...(publicWatchResource ? { resource: publicWatchResource } : {}),
                description:
-                  `Monitor one exact future Algorand USDC payment on ${networkConfig.name} when no transaction ID exists yet. RoundWatch persists scan progress across restarts and returns a watch ID for later verified on-chain evidence. The watch has a ${workUnitBudget}-turn bounded background work budget and a ${watchTtlMilliseconds} ms eligibility window measured from durable watch preparation before settlement completes.`,
+                  `Monitor one exact future Algorand USDC payment on ${networkConfig.name} when no transaction ID exists yet. RoundWatch persists scan progress across restarts and returns a watch ID for later verified on-chain evidence. The watch has a ${workUnitBudget}-turn bounded background work budget. ${eligibilitySummary}`,
                mimeType: 'application/json',
                serviceName: ROUNDWATCH_SERVICE_NAME,
                tags: [...ROUNDWATCH_DISCOVERY_TAGS],
@@ -880,6 +947,7 @@ export function createApp(dependencies: AppDependencies): Hono {
          watchId: prepared.watch.id,
          workUnitBudget: prepared.watch.workUnitBudget,
          eligibilityTtlMs: watchTtlMilliseconds,
+         eligibility: eligibilityContract,
          expiresAt: prepared.watch.expiresAt,
          message:
             'The watch is returned only if x402 settlement and durable activation succeed',

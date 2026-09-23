@@ -3,6 +3,10 @@ import { isValidAlgorandAddress } from '@x402/avm';
 import type { RoundWatchNetworkConfig } from './network-config.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
+   buildWatchEligibilityContract,
+   eligibilityBoundarySummary,
+} from './roundwatch-contract.js';
+import {
    MAX_MCP_REQUEST_BODY_BYTES,
    RequestBodyTooLargeError,
    readJsonBodyWithLimit,
@@ -354,12 +358,9 @@ export async function handleMcpHttpRequest(
                   },
                   body: validation.value,
                },
-               eligibility: {
-                  ttlMs: dependencies.watchTtlMilliseconds,
-                  startsAt:
-                     'durable_watch_preparation_before_x402_settlement',
-                  settlementTimeConsumesEligibilityWindow: true,
-               },
+               eligibility: buildWatchEligibilityContract(
+                  dependencies.watchTtlMilliseconds,
+               ),
                x402: {
                   version: 2,
                   scheme: 'exact',
@@ -460,11 +461,9 @@ function serviceInfo(dependencies: McpDependencies) {
          servicePriceAtomicAmount: dependencies.serviceAtomicAmount,
          payTo: dependencies.serviceReceiver,
       },
-      eligibility: {
-         ttlMs: dependencies.watchTtlMilliseconds,
-         startsAt: 'durable_watch_preparation_before_x402_settlement',
-         settlementTimeConsumesEligibilityWindow: true,
-      },
+      eligibility: buildWatchEligibilityContract(
+         dependencies.watchTtlMilliseconds,
+      ),
       workUnitBudget: dependencies.workUnitBudget,
       docs: {
          product: 'https://roundwatch.observer/',
@@ -478,7 +477,9 @@ function serviceInfo(dependencies: McpDependencies) {
       limitations: [
          'RoundWatch is for future payments whose transaction ID does not exist yet.',
          'Only top-level direct Algorand USDC asset transfers are eligible matches; inner, clawback, and asset close-out transfers are excluded.',
-         'The eligibility clock starts when the durable watch is prepared before x402 settlement, so settlement delay consumes part of the advertised window.',
+         eligibilityBoundarySummary(
+            dependencies.watchTtlMilliseconds,
+         ),
          'RoundWatch is not a webhook delivery service.',
          'The MCP prepare tool does not sign or settle x402 payments.',
       ],

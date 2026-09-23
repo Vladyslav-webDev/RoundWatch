@@ -1,4 +1,8 @@
 import type { RoundWatchNetworkConfig } from './network-config.js';
+import {
+   buildWatchEligibilityContract,
+   eligibilityBoundarySummary,
+} from './roundwatch-contract.js';
 
 interface MachineReadableDocsOptions {
    networkConfig: RoundWatchNetworkConfig;
@@ -32,6 +36,12 @@ export function buildOpenApiDocument(
    } = options;
 
    const watchStatusPath = `${watchPath}/{id}`;
+   const eligibility = buildWatchEligibilityContract(
+      watchTtlMilliseconds,
+   );
+   const eligibilitySummary = eligibilityBoundarySummary(
+      watchTtlMilliseconds,
+   );
    const x402Contract = {
       version: 2,
       scheme: 'exact',
@@ -44,6 +54,7 @@ export function buildOpenApiDocument(
       requestHeader: 'PAYMENT-SIGNATURE',
       challengeHeader: 'PAYMENT-REQUIRED',
       settlementHeader: 'PAYMENT-RESPONSE',
+      watchEligibility: eligibility,
    };
 
    return {
@@ -115,7 +126,7 @@ export function buildOpenApiDocument(
                operationId: 'getReadiness',
                summary: 'Check durable-service readiness',
                description:
-                  'Readiness checks local durable storage and production worker startup state. Use this endpoint before directing paid traffic.',
+                  'Readiness checks cached durable-write capability plus production worker progress/error freshness. A non-ready service refuses new paid watch obligations before x402 verification. Use this endpoint before directing paid traffic.',
                responses: {
                   '200': {
                      description: 'RoundWatch is ready to accept paid obligations.',
@@ -146,7 +157,7 @@ export function buildOpenApiDocument(
                operationId: 'createWatch',
                summary: 'Create a durable watch for one exact future USDC payment',
                description:
-                  `Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. The service contract includes a ${watchTtlMilliseconds} ms creation-based eligibility window and a ${workUnitBudget}-turn work budget before payment. The eligibility clock starts when the durable watch is prepared, before x402 settlement completes. An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.`,
+                  `Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. The service contract includes a ${workUnitBudget}-turn work budget. ${eligibilitySummary} An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.`,
                'x-x402': x402Contract,
                requestBody: {
                   required: true,
@@ -391,6 +402,7 @@ export function buildOpenApiDocument(
                   'watchId',
                   'workUnitBudget',
                   'eligibilityTtlMs',
+                  'eligibility',
                   'expiresAt',
                   'message',
                ],
@@ -410,6 +422,13 @@ export function buildOpenApiDocument(
                      example: watchTtlMilliseconds,
                      description:
                         'Creation-based eligibility window in milliseconds, disclosed before purchase.',
+                  },
+                  eligibility: {
+                     type: 'object',
+                     additionalProperties: true,
+                     example: eligibility,
+                     description:
+                        'Strict watch eligibility contract. confirmed-round must be > activationRound and round-time must be < expiresAt.',
                   },
                   expiresAt: {
                      type: 'string',
@@ -598,6 +617,8 @@ RoundWatch lets a short-lived agent or service define an expected payment, pay o
 - Service price: ${servicePriceUsd} USDC (${serviceAtomicAmount} atomic units)
 - Service receiver: ${serviceReceiver}
 - Eligibility window: ${watchTtlMilliseconds} ms from durable watch preparation; settlement time consumes part of this window
+- Round boundary: transaction confirmed-round must be strictly greater than activationRound; the service-settlement round itself is ineligible
+- Time boundary: transaction block round-time must be strictly earlier than expiresAt; a block timestamp exactly equal to expiresAt is ineligible
 - Work budget: ${workUnitBudget} durable background turns per watch
 - x402 version: 2
 - x402 scheme: exact
@@ -624,6 +645,6 @@ The MCP server exposes read-only discovery and status tools plus a preparation t
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. The eligibility clock starts when the durable obligation is prepared before x402 settlement; settlement delay therefore consumes part of the advertised eligibility window. A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }
