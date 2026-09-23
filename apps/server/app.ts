@@ -160,6 +160,7 @@ export interface AppDependencies {
    economicsMetrics?: RoundWatchEconomicsMetrics;
    signedPaymentGateOptions?: SignedPaymentGateOptions;
    mcpRequestGateOptions?: SignedPaymentGateOptions;
+   recoveryRequestGateOptions?: SignedPaymentGateOptions;
    readinessCheck?: () => ReadinessSnapshot;
 }
 
@@ -306,6 +307,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       economicsMetrics,
       signedPaymentGateOptions,
       mcpRequestGateOptions,
+      recoveryRequestGateOptions,
       readinessCheck,
    } = dependencies;
 
@@ -319,6 +321,14 @@ export function createApp(dependencies: AppDependencies): Hono {
    );
    const mcpRequestGate = new SignedPaymentGate(
       mcpRequestGateOptions ?? {
+         requestsPerSecond:
+            DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+         burst: DEFAULT_SIGNED_PAYMENT_BURST,
+         concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      },
+   );
+   const recoveryRequestGate = new SignedPaymentGate(
+      recoveryRequestGateOptions ?? {
          requestsPerSecond:
             DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
          burst: DEFAULT_SIGNED_PAYMENT_BURST,
@@ -609,6 +619,32 @@ export function createApp(dependencies: AppDependencies): Hono {
             watchTtlMilliseconds,
             watchPath,
          });
+      } finally {
+         admission.release();
+      }
+   });
+
+   app.use(watchRecoveryPath, async (c, next) => {
+      if (c.req.method !== 'POST') {
+         await next();
+         return;
+      }
+
+      const admission = recoveryRequestGate.tryAcquire();
+      if (!admission.allowed) {
+         c.header('retry-after', '1');
+         c.header('cache-control', 'no-store');
+         return c.json(
+            {
+               error: 'Recovery request capacity is temporarily exhausted',
+               code: 'watch_recovery_rate_limited',
+            },
+            429,
+         );
+      }
+
+      try {
+         await next();
       } finally {
          admission.release();
       }
@@ -1010,8 +1046,9 @@ export function createApp(dependencies: AppDependencies): Hono {
          c.header('cache-control', 'no-store');
          return c.json(
             {
-               error: 'Existing watch is not recoverable yet',
+               error: 'Existing watch is not currently recoverable',
                state: existing.state,
+               recovery: recoveryDisposition(existing),
             },
             409,
          );
@@ -1032,6 +1069,51 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    return app;
+}
+
+function recoveryDisposition(watch: WatchRecord): {
+   retryable: boolean;
+   terminal: boolean;
+   reason:
+      | 'settlement_reconciliation_pending'
+      | 'settlement_reconciliation_terminal'
+      | 'watch_terminal_nonrecoverable';
+   nextAction:
+      | 'retry_recovery_later'
+      | 'retain_checkpoint_and_investigate';
+} {
+   const reconciliationPending =
+      watch.state === 'settlement_pending' ||
+      (watch.state === 'settlement_unknown' &&
+         !watch.settlementReconciliationTerminal);
+
+   if (reconciliationPending) {
+      return {
+         retryable: true,
+         terminal: false,
+         reason: 'settlement_reconciliation_pending',
+         nextAction: 'retry_recovery_later',
+      };
+   }
+
+   if (
+      watch.state === 'settlement_unknown' &&
+      watch.settlementReconciliationTerminal
+   ) {
+      return {
+         retryable: false,
+         terminal: true,
+         reason: 'settlement_reconciliation_terminal',
+         nextAction: 'retain_checkpoint_and_investigate',
+      };
+   }
+
+   return {
+      retryable: false,
+      terminal: true,
+      reason: 'watch_terminal_nonrecoverable',
+      nextAction: 'retain_checkpoint_and_investigate',
+   };
 }
 
 function extractSettlementIntent(

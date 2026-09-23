@@ -330,11 +330,13 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
 
                if (allowNotFound && response.status === 404) {
                   responseBytes = headerContentLength(response);
+                  await cancelUnconsumedResponseBody(response);
                   return undefined;
                }
 
                if (!response.ok) {
                   responseBytes = headerContentLength(response);
+                  await cancelUnconsumedResponseBody(response);
                   throw new Error(
                      `Indexer ${purpose} request failed with HTTP ${response.status}`,
                   );
@@ -343,6 +345,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                const declaredBytes = headerContentLength(response);
                if (declaredBytes > this.maxResponseBodyBytes) {
                   responseBytes = declaredBytes;
+                  await cancelUnconsumedResponseBody(response);
                   throw new Error(
                      `Indexer ${purpose} response exceeded ${this.maxResponseBodyBytes} byte limit`,
                   );
@@ -973,6 +976,19 @@ function headerContentLength(response: Response): number {
    if (!raw || !/^\d+$/.test(raw)) return 0;
    const value = Number(raw);
    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+async function cancelUnconsumedResponseBody(
+   response: Response,
+): Promise<void> {
+   if (!response.body || response.bodyUsed) return;
+
+   try {
+      await response.body.cancel();
+   } catch {
+      // Disposal is best-effort. Preserve the original Indexer status/size
+      // outcome rather than replacing it with a transport cleanup failure.
+   }
 }
 
 async function readBoundedResponseText(

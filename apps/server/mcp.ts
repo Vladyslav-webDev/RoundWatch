@@ -216,32 +216,55 @@ export async function handleMcpHttpRequest(
    if (
       message.jsonrpc !== '2.0' ||
       typeof message.method !== 'string' ||
-      utf8Bytes(message.method) > MAX_MCP_METHOD_BYTES ||
-      (typeof message.id === 'string' &&
-         utf8Bytes(message.id) > MAX_JSON_RPC_ID_BYTES)
+      message.method.length === 0 ||
+      utf8Bytes(message.method) > MAX_MCP_METHOD_BYTES
    ) {
       return jsonRpcHttpError(null, -32600, 'Invalid Request', 400);
    }
 
-   const id = normalizeId(message.id);
+   const hasId = Object.prototype.hasOwnProperty.call(message, 'id');
+   if (hasId && !isValidRequestId(message.id)) {
+      return jsonRpcHttpError(null, -32600, 'Invalid Request', 400);
+   }
+
+   const notification = !hasId;
+   const id = notification ? null : (message.id as string | number);
    const method = message.method;
-   const protocolSignalError = validateProtocolSignals(request, message);
+   const protocol = validateProtocolSignals(request, message);
 
-   if (protocolSignalError) {
-      return jsonRpcHttpError(id, -32602, protocolSignalError, 400);
+   if (protocol.error) {
+      return notification
+         ? notificationHttpError(400)
+         : jsonRpcHttpError(
+              id,
+              protocol.error.code,
+              protocol.error.message,
+              400,
+              protocol.error.data,
+           );
    }
 
-   if (id === null && method === 'notifications/initialized') {
-      return new Response(null, { status: 202 });
-   }
-
-   const modern = isModernRequest(request, message);
+   const modern = protocol.modern;
 
    if (modern) {
       const headerError = validateModernHeaders(request, message);
       if (headerError) {
-         return jsonRpcHttpError(id, -32020, headerError, 400);
+         return notification
+            ? notificationHttpError(400)
+            : jsonRpcHttpError(id, -32020, headerError, 400);
       }
+   }
+
+   if (notification) {
+      // JSON-RPC notifications never receive a JSON-RPC result/error body.
+      // Validate protocol/routing first, then acknowledge receipt only.
+      if (method === 'initialize' || method === 'server/discover') {
+         return notificationHttpError(400);
+      }
+      return new Response(null, {
+         status: 202,
+         headers: { 'cache-control': 'no-store' },
+      });
    }
 
    if (method === 'server/discover') {
@@ -320,15 +343,28 @@ export async function handleMcpHttpRequest(
          return jsonRpcHttpError(id, -32602, 'Invalid tools/call params', 400);
       }
 
-      const args = asObject(params.arguments) ?? {};
+      let args: Record<string, unknown> = {};
+      if (Object.prototype.hasOwnProperty.call(params, 'arguments')) {
+         const parsedArguments = asObject(params.arguments);
+         if (!parsedArguments) {
+            return jsonRpcHttpError(
+               id,
+               -32602,
+               'tools/call arguments must be an object',
+               400,
+            );
+         }
+         args = parsedArguments;
+      }
 
       switch (params.name) {
          case 'roundwatch.service_info': {
             if (Object.keys(args).length > 0) {
-               return toolError(
+               return jsonRpcHttpError(
                   id,
+                  -32602,
                   'roundwatch.service_info does not accept arguments',
-                  modern,
+                  400,
                );
             }
 
@@ -385,16 +421,30 @@ export async function handleMcpHttpRequest(
          }
 
          case 'roundwatch.get_watch': {
+            const argumentKeys = Object.keys(args);
+            if (
+               argumentKeys.length !== 1 ||
+               argumentKeys[0] !== 'watchId'
+            ) {
+               return jsonRpcHttpError(
+                  id,
+                  -32602,
+                  'roundwatch.get_watch accepts exactly one argument: watchId',
+                  400,
+               );
+            }
+
             const watchId = args.watchId;
             if (
                typeof watchId !== 'string' ||
                watchId.length === 0 ||
                utf8Bytes(watchId) > MAX_MCP_WATCH_ID_BYTES
             ) {
-               return toolError(
+               return jsonRpcHttpError(
                   id,
+                  -32602,
                   `watchId must be a non-empty string no larger than ${MAX_MCP_WATCH_ID_BYTES} UTF-8 bytes`,
-                  modern,
+                  400,
                );
             }
 
@@ -575,50 +625,189 @@ function validatePrepareArguments(
    };
 }
 
+interface ProtocolValidationError {
+   code: number;
+   message: string;
+   data?: Record<string, unknown>;
+}
+
+interface ProtocolValidationResult {
+   modern: boolean;
+   error?: ProtocolValidationError;
+}
+
 function validateProtocolSignals(
    request: Request,
    message: JsonRpcRequest,
-): string | undefined {
+): ProtocolValidationResult {
    const header = request.headers.get('mcp-protocol-version');
-   const params = asObject(message.params);
-   const meta = asObject(params?._meta);
-   const metaValue = meta?.['io.modelcontextprotocol/protocolVersion'];
+   const params =
+      message.params === undefined ? undefined : asObject(message.params);
 
-   if (header && !SUPPORTED_PROTOCOL_VERSIONS.has(header)) {
-      return `Unsupported MCP-Protocol-Version: ${header}`;
+   if (message.params !== undefined && !params) {
+      return protocolInvalidParams('MCP request params must be an object');
    }
 
+   const hasMeta =
+      params !== undefined &&
+      Object.prototype.hasOwnProperty.call(params, '_meta');
+   const meta = hasMeta ? asObject(params?._meta) : undefined;
+   if (hasMeta && !meta) {
+      return protocolInvalidParams('params._meta must be an object');
+   }
+
+   const protocolMetaKey =
+      'io.modelcontextprotocol/protocolVersion';
+   const hasMetaVersion =
+      meta !== undefined &&
+      Object.prototype.hasOwnProperty.call(meta, protocolMetaKey);
+   const metaValue = hasMetaVersion
+      ? meta?.[protocolMetaKey]
+      : undefined;
+
    if (
-      metaValue !== undefined &&
-      (typeof metaValue !== 'string' ||
-         !SUPPORTED_PROTOCOL_VERSIONS.has(metaValue))
+      header !== null &&
+      (header.length === 0 || !SUPPORTED_PROTOCOL_VERSIONS.has(header))
    ) {
-      return 'Unsupported params._meta.io.modelcontextprotocol/protocolVersion';
+      return unsupportedProtocolVersion(header);
+   }
+
+   if (hasMetaVersion) {
+      if (
+         typeof metaValue !== 'string' ||
+         metaValue.length === 0
+      ) {
+         return protocolInvalidParams(
+            'params._meta.io.modelcontextprotocol/protocolVersion must be a non-empty string',
+         );
+      }
+      if (!SUPPORTED_PROTOCOL_VERSIONS.has(metaValue)) {
+         return unsupportedProtocolVersion(metaValue);
+      }
    }
 
    if (
-      header &&
+      header !== null &&
       typeof metaValue === 'string' &&
       header !== metaValue
    ) {
-      return 'MCP protocol-version signals disagree';
+      return protocolHeaderMismatch(
+         'MCP protocol-version signals disagree',
+      );
    }
 
-   return undefined;
+   if (message.method === 'initialize') {
+      if (!params) {
+         return protocolInvalidParams(
+            'initialize params must be an object',
+         );
+      }
+
+      const requested = params.protocolVersion;
+      if (
+         typeof requested !== 'string' ||
+         requested.length === 0
+      ) {
+         return protocolInvalidParams(
+            'initialize protocolVersion must be a non-empty string',
+         );
+      }
+
+      if (
+         header !== null &&
+         header !== requested
+      ) {
+         return protocolHeaderMismatch(
+            'MCP-Protocol-Version must match initialize params.protocolVersion',
+         );
+      }
+      if (
+         typeof metaValue === 'string' &&
+         metaValue !== requested
+      ) {
+         return protocolHeaderMismatch(
+            'params._meta protocolVersion must match initialize params.protocolVersion',
+         );
+      }
+
+      // The 2026-07-28 era has no initialize handshake.
+      if (requested === MODERN_PROTOCOL_VERSION) {
+         return protocolInvalidParams(
+            'initialize is only valid for supported legacy protocol versions',
+         );
+      }
+
+      if (!LEGACY_PROTOCOL_VERSIONS.has(requested)) {
+         return {
+            modern: false,
+            error: {
+               code: -32602,
+               message:
+                  `Unsupported initialize protocolVersion. Supported legacy versions: ${[...LEGACY_PROTOCOL_VERSIONS].join(', ')}`,
+            },
+         };
+      }
+
+      return { modern: false };
+   }
+
+   const modern =
+      message.method === 'server/discover' ||
+      header === MODERN_PROTOCOL_VERSION ||
+      metaValue === MODERN_PROTOCOL_VERSION;
+
+   if (
+      modern &&
+      ((header !== null && header !== MODERN_PROTOCOL_VERSION) ||
+         (typeof metaValue === 'string' &&
+            metaValue !== MODERN_PROTOCOL_VERSION))
+   ) {
+      return protocolHeaderMismatch(
+         'Modern MCP requests must use one consistent modern protocol version',
+      );
+   }
+
+   return { modern };
 }
 
-function isModernRequest(request: Request, message: JsonRpcRequest): boolean {
-   if (message.method === 'server/discover') return true;
+function unsupportedProtocolVersion(
+   requested: string,
+): ProtocolValidationResult {
+   return {
+      modern: false,
+      error: {
+         code: -32022,
+         message: 'Unsupported protocol version',
+         data: {
+            supported: [...SUPPORTED_PROTOCOL_VERSIONS],
+            requested,
+         },
+      },
+   };
+}
 
-   const header = request.headers.get('mcp-protocol-version');
-   if (header === MODERN_PROTOCOL_VERSION) return true;
+function protocolHeaderMismatch(
+   message: string,
+): ProtocolValidationResult {
+   return {
+      modern: false,
+      error: {
+         code: -32020,
+         message,
+      },
+   };
+}
 
-   const params = asObject(message.params);
-   const meta = asObject(params?._meta);
-   return (
-      meta?.['io.modelcontextprotocol/protocolVersion'] ===
-      MODERN_PROTOCOL_VERSION
-   );
+function protocolInvalidParams(
+   message: string,
+): ProtocolValidationResult {
+   return {
+      modern: false,
+      error: {
+         code: -32602,
+         message,
+      },
+   };
 }
 
 function validateModernHeaders(
@@ -637,11 +826,23 @@ function validateModernHeaders(
 
    const params = asObject(message.params);
    const meta = asObject(params?._meta);
+   if (!params || !meta) {
+      return 'Modern MCP requests require object params._meta';
+   }
    if (
-      meta?.['io.modelcontextprotocol/protocolVersion'] !==
+      meta['io.modelcontextprotocol/protocolVersion'] !==
       MODERN_PROTOCOL_VERSION
    ) {
       return `params._meta.io.modelcontextprotocol/protocolVersion must be ${MODERN_PROTOCOL_VERSION}`;
+   }
+   if (
+      Object.prototype.hasOwnProperty.call(
+         meta,
+         'io.modelcontextprotocol/clientCapabilities',
+      ) &&
+      !asObject(meta['io.modelcontextprotocol/clientCapabilities'])
+   ) {
+      return 'params._meta.io.modelcontextprotocol/clientCapabilities must be an object';
    }
 
    if (message.method === 'tools/call') {
@@ -729,12 +930,17 @@ function jsonRpcHttpError(
    code: number,
    message: string,
    status: number,
+   data?: Record<string, unknown>,
 ): Response {
    return new Response(
       JSON.stringify({
          jsonrpc: '2.0',
          id,
-         error: { code, message },
+         error: {
+            code,
+            message,
+            ...(data === undefined ? {} : { data }),
+         },
       }),
       {
          status,
@@ -750,10 +956,22 @@ function utf8Bytes(value: string): number {
    return Buffer.byteLength(value, 'utf8');
 }
 
-function normalizeId(value: unknown): JsonRpcId {
-   return typeof value === 'string' || typeof value === 'number'
-      ? value
-      : null;
+function notificationHttpError(status: number): Response {
+   return new Response(null, {
+      status,
+      headers: { 'cache-control': 'no-store' },
+   });
+}
+
+function isValidRequestId(value: unknown): value is string | number {
+   if (typeof value === 'string') {
+      return (
+         value.length > 0 &&
+         utf8Bytes(value) <= MAX_JSON_RPC_ID_BYTES
+      );
+   }
+
+   return typeof value === 'number' && Number.isSafeInteger(value);
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {

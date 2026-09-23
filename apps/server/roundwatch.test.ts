@@ -656,9 +656,28 @@ test('MCP rejects unsupported and conflicting protocol-version signals', async (
          }),
       });
       assert.equal(unsupportedHeader.status, 400);
-      assert.match(
-         await unsupportedHeader.text(),
-         /Unsupported MCP-Protocol-Version/,
+      const unsupportedBody = await unsupportedHeader.json() as {
+         error?: {
+            code?: number;
+            message?: string;
+            data?: {
+               requested?: string;
+               supported?: string[];
+            };
+         };
+      };
+      assert.equal(unsupportedBody.error?.code, -32022);
+      assert.equal(
+         unsupportedBody.error?.message,
+         'Unsupported protocol version',
+      );
+      assert.equal(
+         unsupportedBody.error?.data?.requested,
+         '2099-01-01',
+      );
+      assert.deepEqual(
+         new Set(unsupportedBody.error?.data?.supported),
+         new Set(['2026-07-28', '2025-11-25', '2025-06-18']),
       );
 
       const conflicting = await app.request('/mcp', {
@@ -680,10 +699,243 @@ test('MCP rejects unsupported and conflicting protocol-version signals', async (
          }),
       });
       assert.equal(conflicting.status, 400);
+      const conflictingBody = await conflicting.json() as {
+         error?: { code?: number; message?: string };
+      };
+      assert.equal(conflictingBody.error?.code, -32020);
       assert.match(
-         await conflicting.text(),
+         conflictingBody.error?.message ?? '',
          /protocol-version signals disagree/,
       );
+   } finally {
+      store.close();
+   }
+});
+
+test('MCP rejects permissive envelope, negotiation, and tool-schema fallbacks', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const noIdPing = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'ping',
+         }),
+      });
+      assert.equal(noIdPing.status, 202);
+      assert.equal(await noIdPing.text(), '');
+
+      const objectId = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: { bad: true },
+            method: 'ping',
+         }),
+      });
+      assert.equal(objectId.status, 400);
+      const objectIdBody = await objectId.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(objectIdBody.error?.code, -32600);
+
+      const arrayArguments = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 60,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.service_info',
+               arguments: [],
+            },
+         }),
+      });
+      assert.equal(arrayArguments.status, 400);
+      const arrayArgumentsBody = await arrayArguments.json() as {
+         error?: { code?: number; message?: string };
+      };
+      assert.equal(arrayArgumentsBody.error?.code, -32602);
+      assert.match(
+         arrayArgumentsBody.error?.message ?? '',
+         /arguments must be an object/,
+      );
+
+      const extraWatchArgument = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 61,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.get_watch',
+               arguments: {
+                  watchId:
+                     '00000000-0000-0000-0000-000000000000',
+                  extra: true,
+               },
+            },
+         }),
+      });
+      assert.equal(extraWatchArgument.status, 400);
+      const extraBody = await extraWatchArgument.json() as {
+         error?: { code?: number; message?: string };
+      };
+      assert.equal(extraBody.error?.code, -32602);
+      assert.match(
+         extraBody.error?.message ?? '',
+         /exactly one argument/,
+      );
+      assert.doesNotMatch(
+         extraBody.error?.message ?? '',
+         /Watch not found/,
+      );
+
+      const routedNotification = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+            'mcp-method': 'tools/call',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'notifications/initialized',
+         }),
+      });
+      assert.equal(routedNotification.status, 400);
+      assert.equal(await routedNotification.text(), '');
+
+      const legacyHeaderConflict = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2025-06-18',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 62,
+            method: 'initialize',
+            params: {
+               protocolVersion: '2025-11-25',
+               capabilities: {},
+               clientInfo: {
+                  name: 'legacy-conflict',
+                  version: '1',
+               },
+            },
+         }),
+      });
+      assert.equal(legacyHeaderConflict.status, 400);
+      const legacyConflictBody = await legacyHeaderConflict.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(legacyConflictBody.error?.code, -32020);
+
+      const modernLegacyConflict = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 63,
+            method: 'initialize',
+            params: {
+               protocolVersion: '2025-11-25',
+               capabilities: {},
+               clientInfo: {
+                  name: 'modern-legacy-conflict',
+                  version: '1',
+               },
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion':
+                     '2026-07-28',
+               },
+            },
+         }),
+      });
+      assert.equal(modernLegacyConflict.status, 400);
+      const modernLegacyBody = await modernLegacyConflict.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(modernLegacyBody.error?.code, -32020);
+
+      const malformedMeta = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 64,
+            method: 'ping',
+            params: { _meta: [] },
+         }),
+      });
+      assert.equal(malformedMeta.status, 400);
+      const malformedMetaBody = await malformedMeta.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(malformedMetaBody.error?.code, -32602);
+
+      const arrayParams = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 65,
+            method: 'ping',
+            params: [],
+         }),
+      });
+      assert.equal(arrayParams.status, 400);
+      const arrayParamsBody = await arrayParams.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(arrayParamsBody.error?.code, -32602);
+
+      const emptyVersion = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 66,
+            method: 'ping',
+         }),
+      });
+      assert.equal(emptyVersion.status, 400);
+      const emptyVersionBody = await emptyVersion.json() as {
+         error?: {
+            code?: number;
+            data?: { requested?: string };
+         };
+      };
+      assert.equal(emptyVersionBody.error?.code, -32022);
+      assert.equal(emptyVersionBody.error?.data?.requested, '');
    } finally {
       store.close();
    }
@@ -1834,9 +2086,178 @@ test('recovery lookup refuses non-active obligations without exposing a watch ID
       const body = await response.json() as {
          state?: string;
          watchId?: string;
+         recovery?: {
+            retryable?: boolean;
+            terminal?: boolean;
+            reason?: string;
+            nextAction?: string;
+         };
       };
       assert.equal(body.state, 'settlement_pending');
       assert.equal(body.watchId, undefined);
+      assert.equal(body.recovery?.retryable, true);
+      assert.equal(body.recovery?.terminal, false);
+      assert.equal(
+         body.recovery?.reason,
+         'settlement_reconciliation_pending',
+      );
+      assert.equal(
+         body.recovery?.nextAction,
+         'retry_recovery_later',
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('recovery lookup distinguishes retryable from terminal settlement reconciliation without disclosing watch ID', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const watch = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'recovery-terminal-distinction',
+         },
+         intent('RECOVERY_TERMINAL_DISTINCTION_TX'),
+      ).watch;
+      store.markSettlementUnknown(watch.id);
+
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+      });
+
+      const recoveryRequest = () =>
+         app.request('/spike/watch/recover', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+               idempotencyKey: 'recovery-terminal-distinction',
+               expectedSender: SPEC.expectedSender,
+               expectedReceiver: SPEC.expectedReceiver,
+               atomicAmount: SPEC.atomicAmount,
+               invoiceNote: SPEC.invoiceNote,
+               servicePayer: PAYER,
+            }),
+         });
+
+      const retryable = await recoveryRequest();
+      assert.equal(retryable.status, 409);
+      assert.equal(retryable.headers.get('cache-control'), 'no-store');
+      const retryableBody = await retryable.json() as {
+         state?: string;
+         watchId?: string;
+         recovery?: {
+            retryable?: boolean;
+            terminal?: boolean;
+            reason?: string;
+            nextAction?: string;
+         };
+      };
+      assert.equal(retryableBody.state, 'settlement_unknown');
+      assert.equal(retryableBody.watchId, undefined);
+      assert.equal(retryableBody.recovery?.retryable, true);
+      assert.equal(retryableBody.recovery?.terminal, false);
+      assert.equal(
+         retryableBody.recovery?.reason,
+         'settlement_reconciliation_pending',
+      );
+      assert.equal(
+         retryableBody.recovery?.nextAction,
+         'retry_recovery_later',
+      );
+
+      store.markSettlementInvalid(watch.id);
+
+      const terminal = await recoveryRequest();
+      assert.equal(terminal.status, 409);
+      assert.equal(terminal.headers.get('cache-control'), 'no-store');
+      const terminalBody = await terminal.json() as {
+         state?: string;
+         watchId?: string;
+         recovery?: {
+            retryable?: boolean;
+            terminal?: boolean;
+            reason?: string;
+            nextAction?: string;
+         };
+      };
+      assert.equal(terminalBody.state, 'settlement_unknown');
+      assert.equal(terminalBody.watchId, undefined);
+      assert.equal(terminalBody.recovery?.retryable, false);
+      assert.equal(terminalBody.recovery?.terminal, true);
+      assert.equal(
+         terminalBody.recovery?.reason,
+         'settlement_reconciliation_terminal',
+      );
+      assert.equal(
+         terminalBody.recovery?.nextAction,
+         'retain_checkpoint_and_investigate',
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('free recovery lookup has independent bounded admission before body parsing', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+         recoveryRequestGateOptions: {
+            requestsPerSecond: 0.001,
+            burst: 1,
+            concurrency: 1,
+         },
+      });
+
+      const body = JSON.stringify({
+         idempotencyKey: 'bounded-recovery-missing',
+         expectedSender: SPEC.expectedSender,
+         expectedReceiver: SPEC.expectedReceiver,
+         atomicAmount: SPEC.atomicAmount,
+         invoiceNote: SPEC.invoiceNote,
+         servicePayer: PAYER,
+      });
+
+      const first = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body,
+      });
+      assert.equal(first.status, 404);
+
+      const second = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body,
+      });
+      assert.equal(second.status, 429);
+      assert.equal(second.headers.get('retry-after'), '1');
+      const secondBody = await second.json() as { code?: string };
+      assert.equal(
+         secondBody.code,
+         'watch_recovery_rate_limited',
+      );
    } finally {
       store.close();
    }
@@ -2741,6 +3162,76 @@ test('Indexer bounds response bytes and continuation-token memory before state c
    await assert.rejects(
       tokenIndexer.searchWatchPage(watch, 10, 20),
       /next-token exceeds 4096 byte limit/,
+   );
+});
+
+test('Indexer cancels every unconsumed response body on early exits', async () => {
+   const cancellations: string[] = [];
+   const trackedResponse = (
+      label: string,
+      status: number,
+      contentLength: number,
+   ) =>
+      new Response(
+         new ReadableStream<Uint8Array>({
+            start() {
+               // Leave the stream open so cancellation is observable.
+            },
+            cancel() {
+               cancellations.push(label);
+            },
+         }),
+         {
+            status,
+            headers: {
+               'content-type': 'application/json',
+               'content-length': String(contentLength),
+            },
+         },
+      );
+
+   const responses = [
+      trackedResponse('declared-oversize', 200, 65),
+      trackedResponse('not-found', 404, 16),
+      trackedResponse('non-ok', 503, 16),
+   ];
+
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () => responses.shift()!,
+      1_000,
+      undefined,
+      'A',
+      64,
+   );
+
+   await assert.rejects(
+      indexer.searchWatchPage(watchRecord({}), 10, 20),
+      /response exceeded 64 byte limit/,
+   );
+   assert.deepEqual(cancellations, ['declared-oversize']);
+
+   assert.equal(
+      await indexer.lookupAssetTransfer('MISSING'),
+      undefined,
+   );
+   assert.deepEqual(
+      cancellations,
+      ['declared-oversize', 'not-found'],
+   );
+
+   await assert.rejects(
+      indexer.getCurrentRound('health'),
+      /failed with HTTP 503/,
+   );
+   assert.deepEqual(
+      cancellations,
+      ['declared-oversize', 'not-found', 'non-ok'],
    );
 });
 
