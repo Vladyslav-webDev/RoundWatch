@@ -214,7 +214,7 @@ A transaction matches only when all configured properties agree:
 - atomic amount; and
 - invoice note, when the request supplied one.
 
-Only confirmed **top-level direct** asset transfers strictly after the confirmed service-payment round are considered; same-round invoice transfers remain excluded. Sender, receiver, ASA, atomic amount, and optional note must match, and the transaction block time must be strictly before the creation-based deadline. Inner transactions, clawback transfers, and asset close-out transfers are explicitly outside the current RoundWatch matching contract and do not count as invoice payments. Processing time does not affect eligibility.
+Only confirmed **top-level direct** asset transfers strictly after the confirmed service-payment round are considered. The exact eligibility boundaries are `confirmed-round > activationRound` and `round-time < expiresAt`: a same-round invoice is ineligible, and a block timestamp exactly equal to the deadline is also ineligible. Sender, receiver, ASA, atomic amount, and optional note must match. Inner transactions, clawback transfers, and asset close-out transfers are explicitly outside the current RoundWatch matching contract and do not count as invoice payments. Processing time does not affect eligibility.
 
 ## x402 payment and recovery
 
@@ -258,6 +258,7 @@ ROUNDWATCH_SCAN_ROUND_WINDOW=100
 ROUNDWATCH_SCAN_PAGE_CACHE_ENTRIES=16
 ROUNDWATCH_SCAN_PAGE_CACHE_BYTES=8388608
 ROUNDWATCH_SCAN_QUERY_VARIANT=C
+ROUNDWATCH_MIN_FREE_DISK_BYTES=67108864
 PORT=4021
 ```
 
@@ -271,12 +272,13 @@ Free checks:
 
 ```bash
 curl -i http://localhost:4021/health
+curl -i http://localhost:4021/ready
 curl -i -X POST http://localhost:4021/spike/watch \
   -H "content-type: application/json" \
   --data '{"idempotencyKey":"local-invoice-001","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-The second request should return HTTP `402` before any payment. The server's default local route is `/spike/watch`, not the production `/v1/watch` route.
+The readiness request must return HTTP `200` before a paid watch can be admitted. It is backed by a cached SQLite write/rollback probe, poller and reconciler progress/error freshness in production, and a filesystem free-space floor. A non-ready service returns HTTP `503` from watch creation before x402 verification. The final request should return HTTP `402` before any payment. The server's default local route is `/spike/watch`, not the production `/v1/watch` route.
 
 Paid TestNet utilities use `apps/client/.env` and keep signing in the client process. Never use a funded MainNet mnemonic for local development and never commit an `.env` file. The automated test suite does not require a wallet or make payments.
 
