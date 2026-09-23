@@ -451,6 +451,7 @@ function serviceInfo(dependencies: McpDependencies) {
       },
       limitations: [
          'RoundWatch is for future payments whose transaction ID does not exist yet.',
+         'Only top-level direct Algorand USDC asset transfers are eligible matches; inner, clawback, and asset close-out transfers are excluded.',
          'RoundWatch is not a webhook delivery service.',
          'The MCP prepare tool does not sign or settle x402 payments.',
       ],
