@@ -3165,6 +3165,76 @@ test('Indexer bounds response bytes and continuation-token memory before state c
    );
 });
 
+test('Indexer cancels every unconsumed response body on early exits', async () => {
+   const cancellations: string[] = [];
+   const trackedResponse = (
+      label: string,
+      status: number,
+      contentLength: number,
+   ) =>
+      new Response(
+         new ReadableStream<Uint8Array>({
+            start() {
+               // Leave the stream open so cancellation is observable.
+            },
+            cancel() {
+               cancellations.push(label);
+            },
+         }),
+         {
+            status,
+            headers: {
+               'content-type': 'application/json',
+               'content-length': String(contentLength),
+            },
+         },
+      );
+
+   const responses = [
+      trackedResponse('declared-oversize', 200, 65),
+      trackedResponse('not-found', 404, 16),
+      trackedResponse('non-ok', 503, 16),
+   ];
+
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () => responses.shift()!,
+      1_000,
+      undefined,
+      'A',
+      64,
+   );
+
+   await assert.rejects(
+      indexer.searchWatchPage(watchRecord({}), 10, 20),
+      /response exceeded 64 byte limit/,
+   );
+   assert.deepEqual(cancellations, ['declared-oversize']);
+
+   assert.equal(
+      await indexer.lookupAssetTransfer('MISSING'),
+      undefined,
+   );
+   assert.deepEqual(
+      cancellations,
+      ['declared-oversize', 'not-found'],
+   );
+
+   await assert.rejects(
+      indexer.getCurrentRound('health'),
+      /failed with HTTP 503/,
+   );
+   assert.deepEqual(
+      cancellations,
+      ['declared-oversize', 'not-found', 'non-ok'],
+   );
+});
+
 test('Indexer rejects responses that violate requested filters and disables redirects', async () => {
    const wrongSender = {
       ...rawTx(11),
