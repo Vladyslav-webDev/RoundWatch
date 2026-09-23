@@ -136,12 +136,19 @@ async function startWatch(
    account: algosdk.Account,
    sender: string,
 ): Promise<ReadyMainnetCheckpoint> {
-   const health = await fetch(`${serverUrl}/health`);
-   const healthBody = await health.json() as { status?: string; network?: string };
+   const readiness = await fetch(`${serverUrl}/ready`);
+   const readinessBody = await readiness.json() as {
+      status?: string;
+      network?: string;
+   };
 
-   if (!health.ok || healthBody.status !== 'ok' || healthBody.network !== 'mainnet') {
+   if (
+      !readiness.ok ||
+      readinessBody.status !== 'ready' ||
+      readinessBody.network !== 'mainnet'
+   ) {
       throw new Error(
-         `Production health preflight failed: HTTP ${health.status}; network=${healthBody.network ?? 'unknown'}`,
+         `Production readiness preflight failed: HTTP ${readiness.status}; network=${readinessBody.network ?? 'unknown'}`,
       );
    }
 
