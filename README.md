@@ -186,7 +186,7 @@ A transaction matches only when all configured properties agree:
 - atomic amount; and
 - invoice note, when the request supplied one.
 
-Only confirmed asset transfers strictly after the confirmed service-payment round are considered; same-round invoice transfers remain excluded. Sender, receiver, ASA, atomic amount, and optional note must match, and the transaction block time must be strictly before the creation-based deadline. Processing time does not affect eligibility.
+Only confirmed **top-level direct** asset transfers strictly after the confirmed service-payment round are considered; same-round invoice transfers remain excluded. Sender, receiver, ASA, atomic amount, and optional note must match, and the transaction block time must be strictly before the creation-based deadline. Inner transactions, clawback transfers, and asset close-out transfers are explicitly outside the current RoundWatch matching contract and do not count as invoice payments. Processing time does not affect eligibility.
 
 ## x402 payment and recovery
 
