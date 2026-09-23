@@ -258,7 +258,7 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
       assert.match(body, /GET \/v1\/watch\/\{id\}/);
       assert.match(body, /Readiness: .*\/ready/);
       assert.match(body, /1800000 ms/);
-      assert.match(body, /settlement delay therefore consumes part/i);
+      assert.match(body, /settlement time consumes (?:part of )?(?:this |the )?window/i);
       assert.match(
          body,
          /confirmed-round must be strictly greater than activationRound/i,
