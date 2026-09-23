@@ -79,7 +79,7 @@ An active watch has a safe `scanAfterRound` baseline. RoundWatch considers only 
 
 Inner asset transfers, clawback transfers (`asset-transfer-transaction.sender`), and asset close-out transfers (`close-to`) are outside the RoundWatch payment contract and never count as a match. Indexer search may return a parent transaction when an inner transaction satisfies the query; structurally valid parent results are therefore ignored deliberately instead of being misclassified as direct payments. Search requests also set `exclude-close-to=true` so close destinations are not treated as ordinary receivers.
 
-The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer HTTP response body is capped at 8 MiB before JSON parsing, and continuation tokens are capped at 4 KiB before they can enter pagination/session state. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage. A malformed envelope, oversized body/token, or unexplained non-`axfer` result fails closed and cannot advance coverage.
+The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer HTTP response body is capped at 8 MiB before JSON parsing, and continuation tokens are capped at 4 KiB before they can enter pagination/session state. Declared-oversize, allowed-404, and other non-OK responses explicitly cancel any unconsumed body before the dispatcher slot is released; streamed overflow already cancels its reader. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage. A malformed envelope, oversized body/token, or unexplained non-`axfer` result fails closed and cannot advance coverage.
 
 If any page, checkpoint, or watermark validation fails, the cursor is not advanced. Pagination tokens are process-local; restart replays the unfinished finite round window. Conditional cursor updates prevent stale work from moving coverage backward or skipping a range.
 
@@ -110,7 +110,7 @@ The repository's MainNet runner is deliberately narrow:
 - it checks the unpaid x402 preflight and independently revalidates the fresh challenge selected at the actual payment-creation boundary for resource URL, exact scheme, MainNet CAIP-2, amount, asset, payee, challenge tag, and authorization flow before signing;
 - it caps the x402 client itself at the approved `0.02 USDC` service spend;
 - it refuses to start a second paid watch while its checkpoint exists;
-- `recover` uses a free existing-watch lookup, does not load a wallet signer, and cannot create or settle a new watch; and
+- `recover` uses a free existing-watch lookup, does not load a wallet signer, and cannot create or settle a new watch; exact unresolved matches return explicit retryable/terminal reconciliation metadata without disclosing a watch ID; and
 - only modes that can spend (`start` and `pay`) require `--confirm-mainnet`. `status` and `recover` are non-spending.
 
 This runner is for explicitly authorized evidence collection, not routine health checking or CI. Automated tests use synthetic data and must never make MainNet payments.
@@ -126,6 +126,8 @@ This runner is for explicitly authorized evidence collection, not routine health
 - Algorand transfers and public addresses are already public, but an invoice note can add application-specific information. Do not place confidential or personal data in it.
 - There is no cancellation or deletion API. The documented challenge-release retention policy is to keep terminal rows until deliberate operator maintenance; a finite commercial retention/deletion policy remains future work.
 - Polling isolates individual failures but remains sequential within one process; this does not establish capacity for arbitrary load.
+- Anonymous MCP and free recovery POSTs have independent process-local rate/concurrency admission before body parsing. Body byte caps remain separate from upstream/proxy connection timeouts.
+- MCP dispatch rejects malformed request IDs/params/_meta, conflicting version signals, unsupported explicit versions, and tool arguments that violate the advertised object schemas. Modern unsupported-version requests use MCP error code `-32022` with requested/supported version data; JSON-RPC notifications never receive a JSON-RPC result body.
 
 ## Operational rules
 
