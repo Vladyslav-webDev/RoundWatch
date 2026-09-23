@@ -7,6 +7,7 @@ interface MachineReadableDocsOptions {
    servicePriceUsd: string;
    serviceAtomicAmount: string;
    workUnitBudget: number;
+   watchTtlMilliseconds: number;
    watchPath: string;
 }
 
@@ -26,6 +27,7 @@ export function buildOpenApiDocument(
       servicePriceUsd,
       serviceAtomicAmount,
       workUnitBudget,
+      watchTtlMilliseconds,
       watchPath,
    } = options;
 
@@ -90,14 +92,47 @@ export function buildOpenApiDocument(
             get: {
                tags: ['Service'],
                operationId: 'getHealth',
-               summary: 'Check RoundWatch service health',
+               summary: 'Check RoundWatch process liveness',
+               description:
+                  'Liveness only. A 200 response does not claim that durable storage and background workers are ready to accept paid obligations.',
                responses: {
                   '200': {
-                     description: 'Service is healthy.',
+                     description: 'The HTTP process is alive.',
                      content: {
                         'application/json': {
                            schema: {
                               $ref: '#/components/schemas/HealthResponse',
+                           },
+                        },
+                     },
+                  },
+               },
+            },
+         },
+         '/ready': {
+            get: {
+               tags: ['Service'],
+               operationId: 'getReadiness',
+               summary: 'Check durable-service readiness',
+               description:
+                  'Readiness checks local durable storage and production worker startup state. Use this endpoint before directing paid traffic.',
+               responses: {
+                  '200': {
+                     description: 'RoundWatch is ready to accept paid obligations.',
+                     content: {
+                        'application/json': {
+                           schema: {
+                              $ref: '#/components/schemas/ReadinessResponse',
+                           },
+                        },
+                     },
+                  },
+                  '503': {
+                     description: 'The process is alive but the durable service is not ready.',
+                     content: {
+                        'application/json': {
+                           schema: {
+                              $ref: '#/components/schemas/ReadinessResponse',
                            },
                         },
                      },
@@ -111,7 +146,7 @@ export function buildOpenApiDocument(
                operationId: 'createWatch',
                summary: 'Create a durable watch for one exact future USDC payment',
                description:
-                  'Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.',
+                  `Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. The service contract includes a ${watchTtlMilliseconds} ms creation-based eligibility window and a ${workUnitBudget}-turn work budget before payment. The eligibility clock starts when the durable watch is prepared, before x402 settlement completes. An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.`,
                'x-x402': x402Contract,
                requestBody: {
                   required: true,
@@ -266,15 +301,40 @@ export function buildOpenApiDocument(
             HealthResponse: {
                type: 'object',
                additionalProperties: false,
-               required: ['status', 'network'],
+               required: ['status', 'purpose', 'network'],
                properties: {
                   status: {
                      type: 'string',
                      const: 'ok',
                   },
+                  purpose: {
+                     type: 'string',
+                     const: 'liveness',
+                  },
                   network: {
                      type: 'string',
                      enum: ['mainnet', 'testnet'],
+                  },
+               },
+            },
+            ReadinessResponse: {
+               type: 'object',
+               additionalProperties: false,
+               required: ['status', 'network', 'checks'],
+               properties: {
+                  status: {
+                     type: 'string',
+                     enum: ['ready', 'not_ready'],
+                  },
+                  network: {
+                     type: 'string',
+                     enum: ['mainnet', 'testnet'],
+                  },
+                  checks: {
+                     type: 'object',
+                     additionalProperties: {
+                        type: 'boolean',
+                     },
                   },
                },
             },
@@ -327,7 +387,13 @@ export function buildOpenApiDocument(
             CreateWatchResponse: {
                type: 'object',
                additionalProperties: false,
-               required: ['watchId', 'workUnitBudget', 'message'],
+               required: [
+                  'watchId',
+                  'workUnitBudget',
+                  'eligibilityTtlMs',
+                  'expiresAt',
+                  'message',
+               ],
                properties: {
                   watchId: {
                      type: 'string',
@@ -337,6 +403,19 @@ export function buildOpenApiDocument(
                      type: 'integer',
                      minimum: 1,
                      example: workUnitBudget,
+                  },
+                  eligibilityTtlMs: {
+                     type: 'integer',
+                     minimum: 1,
+                     example: watchTtlMilliseconds,
+                     description:
+                        'Creation-based eligibility window in milliseconds, disclosed before purchase.',
+                  },
+                  expiresAt: {
+                     type: 'string',
+                     format: 'date-time',
+                     description:
+                        'Exact eligibility deadline persisted when the durable watch is prepared.',
                   },
                   message: {
                      type: 'string',
@@ -442,6 +521,11 @@ export function buildOpenApiDocument(
                      type: 'integer',
                      minimum: 0,
                   },
+                  settlementReconciliationTerminal: {
+                     type: 'boolean',
+                     description:
+                        'True when settlement reconciliation has reached a final fail-closed outcome and will not retry.',
+                  },
                   terminalReason: {
                      type: 'string',
                      enum: ['work_budget_exhausted'],
@@ -480,6 +564,7 @@ export function buildLlmsTxt(options: MachineReadableDocsOptions): string {
       servicePriceUsd,
       serviceAtomicAmount,
       workUnitBudget,
+      watchTtlMilliseconds,
       watchPath,
    } = options;
    const base = publicBaseUrl ?? '';
@@ -512,6 +597,7 @@ RoundWatch lets a short-lived agent or service define an expected payment, pay o
 - Read watch: GET ${watchPath}/{id}
 - Service price: ${servicePriceUsd} USDC (${serviceAtomicAmount} atomic units)
 - Service receiver: ${serviceReceiver}
+- Eligibility window: ${watchTtlMilliseconds} ms from durable watch preparation; settlement time consumes part of this window
 - Work budget: ${workUnitBudget} durable background turns per watch
 - x402 version: 2
 - x402 scheme: exact
@@ -523,7 +609,8 @@ The x402 payment buys the RoundWatch monitoring service. It is separate from the
 - OpenAPI: ${base}/openapi.json
 - LLM instructions: ${base}/llms.txt
 - MCP Streamable HTTP: ${base}/mcp
-- Health: ${base}/health
+- Liveness: ${base}/health
+- Readiness: ${base}/ready
 - API root: ${base || '/'}
 - GitHub: ${GITHUB_URL}
 
@@ -537,6 +624,6 @@ The MCP server exposes read-only discovery and status tools plus a preparation t
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. The eligibility clock starts when the durable obligation is prepared before x402 settlement; settlement delay therefore consumes part of the advertised eligibility window. A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }
