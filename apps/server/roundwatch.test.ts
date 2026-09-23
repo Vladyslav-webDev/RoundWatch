@@ -3013,8 +3013,6 @@ function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
       expiresAt: '2026-09-18T10:00:00Z',
       evidenceVersion: 1,
       reconciliationAttempts: 0,
-      settlementReconciliationTerminal:
-         overrides.settlementReconciliationTerminal ?? false,
       workUnitBudget: 500,
       workUnitsUsed: 0,
       ...overrides,
