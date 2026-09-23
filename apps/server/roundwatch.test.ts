@@ -656,9 +656,28 @@ test('MCP rejects unsupported and conflicting protocol-version signals', async (
          }),
       });
       assert.equal(unsupportedHeader.status, 400);
-      assert.match(
-         await unsupportedHeader.text(),
-         /Unsupported MCP-Protocol-Version/,
+      const unsupportedBody = await unsupportedHeader.json() as {
+         error?: {
+            code?: number;
+            message?: string;
+            data?: {
+               requested?: string;
+               supported?: string[];
+            };
+         };
+      };
+      assert.equal(unsupportedBody.error?.code, -32022);
+      assert.equal(
+         unsupportedBody.error?.message,
+         'Unsupported protocol version',
+      );
+      assert.equal(
+         unsupportedBody.error?.data?.requested,
+         '2099-01-01',
+      );
+      assert.deepEqual(
+         new Set(unsupportedBody.error?.data?.supported),
+         new Set(['2026-07-28', '2025-11-25', '2025-06-18']),
       );
 
       const conflicting = await app.request('/mcp', {
@@ -680,10 +699,243 @@ test('MCP rejects unsupported and conflicting protocol-version signals', async (
          }),
       });
       assert.equal(conflicting.status, 400);
+      const conflictingBody = await conflicting.json() as {
+         error?: { code?: number; message?: string };
+      };
+      assert.equal(conflictingBody.error?.code, -32020);
       assert.match(
-         await conflicting.text(),
+         conflictingBody.error?.message ?? '',
          /protocol-version signals disagree/,
       );
+   } finally {
+      store.close();
+   }
+});
+
+test('MCP rejects permissive envelope, negotiation, and tool-schema fallbacks', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      const noIdPing = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'ping',
+         }),
+      });
+      assert.equal(noIdPing.status, 202);
+      assert.equal(await noIdPing.text(), '');
+
+      const objectId = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: { bad: true },
+            method: 'ping',
+         }),
+      });
+      assert.equal(objectId.status, 400);
+      const objectIdBody = await objectId.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(objectIdBody.error?.code, -32600);
+
+      const arrayArguments = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 60,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.service_info',
+               arguments: [],
+            },
+         }),
+      });
+      assert.equal(arrayArguments.status, 400);
+      const arrayArgumentsBody = await arrayArguments.json() as {
+         error?: { code?: number; message?: string };
+      };
+      assert.equal(arrayArgumentsBody.error?.code, -32602);
+      assert.match(
+         arrayArgumentsBody.error?.message ?? '',
+         /arguments must be an object/,
+      );
+
+      const extraWatchArgument = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 61,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.get_watch',
+               arguments: {
+                  watchId:
+                     '00000000-0000-0000-0000-000000000000',
+                  extra: true,
+               },
+            },
+         }),
+      });
+      assert.equal(extraWatchArgument.status, 400);
+      const extraBody = await extraWatchArgument.json() as {
+         error?: { code?: number; message?: string };
+      };
+      assert.equal(extraBody.error?.code, -32602);
+      assert.match(
+         extraBody.error?.message ?? '',
+         /exactly one argument/,
+      );
+      assert.doesNotMatch(
+         extraBody.error?.message ?? '',
+         /Watch not found/,
+      );
+
+      const routedNotification = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+            'mcp-method': 'tools/call',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'notifications/initialized',
+         }),
+      });
+      assert.equal(routedNotification.status, 400);
+      assert.equal(await routedNotification.text(), '');
+
+      const legacyHeaderConflict = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2025-06-18',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 62,
+            method: 'initialize',
+            params: {
+               protocolVersion: '2025-11-25',
+               capabilities: {},
+               clientInfo: {
+                  name: 'legacy-conflict',
+                  version: '1',
+               },
+            },
+         }),
+      });
+      assert.equal(legacyHeaderConflict.status, 400);
+      const legacyConflictBody = await legacyHeaderConflict.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(legacyConflictBody.error?.code, -32020);
+
+      const modernLegacyConflict = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 63,
+            method: 'initialize',
+            params: {
+               protocolVersion: '2025-11-25',
+               capabilities: {},
+               clientInfo: {
+                  name: 'modern-legacy-conflict',
+                  version: '1',
+               },
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion':
+                     '2026-07-28',
+               },
+            },
+         }),
+      });
+      assert.equal(modernLegacyConflict.status, 400);
+      const modernLegacyBody = await modernLegacyConflict.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(modernLegacyBody.error?.code, -32020);
+
+      const malformedMeta = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '2026-07-28',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 64,
+            method: 'ping',
+            params: { _meta: [] },
+         }),
+      });
+      assert.equal(malformedMeta.status, 400);
+      const malformedMetaBody = await malformedMeta.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(malformedMetaBody.error?.code, -32602);
+
+      const arrayParams = await app.request('/mcp', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 65,
+            method: 'ping',
+            params: [],
+         }),
+      });
+      assert.equal(arrayParams.status, 400);
+      const arrayParamsBody = await arrayParams.json() as {
+         error?: { code?: number };
+      };
+      assert.equal(arrayParamsBody.error?.code, -32602);
+
+      const emptyVersion = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'mcp-protocol-version': '',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 66,
+            method: 'ping',
+         }),
+      });
+      assert.equal(emptyVersion.status, 400);
+      const emptyVersionBody = await emptyVersion.json() as {
+         error?: {
+            code?: number;
+            data?: { requested?: string };
+         };
+      };
+      assert.equal(emptyVersionBody.error?.code, -32022);
+      assert.equal(emptyVersionBody.error?.data?.requested, '');
    } finally {
       store.close();
    }
