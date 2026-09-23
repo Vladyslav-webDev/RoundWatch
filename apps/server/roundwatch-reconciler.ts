@@ -5,6 +5,10 @@ import {
    IndexerRequestTurnBudget,
    MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN,
 } from './roundwatch-work-budget.js';
+import {
+   WorkerHealthTracker,
+   type WorkerHealthSnapshot,
+} from './roundwatch-worker-health.js';
 
 export interface IndexedAssetTransfer {
    transaction: string;
@@ -53,6 +57,7 @@ export class SettlementReconciler {
    private readonly now: () => Date;
    private readonly baseBackoffMilliseconds: number;
    private readonly maxBackoffMilliseconds: number;
+   private readonly workerHealth = new WorkerHealthTracker();
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -67,13 +72,22 @@ export class SettlementReconciler {
 
    start(): void {
       if (this.timer) return;
+      this.workerHealth.markStarted();
       const run = () => {
-         void this.reconcileOnce().catch(error => {
-            console.error(
-               'RoundWatch settlement reconciliation failed:',
-               safeErrorMessage(error),
-            );
-         });
+         if (this.running) return;
+
+         this.workerHealth.markCycleStarted();
+         void this.reconcileOnce()
+            .then(() => {
+               this.workerHealth.markCycleSucceeded();
+            })
+            .catch(error => {
+               this.workerHealth.markCycleFailed();
+               console.error(
+                  'RoundWatch settlement reconciliation failed:',
+                  safeErrorMessage(error),
+               );
+            });
       };
       run();
       this.timer = setInterval(run, this.config.intervalMilliseconds);
@@ -81,8 +95,19 @@ export class SettlementReconciler {
    }
 
    stop(): void {
+      this.workerHealth.markStopped();
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
+   }
+
+   healthSnapshot(): WorkerHealthSnapshot {
+      return this.workerHealth.snapshot(
+         Math.max(this.config.intervalMilliseconds * 3, 15_000),
+      );
+   }
+
+   readinessCheck(): boolean {
+      return this.healthSnapshot().ready;
    }
 
    async reconcileOnce(): Promise<void> {
