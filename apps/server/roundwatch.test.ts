@@ -993,6 +993,119 @@ test('all paid resources share the signed-payment verification admission gate', 
    }
 });
 
+test('noncanonical paid-route aliases are rejected before x402 verification', async () => {
+   const cases = [
+      {
+         canonical: '/demo',
+         method: 'GET',
+         aliases: ['/DEMO', '/demo/', '/demo//', '//demo'],
+      },
+      {
+         canonical: '/spike/watch',
+         method: 'POST',
+         aliases: [
+            '/SPIKE/WATCH',
+            '/spike/watch/',
+            '/spike/watch//',
+            '//spike///watch//',
+         ],
+      },
+   ] as const;
+
+   for (const route of cases) {
+      const store = new RoundWatchStore(':memory:');
+      const facilitator = new DelayedRejectingFacilitator();
+
+      try {
+         const app = createApp({
+            avmAddress: RECEIVER,
+            facilitatorClient: facilitator,
+            store,
+            indexer: new FakeIndexer(100),
+            signedPaymentGateOptions: {
+               requestsPerSecond: 1_000,
+               burst: 8,
+               concurrency: 1,
+            },
+         });
+
+         const watchBody = JSON.stringify({
+            idempotencyKey: 'alias-gate-regression',
+            expectedSender: PAYER,
+            expectedReceiver: RECEIVER,
+            atomicAmount: '1',
+         });
+         const unpaid = await app.request(route.canonical, {
+            method: route.method,
+            ...(route.method === 'POST'
+               ? {
+                    headers: { 'content-type': 'application/json' },
+                    body: watchBody,
+                 }
+               : {}),
+         });
+         assert.equal(unpaid.status, 402);
+
+         const encoded = unpaid.headers.get('payment-required');
+         assert.ok(encoded);
+         const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+         const paymentHeader = encodePaymentSignatureHeader({
+            x402Version: 2,
+            accepted: required,
+            payload: {
+               paymentGroup: [SIGNED_SERVICE_PAYMENT],
+               paymentIndex: 0,
+            },
+         });
+
+         for (const alias of route.aliases) {
+            const requests = Array.from({ length: 6 }, () =>
+               app.request(alias, {
+                  method: route.method,
+                  headers: {
+                     'payment-signature': paymentHeader,
+                     ...(route.method === 'POST'
+                        ? { 'content-type': 'application/json' }
+                        : {}),
+                  },
+                  ...(route.method === 'POST'
+                     ? { body: watchBody }
+                     : {}),
+               }),
+            );
+
+            const responses = await Promise.all(requests);
+            assert.equal(
+               responses.every(response => response.status === 404),
+               true,
+               `${alias} must be rejected before x402 middleware`,
+            );
+            for (const response of responses) {
+               assert.equal(response.headers.get('payment-required'), null);
+               const body = await response.json() as {
+                  code?: string;
+                  canonicalPath?: string;
+               };
+               assert.equal(
+                  body.code,
+                  'non_canonical_paid_resource_path',
+               );
+               assert.equal(body.canonicalPath, route.canonical);
+            }
+         }
+
+         assert.equal(
+            facilitator.verifyCalls,
+            0,
+            `${route.canonical} aliases must not reach facilitator verification`,
+         );
+         assert.equal(facilitator.peakVerifyCalls, 0);
+      } finally {
+         store.close();
+      }
+   }
+});
+
 test('x402 payment headers are exposed to browser clients and preflight allows payment signatures', async () => {
    const store = new RoundWatchStore(':memory:');
    try {

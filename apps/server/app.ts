@@ -81,6 +81,69 @@ export interface ReadinessSnapshot {
    checks: Record<string, boolean>;
 }
 
+interface PaidResourceMatch {
+   canonicalPath: string;
+   canonical: boolean;
+}
+
+function classifyPaidResourceRequest(
+   method: string,
+   rawUrl: string,
+   frameworkPath: string,
+   watchPath: string,
+): PaidResourceMatch | undefined {
+   const canonicalPath =
+      method.toUpperCase() === 'GET'
+         ? '/demo'
+         : method.toUpperCase() === 'POST'
+           ? watchPath
+           : undefined;
+
+   if (!canonicalPath) return undefined;
+
+   const rawPath = new URL(rawUrl).pathname;
+   const canonicalFolded = canonicalPath.toLowerCase();
+   const x402Equivalent =
+      normalizeX402RawPath(rawPath).toLowerCase() === canonicalFolded ||
+      normalizeX402DecodedPath(frameworkPath).toLowerCase() ===
+         canonicalFolded;
+
+   if (!x402Equivalent) return undefined;
+
+   return {
+      canonicalPath,
+      canonical: frameworkPath === canonicalPath,
+   };
+}
+
+function normalizeX402RawPath(path: string): string {
+   const normalized = path
+      .split(/[?#]/)[0]!
+      .split('/')
+      .map(segment => {
+         let decoded: string;
+         try {
+            decoded = decodeURIComponent(segment);
+         } catch {
+            return segment;
+         }
+
+         return decoded.replace(/\//g, '%2F').replace(/\\/g, '%5C');
+      })
+      .join('/');
+
+   return normalizeX402DecodedPath(normalized);
+}
+
+function normalizeX402DecodedPath(path: string): string {
+   const pathWithoutQuery = path.split(/[?#]/)[0]!;
+   return (
+      pathWithoutQuery
+         .replace(/\/+/g, '/')
+         .replace(/(.+?)\/+$/, '$1') || '/'
+   );
+}
+
 export interface AppDependencies {
    avmAddress: string;
    facilitatorClient: FacilitatorClient;
@@ -529,6 +592,33 @@ export function createApp(dependencies: AppDependencies): Hono {
       }
    });
 
+   // @x402/core intentionally normalizes static resource routes (case,
+   // repeated/trailing slashes and percent-decoded segments). RoundWatch keeps
+   // one canonical public URL per paid resource. Reject any equivalent alias
+   // before body parsing or x402 middleware so no alias can reach facilitator
+   // verification outside the application admission gate.
+   app.use('*', async (c, next) => {
+      const paidResource = classifyPaidResourceRequest(
+         c.req.method,
+         c.req.url,
+         c.req.path,
+         watchPath,
+      );
+
+      if (paidResource && !paidResource.canonical) {
+         return c.json(
+            {
+               error: 'Use the canonical paid resource path',
+               code: 'non_canonical_paid_resource_path',
+               canonicalPath: paidResource.canonicalPath,
+            },
+            404,
+         );
+      }
+
+      await next();
+   });
+
    app.use(watchPath, async (c, next) => {
       if (c.req.method !== 'POST') {
          await next();
@@ -584,11 +674,14 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    app.use('*', async (c, next) => {
-      const isPaidVerificationRoute =
-         (c.req.path === watchPath && c.req.method === 'POST') ||
-         (c.req.path === '/demo' && c.req.method === 'GET');
+      const paidResource = classifyPaidResourceRequest(
+         c.req.method,
+         c.req.url,
+         c.req.path,
+         watchPath,
+      );
 
-      if (!isPaidVerificationRoute) {
+      if (!paidResource?.canonical) {
          await next();
          return;
       }
