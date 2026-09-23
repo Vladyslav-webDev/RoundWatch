@@ -27,6 +27,7 @@ import {
 import {
    AlgorandIndexerClient,
    matchesWatch,
+   MAX_INDEXER_NEXT_TOKEN_BYTES,
    resolveScanQueryVariant,
    type IndexedBlock,
    type IndexedWatchTransaction,
@@ -2070,6 +2071,72 @@ test('Indexer page validation rejects malformed fields, bounds, JSON, and inadeq
       /exceeded requested page limit/,
    );
    await assert.rejects(indexer.searchWatchPage(watch, 10, 20), /valid JSON/);
+});
+
+test('Indexer bounds response bytes and continuation-token memory before state can advance', async () => {
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: 1_000,
+      burst: 10,
+      concurrency: 1,
+   });
+   const smallLimitResponses = [
+      new Response('{}', {
+         status: 200,
+         headers: {
+            'content-type': 'application/json',
+            'content-length': '65',
+         },
+      }),
+      new Response('x'.repeat(65), {
+         status: 200,
+         headers: {
+            'content-type': 'application/json',
+         },
+      }),
+   ];
+   const limited = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      dispatcher,
+      async () => smallLimitResponses.shift()!,
+      1_000,
+      undefined,
+      'A',
+      64,
+   );
+   const watch = watchRecord({});
+
+   await assert.rejects(
+      limited.searchWatchPage(watch, 10, 20),
+      /response exceeded 64 byte limit/,
+   );
+   await assert.rejects(
+      limited.searchWatchPage(watch, 10, 20),
+      /response exceeded 64 byte limit/,
+   );
+
+   const tokenIndexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () =>
+         Response.json({
+            transactions: [],
+            'current-round': 20,
+            'next-token': 't'.repeat(MAX_INDEXER_NEXT_TOKEN_BYTES + 1),
+         }),
+      1_000,
+      undefined,
+      'A',
+      16 * 1024,
+   );
+
+   await assert.rejects(
+      tokenIndexer.searchWatchPage(watch, 10, 20),
+      /next-token exceeds 4096 byte limit/,
+   );
 });
 
 test('Indexer rejects responses that violate requested filters and disables redirects', async () => {
