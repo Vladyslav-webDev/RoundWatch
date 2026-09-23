@@ -123,7 +123,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          purpose,
          `/v2/transactions/${encodeURIComponent(transactionId)}`,
          body => {
-            const parsed = parseAssetTransfer(
+            const parsed = parseDirectAssetTransfer(
                field(body, 'transaction'),
                'lookup transaction',
             );
@@ -422,16 +422,160 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
    }
 }
 
-function parseAssetTransfer(value: unknown, label: string): IndexedAssetTransfer {
+interface ParsedTransactionCommon {
+   transaction?: string;
+   sender: string;
+   round: number;
+   roundTime: number;
+   txType: string;
+   note?: string;
+   record: IndexerTransaction;
+}
+
+interface ParsedAssetTransferEnvelope extends ParsedTransactionCommon {
+   receiver: string;
+   assetId: number;
+   atomicAmount: string;
+   assetSender?: string;
+   closeTo?: string;
+   closeAmount: string;
+}
+
+const MAX_INDEXER_INNER_TRANSACTIONS = 1_000;
+const MAX_INDEXER_INNER_DEPTH = 16;
+
+function parseTransactionCommon(
+   value: unknown,
+   label: string,
+   requireTransactionId: boolean,
+): ParsedTransactionCommon {
    const transaction = record(value, label) as IndexerTransaction;
-   const transfer = record(transaction['asset-transfer-transaction'], `${label} asset transfer`);
+   let transactionId: string | undefined;
+
+   if (requireTransactionId) {
+      transactionId = nonEmptyString(transaction.id, `${label} id`);
+   } else if (transaction.id !== undefined) {
+      transactionId = nonEmptyString(transaction.id, `${label} id`);
+   }
+
+   const note = parseOptionalNote(transaction.note, label);
+
    return {
-      transaction: nonEmptyString(transaction.id, `${label} id`),
+      ...(transactionId === undefined
+         ? {}
+         : { transaction: transactionId }),
       sender: nonEmptyString(transaction.sender, `${label} sender`),
-      receiver: nonEmptyString(transfer.receiver, `${label} receiver`),
-      assetId: safeRound(transfer['asset-id'], `${label} asset-id`),
-      atomicAmount: safeAmount(transfer.amount, `${label} amount`),
-      round: safeRound(transaction['confirmed-round'], `${label} confirmed-round`),
+      round: safeRound(
+         transaction['confirmed-round'],
+         `${label} confirmed-round`,
+      ),
+      roundTime: safeRound(
+         transaction['round-time'],
+         `${label} round-time`,
+      ),
+      txType: nonEmptyString(
+         transaction['tx-type'],
+         `${label} tx-type`,
+      ),
+      ...(note === undefined ? {} : { note }),
+      record: transaction,
+   };
+}
+
+function parseAssetTransferEnvelope(
+   value: unknown,
+   label: string,
+   requireTransactionId: boolean,
+): ParsedAssetTransferEnvelope {
+   const common = parseTransactionCommon(
+      value,
+      label,
+      requireTransactionId,
+   );
+
+   if (common.txType !== 'axfer') {
+      throw new Error(`${label} is not an axfer transaction`);
+   }
+
+   const transfer = record(
+      common.record['asset-transfer-transaction'],
+      `${label} asset transfer`,
+   );
+   const assetSender =
+      transfer.sender === undefined
+         ? undefined
+         : nonEmptyString(transfer.sender, `${label} asset sender`);
+   const closeTo =
+      transfer['close-to'] === undefined
+         ? undefined
+         : nonEmptyString(transfer['close-to'], `${label} close-to`);
+   const closeAmount =
+      transfer['close-amount'] === undefined
+         ? '0'
+         : safeAmount(
+              transfer['close-amount'],
+              `${label} close-amount`,
+           );
+
+   // Indexer emits close-amount: 0 for ordinary transfers. A positive close
+   // amount without a close destination is contradictory evidence.
+   if (closeTo === undefined && closeAmount !== '0') {
+      throw new Error(
+         `${label} has positive close-amount without close-to`,
+      );
+   }
+
+   return {
+      ...common,
+      receiver: nonEmptyString(
+         transfer.receiver,
+         `${label} receiver`,
+      ),
+      assetId: safeRound(
+         transfer['asset-id'],
+         `${label} asset-id`,
+      ),
+      atomicAmount: safeAmount(
+         transfer.amount,
+         `${label} amount`,
+      ),
+      ...(assetSender === undefined ? {} : { assetSender }),
+      ...(closeTo === undefined ? {} : { closeTo }),
+      closeAmount,
+   };
+}
+
+function parseDirectAssetTransfer(
+   value: unknown,
+   label: string,
+): IndexedAssetTransfer {
+   const parsed = parseAssetTransferEnvelope(value, label, true);
+
+   if (parsed.assetSender !== undefined) {
+      throw new Error(`${label} is a clawback asset transfer`);
+   }
+   if (parsed.closeTo !== undefined) {
+      throw new Error(`${label} is an asset close-out transfer`);
+   }
+
+   return indexedAssetTransfer(parsed, label);
+}
+
+function indexedAssetTransfer(
+   parsed: ParsedAssetTransferEnvelope,
+   label: string,
+): IndexedAssetTransfer {
+   if (parsed.transaction === undefined) {
+      throw new Error(`${label} has no top-level transaction ID`);
+   }
+
+   return {
+      transaction: parsed.transaction,
+      sender: parsed.sender,
+      receiver: parsed.receiver,
+      assetId: parsed.assetId,
+      atomicAmount: parsed.atomicAmount,
+      round: parsed.round,
    };
 }
 
@@ -489,14 +633,14 @@ function parseWatchTransaction(
    plan: ScanQueryPlan,
 ): IndexedWatchTransaction | undefined {
    const label = `transaction page item ${index}`;
-   const transaction = record(value, label) as IndexerTransaction;
-   const txType = nonEmptyString(
-      transaction['tx-type'],
-      `${label} tx-type`,
-   );
+   const common = parseTransactionCommon(value, label, true);
 
-   if (txType !== 'axfer') {
-      const innerTransactions = transaction['inner-txns'];
+   if (common.round < minRound || common.round > maxRound) {
+      throw new Error(`${label} lies outside the requested round range`);
+   }
+
+   if (common.txType !== 'axfer') {
+      const innerTransactions = common.record['inner-txns'];
       if (
          !Array.isArray(innerTransactions) ||
          innerTransactions.length === 0
@@ -505,40 +649,138 @@ function parseWatchTransaction(
             `${label} is not an axfer and has no inner transaction evidence`,
          );
       }
-
-      // Algorand Indexer returns the parent transaction when a query matches an
-      // inner transaction. RoundWatch deliberately excludes inner transfers
-      // from its payment contract, so a structurally valid parent result is
-      // ignored rather than poisoning the entire coverage page.
-      return undefined;
-   }
-
-   const transfer = record(
-      transaction['asset-transfer-transaction'],
-      `${label} asset transfer`,
-   );
-
-   if (transfer.sender !== undefined) {
-      nonEmptyString(transfer.sender, `${label} asset sender`);
-      return undefined;
-   }
-
-   if (transfer['close-to'] !== undefined) {
-      nonEmptyString(transfer['close-to'], `${label} close-to`);
-      if (transfer['close-amount'] !== undefined) {
-         safeAmount(transfer['close-amount'], `${label} close-amount`);
+      if (innerTransactions.length > MAX_INDEXER_INNER_TRANSACTIONS) {
+         throw new Error(
+            `${label} inner transaction count exceeds ${MAX_INDEXER_INNER_TRANSACTIONS}`,
+         );
       }
+
+      const traversal = { visited: 0 };
+      let queryMatch = false;
+      for (let i = 0; i < innerTransactions.length; i += 1) {
+         queryMatch =
+            inspectInnerTransaction(
+               innerTransactions[i],
+               `${label} inner transaction ${i}`,
+               minRound,
+               maxRound,
+               watch,
+               plan,
+               1,
+               traversal,
+            ) || queryMatch;
+      }
+
+      if (!queryMatch) {
+         throw new Error(
+            `${label} inner transaction tree does not satisfy the requested asset-transfer filters`,
+         );
+      }
+
+      // The provider returned this parent because a validated inner asset
+      // transfer satisfied the search. Inner transfers remain outside the
+      // RoundWatch payment contract, but only validated evidence may
+      // contribute to coverage.
       return undefined;
    }
 
-   if (transfer['close-amount'] !== undefined) {
+   const parsed = parseAssetTransferEnvelope(value, label, true);
+   assertTopLevelScanFilters(parsed, minRound, maxRound, watch, plan, label);
+
+   if (
+      parsed.assetSender !== undefined ||
+      parsed.closeTo !== undefined
+   ) {
+      // Valid clawback/close-out transactions are explicitly outside the
+      // direct-payment contract. They may be ignored only after the complete
+      // envelope and server-side query filters have been validated.
+      return undefined;
+   }
+
+   return {
+      ...indexedAssetTransfer(parsed, label),
+      roundTime: parsed.roundTime,
+      ...(parsed.note === undefined ? {} : { note: parsed.note }),
+   };
+}
+
+function inspectInnerTransaction(
+   value: unknown,
+   label: string,
+   minRound: number,
+   maxRound: number,
+   watch: Pick<
+      WatchRecord,
+      | 'expectedSender'
+      | 'expectedReceiver'
+      | 'assetId'
+      | 'atomicAmount'
+      | 'invoiceNote'
+   >,
+   plan: ScanQueryPlan,
+   depth: number,
+   traversal: { visited: number },
+): boolean {
+   if (depth > MAX_INDEXER_INNER_DEPTH) {
       throw new Error(
-         `${label} has close-amount without close-to`,
+         `${label} exceeds inner transaction depth ${MAX_INDEXER_INNER_DEPTH}`,
+      );
+   }
+   traversal.visited += 1;
+   if (traversal.visited > MAX_INDEXER_INNER_TRANSACTIONS) {
+      throw new Error(
+         `${label} inner transaction tree exceeds ${MAX_INDEXER_INNER_TRANSACTIONS} items`,
       );
    }
 
-   const parsed = parseAssetTransfer(transaction, label);
+   const common = parseTransactionCommon(value, label, false);
+   if (common.round < minRound || common.round > maxRound) {
+      throw new Error(`${label} lies outside the requested round range`);
+   }
 
+   if (common.txType === 'axfer') {
+      const parsed = parseAssetTransferEnvelope(value, label, false);
+      return satisfiesScanFilters(parsed, watch, plan);
+   }
+
+   const children = common.record['inner-txns'];
+   if (children === undefined) return false;
+   if (!Array.isArray(children)) {
+      throw new Error(`${label} inner-txns is not an array`);
+   }
+
+   let queryMatch = false;
+   for (let i = 0; i < children.length; i += 1) {
+      queryMatch =
+         inspectInnerTransaction(
+            children[i],
+            `${label} child ${i}`,
+            minRound,
+            maxRound,
+            watch,
+            plan,
+            depth + 1,
+            traversal,
+         ) || queryMatch;
+   }
+   return queryMatch;
+}
+
+function assertTopLevelScanFilters(
+   parsed: ParsedAssetTransferEnvelope,
+   minRound: number,
+   maxRound: number,
+   watch: Pick<
+      WatchRecord,
+      | 'expectedSender'
+      | 'expectedReceiver'
+      | 'assetId'
+      | 'atomicAmount'
+      | 'invoiceNote'
+   >,
+   plan: ScanQueryPlan,
+   label: string,
+): void {
    if (parsed.round < minRound || parsed.round > maxRound) {
       throw new Error(`${label} lies outside the requested round range`);
    }
@@ -547,22 +789,18 @@ function parseWatchTransaction(
          `${label} does not satisfy the requested asset filter`,
       );
    }
-   if (
-      plan.addressRole === 'sender' &&
-      parsed.sender !== watch.expectedSender
-   ) {
+
+   const addressMatches =
+      plan.addressRole === 'sender'
+         ? parsed.sender === plan.address ||
+           parsed.assetSender === plan.address
+         : parsed.receiver === plan.address;
+   if (!addressMatches) {
       throw new Error(
-         `${label} does not satisfy the requested sender filter`,
+         `${label} does not satisfy the requested ${plan.addressRole} filter`,
       );
    }
-   if (
-      plan.addressRole === 'receiver' &&
-      parsed.receiver !== watch.expectedReceiver
-   ) {
-      throw new Error(
-         `${label} does not satisfy the requested receiver filter`,
-      );
-   }
+
    if (
       plan.exactAmount &&
       parsed.atomicAmount !== watch.atomicAmount
@@ -572,45 +810,75 @@ function parseWatchTransaction(
       );
    }
 
-   const roundTime = safeRound(
-      transaction['round-time'],
-      `${label} round-time`,
+   if (!satisfiesNotePrefix(parsed.note, watch, plan)) {
+      throw new Error(
+         `${label} does not satisfy the requested note prefix`,
+      );
+   }
+}
+
+function satisfiesScanFilters(
+   parsed: ParsedAssetTransferEnvelope,
+   watch: Pick<
+      WatchRecord,
+      | 'expectedSender'
+      | 'expectedReceiver'
+      | 'assetId'
+      | 'atomicAmount'
+      | 'invoiceNote'
+   >,
+   plan: ScanQueryPlan,
+): boolean {
+   if (parsed.assetId !== watch.assetId) return false;
+
+   if (
+      plan.addressRole === 'sender' &&
+      parsed.sender !== plan.address &&
+      parsed.assetSender !== plan.address
+   ) {
+      return false;
+   }
+   if (
+      plan.addressRole === 'receiver' &&
+      parsed.receiver !== plan.address
+   ) {
+      return false;
+   }
+   if (
+      plan.exactAmount &&
+      parsed.atomicAmount !== watch.atomicAmount
+   ) {
+      return false;
+   }
+
+   return satisfiesNotePrefix(parsed.note, watch, plan);
+}
+
+function satisfiesNotePrefix(
+   note: string | undefined,
+   watch: Pick<WatchRecord, 'invoiceNote'>,
+   plan: ScanQueryPlan,
+): boolean {
+   if (!plan.notePrefix) return true;
+   if (note === undefined || watch.invoiceNote === undefined) return false;
+
+   const actual = Buffer.from(note, 'base64');
+   const prefix = Buffer.from(watch.invoiceNote, 'utf8');
+   return (
+      actual.length >= prefix.length &&
+      actual.subarray(0, prefix.length).equals(prefix)
    );
+}
 
-   let note: string | undefined;
-   if (transaction.note !== undefined) {
-      if (
-         typeof transaction.note !== 'string' ||
-         !isCanonicalBase64(transaction.note)
-      ) {
-         throw new Error(`${label} note is malformed`);
-      }
-      note = transaction.note;
+function parseOptionalNote(
+   value: unknown,
+   label: string,
+): string | undefined {
+   if (value === undefined) return undefined;
+   if (typeof value !== 'string' || !isCanonicalBase64(value)) {
+      throw new Error(`${label} note is malformed`);
    }
-
-   if (plan.notePrefix) {
-      if (note === undefined) {
-         throw new Error(
-            `${label} does not satisfy the requested note prefix`,
-         );
-      }
-      const actual = Buffer.from(note, 'base64');
-      const prefix = Buffer.from(watch.invoiceNote!, 'utf8');
-      if (
-         actual.length < prefix.length ||
-         !actual.subarray(0, prefix.length).equals(prefix)
-      ) {
-         throw new Error(
-            `${label} does not satisfy the requested note prefix`,
-         );
-      }
-   }
-
-   return {
-      ...parsed,
-      roundTime,
-      ...(note === undefined ? {} : { note }),
-   };
+   return value;
 }
 
 function parseTransactionSearchItem(
@@ -619,7 +887,7 @@ function parseTransactionSearchItem(
    transactionId: string,
 ): IndexedAssetTransfer {
    const label = `transaction search item ${index}`;
-   const parsed = parseAssetTransfer(value, label);
+   const parsed = parseDirectAssetTransfer(value, label);
    if (parsed.transaction !== transactionId) {
       throw new Error(`${label} does not match the requested transaction ID`);
    }
