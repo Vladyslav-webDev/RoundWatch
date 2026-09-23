@@ -67,7 +67,7 @@ An absent transaction remains an ambiguous, retryable outcome. A found on-chain 
 
 ## Future-payment matching
 
-An active watch has a safe `scanAfterRound` baseline. RoundWatch considers only confirmed USDC asset transfers in later rounds. A match requires exact equality across:
+An active watch has a safe `scanAfterRound` baseline. RoundWatch considers only confirmed **top-level direct USDC asset-transfer transactions** in later rounds. A match requires exact equality across:
 
 - sender;
 - receiver;
@@ -75,7 +75,9 @@ An active watch has a safe `scanAfterRound` baseline. RoundWatch considers only 
 - decimal-free atomic amount string; and
 - decoded UTF-8 invoice note, if the watch specified one.
 
-The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage.
+Inner asset transfers, clawback transfers (`asset-transfer-transaction.sender`), and asset close-out transfers (`close-to`) are outside the RoundWatch payment contract and never count as a match. Indexer search may return a parent transaction when an inner transaction satisfies the query; structurally valid parent results are therefore ignored deliberately instead of being misclassified as direct payments. Search requests also set `exclude-close-to=true` so close destinations are not treated as ordinary receivers.
+
+The request parser accepts only checksum-valid addresses and positive integer amounts no larger than `Number.MAX_SAFE_INTEGER`. Notes are limited to 128 UTF-8 bytes. Each Indexer page requires typed transactions, an adequate `current-round`, in-range confirmed rounds, well-formed classification fields, and a non-stalling continuation token before it can contribute coverage. A malformed envelope, including an unexplained non-`axfer` result, still fails closed and cannot advance coverage.
 
 If any page, checkpoint, or watermark validation fails, the cursor is not advanced. Pagination tokens are process-local; restart replays the unfinished finite round window. Conditional cursor updates prevent stale work from moving coverage backward or skipping a range.
 
