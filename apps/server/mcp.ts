@@ -3,6 +3,10 @@ import { isValidAlgorandAddress } from '@x402/avm';
 import type { RoundWatchNetworkConfig } from './network-config.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
+   buildWatchEligibilityContract,
+   eligibilityBoundarySummary,
+} from './roundwatch-contract.js';
+import {
    MAX_MCP_REQUEST_BODY_BYTES,
    RequestBodyTooLargeError,
    readJsonBodyWithLimit,
