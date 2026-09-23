@@ -14,6 +14,10 @@ const LEGACY_PROTOCOL_VERSIONS = new Set([
    '2025-11-25',
    '2025-06-18',
 ]);
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([
+   MODERN_PROTOCOL_VERSION,
+   ...LEGACY_PROTOCOL_VERSIONS,
+]);
 const SERVER_NAME = 'roundwatch';
 const SERVER_VERSION = '1.0.0';
 const TOOL_LIST_TTL_MS = 300_000;
@@ -32,6 +36,7 @@ interface McpDependencies {
    servicePriceUsd: string;
    serviceAtomicAmount: string;
    workUnitBudget: number;
+   watchTtlMilliseconds: number;
    watchPath: string;
 }
 
@@ -216,6 +221,11 @@ export async function handleMcpHttpRequest(
 
    const id = normalizeId(message.id);
    const method = message.method;
+   const protocolSignalError = validateProtocolSignals(request, message);
+
+   if (protocolSignalError) {
+      return jsonRpcHttpError(id, -32602, protocolSignalError, 400);
+   }
 
    if (id === null && method === 'notifications/initialized') {
       return new Response(null, { status: 202 });
@@ -253,13 +263,18 @@ export async function handleMcpHttpRequest(
          params && typeof params.protocolVersion === 'string'
             ? params.protocolVersion
             : undefined;
-      const protocolVersion =
-         requested && LEGACY_PROTOCOL_VERSIONS.has(requested)
-            ? requested
-            : LEGACY_PROTOCOL_VERSION;
+
+      if (!requested || !LEGACY_PROTOCOL_VERSIONS.has(requested)) {
+         return jsonRpcHttpError(
+            id,
+            -32602,
+            `Unsupported initialize protocolVersion. Supported legacy versions: ${[...LEGACY_PROTOCOL_VERSIONS].join(', ')}`,
+            400,
+         );
+      }
 
       return jsonRpcSuccess(id, {
-         protocolVersion,
+         protocolVersion: requested,
          capabilities: { tools: {} },
          serverInfo: {
             name: SERVER_NAME,
@@ -338,6 +353,12 @@ export async function handleMcpHttpRequest(
                      'Content-Type': 'application/json',
                   },
                   body: validation.value,
+               },
+               eligibility: {
+                  ttlMs: dependencies.watchTtlMilliseconds,
+                  startsAt:
+                     'durable_watch_preparation_before_x402_settlement',
+                  settlementTimeConsumesEligibilityWindow: true,
                },
                x402: {
                   version: 2,
@@ -439,6 +460,11 @@ function serviceInfo(dependencies: McpDependencies) {
          servicePriceAtomicAmount: dependencies.serviceAtomicAmount,
          payTo: dependencies.serviceReceiver,
       },
+      eligibility: {
+         ttlMs: dependencies.watchTtlMilliseconds,
+         startsAt: 'durable_watch_preparation_before_x402_settlement',
+         settlementTimeConsumesEligibilityWindow: true,
+      },
       workUnitBudget: dependencies.workUnitBudget,
       docs: {
          product: 'https://roundwatch.observer/',
@@ -452,6 +478,7 @@ function serviceInfo(dependencies: McpDependencies) {
       limitations: [
          'RoundWatch is for future payments whose transaction ID does not exist yet.',
          'Only top-level direct Algorand USDC asset transfers are eligible matches; inner, clawback, and asset close-out transfers are excluded.',
+         'The eligibility clock starts when the durable watch is prepared before x402 settlement, so settlement delay consumes part of the advertised window.',
          'RoundWatch is not a webhook delivery service.',
          'The MCP prepare tool does not sign or settle x402 payments.',
       ],
@@ -545,6 +572,38 @@ function validatePrepareArguments(
          ...(typeof invoiceNote === 'string' ? { invoiceNote } : {}),
       },
    };
+}
+
+function validateProtocolSignals(
+   request: Request,
+   message: JsonRpcRequest,
+): string | undefined {
+   const header = request.headers.get('mcp-protocol-version');
+   const params = asObject(message.params);
+   const meta = asObject(params?._meta);
+   const metaValue = meta?.['io.modelcontextprotocol/protocolVersion'];
+
+   if (header && !SUPPORTED_PROTOCOL_VERSIONS.has(header)) {
+      return `Unsupported MCP-Protocol-Version: ${header}`;
+   }
+
+   if (
+      metaValue !== undefined &&
+      (typeof metaValue !== 'string' ||
+         !SUPPORTED_PROTOCOL_VERSIONS.has(metaValue))
+   ) {
+      return 'Unsupported params._meta.io.modelcontextprotocol/protocolVersion';
+   }
+
+   if (
+      header &&
+      typeof metaValue === 'string' &&
+      header !== metaValue
+   ) {
+      return 'MCP protocol-version signals disagree';
+   }
+
+   return undefined;
 }
 
 function isModernRequest(request: Request, message: JsonRpcRequest): boolean {
