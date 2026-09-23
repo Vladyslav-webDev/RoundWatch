@@ -17,12 +17,14 @@ export const DEFAULT_WATCH_TTL_MILLISECONDS = 30 * 60 * 1_000;
 export const DEFAULT_MAX_OPEN_WATCHES = 50;
 export const DEFAULT_MAX_OPEN_WATCHES_PER_PAYER = 5;
 export const DEFAULT_WORK_UNIT_BUDGET = 500;
+export const DEFAULT_READINESS_PROBE_INTERVAL_MILLISECONDS = 2_000;
 
 export interface RoundWatchStoreOptions {
    watchTtlMilliseconds?: number;
    maxOpenWatches?: number;
    maxOpenWatchesPerPayer?: number;
    workUnitBudget?: number;
+   readinessProbeIntervalMilliseconds?: number;
    now?: () => Date;
 }
 
@@ -135,7 +137,11 @@ export class RoundWatchStore {
    private readonly maxOpenWatches: number;
    private readonly maxOpenWatchesPerPayer: number;
    private readonly workUnitBudget: number;
+   private readonly readinessProbeIntervalMilliseconds: number;
    private readonly now: () => Date;
+   private closed = false;
+   private lastReadinessProbeAt = Number.NEGATIVE_INFINITY;
+   private lastReadinessProbeResult = false;
 
    constructor(
       databasePath: string,
@@ -157,6 +163,11 @@ export class RoundWatchStore {
          options.workUnitBudget ?? DEFAULT_WORK_UNIT_BUDGET,
          'workUnitBudget',
       );
+      this.readinessProbeIntervalMilliseconds = assertPositiveInteger(
+         options.readinessProbeIntervalMilliseconds ??
+            DEFAULT_READINESS_PROBE_INTERVAL_MILLISECONDS,
+         'readinessProbeIntervalMilliseconds',
+      );
       this.now = options.now ?? (() => new Date());
 
       if (databasePath !== ':memory:') {
@@ -167,6 +178,12 @@ export class RoundWatchStore {
       this.database.exec('PRAGMA journal_mode = WAL;');
       this.database.exec('PRAGMA foreign_keys = ON;');
       this.createWatchTable();
+      this.database.exec(`
+         CREATE TABLE IF NOT EXISTS roundwatch_readiness_probe (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            checked_at TEXT NOT NULL
+         );
+      `);
 
       this.ensureColumn(
          'expected_service_transaction',
@@ -603,21 +620,30 @@ export class RoundWatchStore {
       return this.watchTtlMilliseconds;
    }
 
-   readinessCheck(): boolean {
-      try {
-         const row = this.database.prepare(`
-            SELECT COUNT(*) AS count
-            FROM sqlite_master
-            WHERE type = 'table' AND name = 'roundwatch_watches'
-         `).get() as unknown as { count: number };
+   readinessCheck(force = false): boolean {
+      if (this.closed) return false;
 
-         return row.count === 1;
-      } catch {
-         return false;
+      const now = Date.now();
+      if (
+         !force &&
+         now - this.lastReadinessProbeAt <
+            this.readinessProbeIntervalMilliseconds
+      ) {
+         return this.lastReadinessProbeResult;
       }
+
+      const result = probeSqliteWriteReadiness(
+         this.database,
+         new Date(now).toISOString(),
+      );
+      this.lastReadinessProbeAt = now;
+      this.lastReadinessProbeResult = result;
+      return result;
    }
 
    close(): void {
+      this.closed = true;
+      this.lastReadinessProbeResult = false;
       this.database.close();
    }
 
@@ -917,6 +943,35 @@ function mapRow(row: WatchRow): WatchRecord {
       workUnitsUsed: row.work_units_used,
       ...(row.terminal_reason === null ? {} : { terminalReason: row.terminal_reason }),
    };
+}
+
+export function probeSqliteWriteReadiness(
+   database: DatabaseSync,
+   checkedAt: string,
+): boolean {
+   let transactionOpen = false;
+
+   try {
+      database.exec('BEGIN IMMEDIATE;');
+      transactionOpen = true;
+      database.prepare(`
+         INSERT INTO roundwatch_readiness_probe (id, checked_at)
+         VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET checked_at = excluded.checked_at
+      `).run(checkedAt);
+      database.exec('ROLLBACK;');
+      transactionOpen = false;
+      return true;
+   } catch {
+      if (transactionOpen) {
+         try {
+            database.exec('ROLLBACK;');
+         } catch {
+            // The connection may already be unusable. Readiness remains false.
+         }
+      }
+      return false;
+   }
 }
 
 function assertPositiveInteger(value: number, name: string): number {
