@@ -88,7 +88,18 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       private readonly timeoutMilliseconds = 10_000,
       private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
       private readonly scanQueryVariant: ScanQueryVariant = 'A',
-   ) {}
+      private readonly maxResponseBodyBytes =
+         MAX_INDEXER_RESPONSE_BODY_BYTES,
+   ) {
+      if (
+         !Number.isSafeInteger(maxResponseBodyBytes) ||
+         maxResponseBodyBytes <= 0
+      ) {
+         throw new Error(
+            'maxResponseBodyBytes must be a positive safe integer',
+         );
+      }
+   }
 
    async getCurrentRound(
       purpose: IndexerRequestPurpose = 'health',
@@ -330,16 +341,16 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                }
 
                const declaredBytes = headerContentLength(response);
-               if (declaredBytes > MAX_INDEXER_RESPONSE_BODY_BYTES) {
+               if (declaredBytes > this.maxResponseBodyBytes) {
                   responseBytes = declaredBytes;
                   throw new Error(
-                     `Indexer ${purpose} response exceeded ${MAX_INDEXER_RESPONSE_BODY_BYTES} byte limit`,
+                     `Indexer ${purpose} response exceeded ${this.maxResponseBodyBytes} byte limit`,
                   );
                }
 
                const boundedBody = await readBoundedResponseText(
                   response,
-                  MAX_INDEXER_RESPONSE_BODY_BYTES,
+                  this.maxResponseBodyBytes,
                );
                const rawBody = boundedBody.text;
                responseBytes = boundedBody.bytes;
