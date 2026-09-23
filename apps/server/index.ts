@@ -282,6 +282,7 @@ const reconciler = new SettlementReconciler(
    },
    economicsMetrics,
 );
+let workersStarted = false;
 const app = createApp({
    avmAddress,
    facilitatorClient,
@@ -294,6 +295,16 @@ const app = createApp({
       requestsPerSecond: signedPaymentRequestsPerSecond,
       burst: signedPaymentBurst,
       concurrency: signedPaymentConcurrency,
+   },
+   readinessCheck: () => {
+      const storage = store.readinessCheck();
+      return {
+         ready: storage && workersStarted,
+         checks: {
+            storage,
+            backgroundWorkers: workersStarted,
+         },
+      };
    },
 });
 const runtimeSampler = economicsMetrics
@@ -316,6 +327,7 @@ server.on('listening', () => {
    reconciler.start();
    poller.start();
    runtimeSampler?.start();
+   workersStarted = true;
    console.log(
       `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
    );
@@ -358,6 +370,7 @@ server.on('listening', () => {
 });
 
 server.on('close', () => {
+   workersStarted = false;
    reconciler.stop();
    poller.stop();
    runtimeSampler?.stop();
