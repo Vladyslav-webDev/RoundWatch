@@ -3004,10 +3004,22 @@ class SharedPageFakeIndexer extends FakeIndexer {
 
 function watchRecord(overrides: Partial<WatchRecord>): WatchRecord {
    return {
-      ...SPEC, id: 'watch', state: 'active', activationRound: 100, scanAfterRound: 100,
-      createdAt: '2026-09-18T09:30:00Z', expiresAt: '2026-09-18T10:00:00Z',
-      evidenceVersion: 1, reconciliationAttempts: 0,
-      workUnitBudget: 500, workUnitsUsed: 0, ...overrides,
+      ...SPEC,
+      id: 'watch',
+      state: 'active',
+      activationRound: 100,
+      scanAfterRound: 100,
+      createdAt: '2026-09-18T09:30:00Z',
+      expiresAt: '2026-09-18T10:00:00Z',
+      evidenceVersion: 1,
+      reconciliationAttempts: 0,
+      settlementReconciliationTerminal:
+         overrides.settlementReconciliationTerminal ?? false,
+      workUnitBudget: 500,
+      workUnitsUsed: 0,
+      ...overrides,
+      settlementReconciliationTerminal:
+         overrides.settlementReconciliationTerminal ?? false,
    };
 }
 function invoiceTx(round: number, roundTime: number): IndexedWatchTransaction {
