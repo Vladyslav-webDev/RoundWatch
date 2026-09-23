@@ -51,7 +51,7 @@ export function buildOpenApiDocument(
          version: '1.0.0',
          summary: 'Durable Algorand USDC payment monitoring for autonomous workflows',
          description:
-            'RoundWatch creates one durable watch for an exact future Algorand USDC payment when no transaction ID exists yet. The create operation is paid through x402; status retrieval is free.',
+            'RoundWatch creates one durable watch for an exact future top-level direct Algorand USDC payment when no transaction ID exists yet. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract. The create operation is paid through x402; status retrieval is free.',
          license: {
             name: 'MIT',
             identifier: 'MIT',
@@ -111,7 +111,7 @@ export function buildOpenApiDocument(
                operationId: 'createWatch',
                summary: 'Create a durable watch for one exact future USDC payment',
                description:
-                  'Submit the expected sender, receiver, atomic amount, and optional exact note. An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.',
+                  'Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.',
                'x-x402': x402Contract,
                requestBody: {
                   required: true,
@@ -537,6 +537,6 @@ The MCP server exposes read-only discovery and status tools plus a preparation t
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note. A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }
