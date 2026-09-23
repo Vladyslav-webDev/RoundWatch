@@ -9,7 +9,8 @@ As of **2026-09-16**:
 - Render serves the API over HTTPS;
 - `ROUNDWATCH_NETWORK=mainnet` selects Algorand MainNet and Circle USDC ASA `31566704`;
 - SQLite is stored at `/data/roundwatch.sqlite` on a persistent disk;
-- `GET /health` returns `{ "status": "ok", "network": "mainnet" }`;
+- `GET /health` is the liveness signal and returns `{ "status": "ok", "purpose": "liveness", "network": "mainnet" }`;
+- `GET /ready` is the durable-service readiness signal;
 - unpaid `POST /v1/watch` advertises the correct MainNet x402 requirements;
 - one explicitly authorized `0.001 USDC` service purchase settled on MainNet;
 - its durable watch later matched a separate exact MainNet invoice transfer;
@@ -20,7 +21,7 @@ No second paid E2E was run after the correctness patch. Routine deployment verif
 
 ## Container and process model
 
-The root `Dockerfile` uses Node 24.14.0 and pnpm 12.3.4, installs the frozen workspace lockfile, and starts `apps/server` through `tsx`. The container exposes port 4021 and has an internal `/health` health check.
+The root `Dockerfile` uses Node 24.14.0 and pnpm 12.3.4, installs the frozen workspace lockfile, and starts `apps/server` through `tsx`. The container exposes port 4021 and uses `/ready`, not liveness-only `/health`, for its internal health check.
 
 The hosting platform terminates HTTPS and supplies `PORT`. One application process runs the API, settlement reconciler, watch poller, and local SQLite connection. Do not scale this image horizontally without first designing shared durable state and worker coordination.
 
@@ -83,9 +84,12 @@ Before a storage change:
 
 1. identify the exact production database and disk;
 2. stop writes or otherwise obtain a consistent SQLite backup;
-3. retain a recoverable copy;
-4. restore into the intended persistent path; and
-5. verify existing watch IDs before resuming normal operation.
+3. retain a recoverable copy outside the live volume;
+4. restore into an isolated path and validate it before production use;
+5. restore into the intended persistent path only after the drill succeeds; and
+6. verify existing watch IDs and `/ready` before resuming normal operation.
+
+Do not copy only `roundwatch.sqlite` from a live WAL-mode service and call it a backup. See [Operations](OPERATIONS.md) for the backup/restore and incident procedure.
 
 ## Routes
 
@@ -93,6 +97,7 @@ Production exposes:
 
 ```text
 GET  /health
+GET  /ready
 POST /v1/watch
 GET  /v1/watch/:id
 GET  /demo
@@ -118,7 +123,7 @@ pnpm -C apps/client test
 docker build -t roundwatch-candidate .
 ```
 
-Also require the repository CI checks: full-history Gitleaks, tracked `.env` rejection, typechecks, server tests, client safety tests, and container build.
+Also require the repository CI checks: read-only workflow permissions, immutable third-party action/container pins, full-history Gitleaks, tracked `.env` rejection, production dependency audit, typechecks, server tests, client safety tests, and container build. Dependabot separately monitors npm/pnpm and GitHub Actions updates.
 
 None of these commands needs a wallet or makes a payment.
 
@@ -145,7 +150,7 @@ Schema migrations are idempotent. Legacy rows retain evidence version 0: missing
 
 ### 4. Run free post-deploy smoke checks
 
-Health:
+Liveness:
 
 ```bash
 curl -i https://roundwatch-api.onrender.com/health
@@ -156,9 +161,18 @@ Expected body:
 ```json
 {
   "status": "ok",
+  "purpose": "liveness",
   "network": "mainnet"
 }
 ```
+
+Readiness:
+
+```bash
+curl -i https://roundwatch-api.onrender.com/ready
+```
+
+Expected result is HTTP 200 with `status: "ready"`, `storage: true`, and `backgroundWorkers: true`. HTTP 200 from `/health` is not sufficient to accept paid traffic.
 
 Unpaid x402 preflight:
 
@@ -188,7 +202,7 @@ Do not make a payment for routine deployment verification. The production path a
 
 A new paid MainNet run requires explicit human authorization for that exact run. Before authorizing it, record why existing evidence and free checks are insufficient, review the maximum spend and network fees, and use the dedicated minimum-funded payer.
 
-The repository runner enforces `--confirm-mainnet` for `start`, `recover`, and `pay`, restricts the production URL and expected receiver, validates payment requirements before signing, and validates its durable checkpoint. The flag is a final acknowledgement, not a replacement for human review.
+The repository runner enforces `--confirm-mainnet` only for the spending modes `start` and `pay`. `recover` is deliberately non-spending: it does not load a signer and can only recover an already-existing durable watch. The runner restricts the production URL and expected receiver, validates fresh payment requirements immediately before signing, and validates its durable checkpoint. The flag is a final acknowledgement, not a replacement for human review.
 
 If an authorized run occurs, record the service transaction, watch ID, later invoice transaction, confirmed rounds, and independent Indexer verification. Never paste or log the mnemonic.
 
@@ -205,6 +219,6 @@ Operational response:
 
 ## Rollback
 
-Application rollback must preserve the current persistent disk. Verify that the target version can read the existing schema and retains the settlement-reconciliation fields before deploying it. After rollback, repeat all free smoke checks, including retrieval of the known matched watch.
+Application rollback must preserve the current persistent disk. Verify that the target version can read the existing schema and retains the settlement-reconciliation fields before deploying it. After rollback, repeat all free smoke checks, including `/ready` and retrieval of the known matched watch.
 
 Do not restore an older database snapshot merely to match older code without accounting for every watch and scan cursor created since that snapshot.
