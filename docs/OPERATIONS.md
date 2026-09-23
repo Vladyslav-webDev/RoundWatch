@@ -10,12 +10,15 @@ evidence.
 Use the endpoints for different purposes:
 
 - `GET /health` is liveness only. It proves that the HTTP process can answer.
-- `GET /ready` is the paid-traffic readiness signal. It checks durable storage
-  and that the in-process poller/reconciler have started.
+- `GET /ready` is the paid-traffic readiness signal. It uses a cached real
+  SQLite write/rollback probe, requires recent successful poller and reconciler
+  cycles with no newer cycle error, and requires the configured minimum free
+  space on the database filesystem.
 
 After every deployment, require `/ready` to return HTTP 200 before directing
-new paid watch creation traffic. A healthy-but-not-ready process must not be
-treated as ready for paid obligations.
+new paid watch creation traffic. The application also refuses new paid watch
+creation with HTTP 503 before x402 verification while readiness is red. A
+healthy-but-not-ready process must not be treated as ready for paid obligations.
 
 Routine production smoke tests should be free: liveness, readiness, an unpaid
 watch request that returns HTTP 402, and reads of already-known watch IDs.
@@ -75,8 +78,11 @@ incident, not as an ordinary restart.
 ## Disk and database growth
 
 The service does not currently implement automatic row deletion. Monitor the
-persistent volume for free space and database growth. A full disk can prevent
-durable writes even while the HTTP process remains alive.
+persistent volume for free space and database growth. Runtime readiness fails
+closed when filesystem free space drops below `ROUNDWATCH_MIN_FREE_DISK_BYTES`
+(default 64 MiB), but that floor is only admission protection, not a substitute
+for platform alerts. A full disk can prevent durable writes even while the HTTP
+process remains alive.
 
 The current challenge-release retention policy is therefore explicit but
 conservative: terminal watch records are retained until deliberate operator
