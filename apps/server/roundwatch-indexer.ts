@@ -73,6 +73,8 @@ export interface RoundWatchIndexer {
 interface IndexerTransaction {
    id?: unknown; sender?: unknown; note?: unknown;
    'confirmed-round'?: unknown; 'round-time'?: unknown;
+   'tx-type'?: unknown;
+   'inner-txns'?: unknown;
    'asset-transfer-transaction'?: unknown;
 }
 
@@ -178,16 +180,21 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                body,
                'transactions',
                1_000,
-            ).map((item, i) =>
-               parseWatchTransaction(
-                  item,
-                  i,
-                  minRound,
-                  maxRound,
-                  watch,
-                  plan,
+            )
+               .map((item, i) =>
+                  parseWatchTransaction(
+                     item,
+                     i,
+                     minRound,
+                     maxRound,
+                     watch,
+                     plan,
+                  ),
+               )
+               .filter(
+                  (item): item is IndexedWatchTransaction =>
+                     item !== undefined,
                ),
-            ),
             currentRound: safeRound(
                field(body, 'current-round'),
                'transaction page current-round',
@@ -217,6 +224,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       url.searchParams.set('min-round', String(minRound));
       url.searchParams.set('max-round', String(maxRound));
       url.searchParams.set('limit', '1000');
+      url.searchParams.set('exclude-close-to', 'true');
 
       if (plan.exactAmount) {
          const amount = BigInt(watch.atomicAmount);
@@ -454,10 +462,57 @@ function parseWatchTransaction(
       | 'invoiceNote'
    >,
    plan: ScanQueryPlan,
-): IndexedWatchTransaction {
+): IndexedWatchTransaction | undefined {
    const label = `transaction page item ${index}`;
-   const parsed = parseAssetTransfer(value, label);
-   const transaction = value as IndexerTransaction;
+   const transaction = record(value, label) as IndexerTransaction;
+   const txType = nonEmptyString(
+      transaction['tx-type'],
+      `${label} tx-type`,
+   );
+
+   if (txType !== 'axfer') {
+      const innerTransactions = transaction['inner-txns'];
+      if (
+         !Array.isArray(innerTransactions) ||
+         innerTransactions.length === 0
+      ) {
+         throw new Error(
+            `${label} is not an axfer and has no inner transaction evidence`,
+         );
+      }
+
+      // Algorand Indexer returns the parent transaction when a query matches an
+      // inner transaction. RoundWatch deliberately excludes inner transfers
+      // from its payment contract, so a structurally valid parent result is
+      // ignored rather than poisoning the entire coverage page.
+      return undefined;
+   }
+
+   const transfer = record(
+      transaction['asset-transfer-transaction'],
+      `${label} asset transfer`,
+   );
+
+   if (transfer.sender !== undefined) {
+      nonEmptyString(transfer.sender, `${label} asset sender`);
+      return undefined;
+   }
+
+   if (transfer['close-to'] !== undefined) {
+      nonEmptyString(transfer['close-to'], `${label} close-to`);
+      if (transfer['close-amount'] !== undefined) {
+         safeAmount(transfer['close-amount'], `${label} close-amount`);
+      }
+      return undefined;
+   }
+
+   if (transfer['close-amount'] !== undefined) {
+      throw new Error(
+         `${label} has close-amount without close-to`,
+      );
+   }
+
+   const parsed = parseAssetTransfer(transaction, label);
 
    if (parsed.round < minRound || parsed.round > maxRound) {
       throw new Error(`${label} lies outside the requested round range`);
