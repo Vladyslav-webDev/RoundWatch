@@ -69,11 +69,12 @@ outside transient build directories, with this baseline:
 - `SECURITY_BLOCKER_TARGETED_VERIFICATION.md`
 - `SECURITY_BLOCKER_TARGETED_EVIDENCE.zip`
 
-At the time this baseline was recorded, the later Astra-generated reports and
-evidence bundles existed under the operator-local
-`C:\Dev\roundwatch-local-artifacts\` directory and were not automatically
-available to the repository automation. Archive them intentionally rather than
-silently reconstructing or paraphrasing the original evidence files.
+The six source artifacts listed above are retained verbatim in the operator's
+persistent security-audit archive under
+`RoundWatch/security-audits/2026-09-24`. Their SHA-256 values are recorded in
+[security-audits/2026-09-24/MANIFEST.md](security-audits/2026-09-24/MANIFEST.md).
+The binary evidence bundles remain outside Git rather than being reconstructed,
+repacked, or converted by repository automation.
 
 ## Critical-core change policy
 
