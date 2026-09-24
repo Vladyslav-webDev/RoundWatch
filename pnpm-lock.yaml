@@ -112,8 +112,8 @@ importers:
   apps/client:
     dependencies:
       '@x402/avm':
-        specifier: 2.25.0
-        version: 2.25.0
+        specifier: 2.26.0
+        version: 2.26.0
       '@x402/core':
         specifier: 2.25.0
         version: 2.25.0
@@ -146,8 +146,8 @@ importers:
         specifier: ^2.6.1
         version: 2.6.1(ethers@6.17.0)(typescript@7.0.2)
       '@x402/avm':
-        specifier: ^2.25.0
-        version: 2.25.0
+        specifier: ^2.26.0
+        version: 2.26.0
       '@x402/core':
         specifier: ^2.25.0
         version: 2.25.0
@@ -553,11 +553,14 @@ packages:
   '@x402-avm/extensions@2.6.1':
     resolution: {integrity: sha512-gg4qxUpMzUTxASRuIOjhdMyCHDH8my0kJi0vrwDpS7Mt/dzkA6fKXyTBWXUDrpD6g7s81KXKaqWF7y2IYn5NiQ==}
 
-  '@x402/avm@2.25.0':
-    resolution: {integrity: sha512-MXH6HdaMGddWrY65r4+ya+HVFJw5DIgdHKNCy632JtFYYHuqI59/5Sn/wE0afxb9pLbVMp6PC6iZ+MvjN3EOww==}
+  '@x402/avm@2.26.0':
+    resolution: {integrity: sha512-jnBAIziOc3MQ7h/DmaVrE61gWI0ZJemkMP8hp4i+n4q0hnFm/Khaxn2qf42gtiFDQQAij076qp3z6SbP/fy09w==}
 
   '@x402/core@2.25.0':
     resolution: {integrity: sha512-5Ys0XYz3FKutxVKoXC46R/XPT/oaAbuj7ahzrlVHwQxZJPH9u6u91IOh0ztz+7G/zYGsaXR8l3ety205QtEnUw==}
+
+  '@x402/core@2.26.0':
+    resolution: {integrity: sha512-8dlXip9u0JjyELzzFz48vntuMajvUjA8IYpitfaW423m53bR49amZDIn3n4gXRYoNEKzGB9Rtn8at35WHz61cA==}
 
   '@x402/extensions@2.25.0':
     resolution: {integrity: sha512-7gXpYoHX8CkQ4bwUfzx0GS6VQlx810+GiGOAYhwsbTtIZFt/ahz/5CjCs7qfoKYcgAWcVyvBCl9U3FYYBX01nA==}
@@ -1026,12 +1029,16 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@x402/avm@2.25.0':
+  '@x402/avm@2.26.0':
     dependencies:
       '@algorandfoundation/algokit-utils': 10.0.0-alpha.46
-      '@x402/core': 2.25.0
+      '@x402/core': 2.26.0
 
   '@x402/core@2.25.0':
+    dependencies:
+      zod: 3.25.76
+
+  '@x402/core@2.26.0':
     dependencies:
       zod: 3.25.76
 
