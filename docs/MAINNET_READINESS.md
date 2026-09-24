@@ -1,6 +1,6 @@
 # RoundWatch MainNet readiness
 
-Status: production API, paid MainNet E2E, durable invoice match, historical Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-economics production deployment are proven. Current Bazaar catalog visibility is being requalified after a 2026-09-24 full-catalog probe no longer found the exact resource URL.
+Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-economics production deployment are proven. The exact RoundWatch resource is present in GoPlausible Bazaar, but its stored payment/discovery metadata is stale at the original 0.001 USDC contract while live production charges 0.02 USDC.
 
 This is a dated evidence record, not an availability or performance guarantee.
 
@@ -170,9 +170,11 @@ On **2026-09-16**, GoPlausible Bazaar discovery returned:
 
 The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank was 145 among 147 merchant entries at the time queried. That rank is a dated observation and may change.
 
-On **2026-09-24**, a fresh read-only qualification decoded a valid live `402` with the expected Bazaar metadata, then completed all 23 catalog pages reported by the same facilitator: 2,230 resources total, exact RoundWatch resource URL not present. The optional `/discovery/search` endpoint returned HTTP 404. This establishes a current distribution/catalog visibility defect without implying a payment-runtime failure.
+On **2026-09-24**, read-only qualification decoded a valid live `402` with the expected Bazaar metadata and completed the full GoPlausible catalog. The first parser incorrectly reported the resource absent because it did not recognize GoPlausible's top-level `resourceUrl` field. Raw catalog forensics later found the exact production URL and receiver.
 
-The x402 Bazaar flow catalogs discovery metadata when a paying client echoes the extension in a `PaymentPayload` processed by the facilitator. A guarded one-payment MainNet recatalog proof is provided in `apps/client/bazaar-recatalog.ts`; the paid mode remains disabled unless a human explicitly authorizes that exact spend.
+The catalog entry is stale: `accepts[0].amount` remains `1000` atomic (0.001 USDC) from 2026-09-16, while live production advertises `20000` atomic (0.02 USDC). After an explicitly authorized fresh 0.02 USDC settlement, the same record advanced to `settleCount: 3` and `lastSeen: 2026-09-24T12:07:27.130Z` without refreshing the stored price/discovery metadata. This is a distribution/catalog freshness defect, not a payment-runtime failure.
+
+The merchant directory independently contains the RoundWatch receiver and reports three resources and six total settlements. The observed GoPlausible `payTo` query parameter did not narrow the resource list: both filtered and unfiltered requests returned 2,232 resources.
 
 ## Readiness gates
 
@@ -199,7 +201,7 @@ The x402 Bazaar flow catalogs discovery metadata when a paying client echoes the
 | Paid MainNet service purchase | Passed | Settlement transaction and active watch recorded below |
 | Later exact invoice match | Passed | Same invoice txid and round recorded by Indexer and RoundWatch |
 | Persistence through redeploy | Passed | Existing matched watch unchanged after multiple redeploys |
-| Bazaar discovery metadata | Passed; catalog visibility needs refresh | Live `402` metadata is valid; historical listing was proven on 2026-09-16, but a complete 2026-09-24 catalog scan did not contain the exact resource URL |
+| Bazaar discovery metadata | Partial: exact resource present, catalog terms stale | Live `402` metadata is current at 0.02 USDC, but GoPlausible still stores the 2026-09-16 0.001 USDC payment/discovery terms despite observing the fresh 2026-09-24 settlement |
 | Challenge attribution | Passed | Merchant entry reported `challenge: true` |
 
 ## Current release state
