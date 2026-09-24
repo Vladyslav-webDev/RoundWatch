@@ -83,6 +83,20 @@ The same first run also showed HTTP 404 for all four
 facilitator does not expose that optional endpoint at the probed path; it does
 not make a valid catalog listing fail by itself.
 
+
+The second production run, after adding the `payTo` filter and completeness
+tracking, reported a catalog total of 2,225 resources while the probe still had
+a 2,000-resource safety cap. It therefore correctly returned
+`overall: "inconclusive"` rather than claiming absence. This also showed that
+the filter did not make the result set small enough for the original cap; the
+probe cannot infer from that alone whether the facilitator ignored the optional
+filter or legitimately returned that many matching rows.
+
+The probe now allows up to 10,000 catalog resources. That comfortably covers
+the observed 2,225-resource catalog while preserving a bounded external scan.
+If a future catalog exceeds that cap before an exact RoundWatch match is found,
+the result remains `inconclusive`.
+
 ## Why this comes before an autonomous paid-agent test
 
 The final black-box milestone is stronger: an unknown compatible agent should

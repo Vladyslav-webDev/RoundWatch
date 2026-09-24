@@ -30,7 +30,10 @@ const EXPECTED_SERVICE_TAGS = [
 ] as const;
 
 const DISCOVERY_PAGE_LIMIT = 100;
-const DISCOVERY_PAGE_CAP = 20;
+const DISCOVERY_RESOURCE_CAP = 10_000;
+const DISCOVERY_PAGE_CAP = Math.ceil(
+   DISCOVERY_RESOURCE_CAP / DISCOVERY_PAGE_LIMIT,
+);
 const REQUEST_TIMEOUT_MS = 15_000;
 
 type JsonRecord = Record<string, unknown>;
@@ -80,6 +83,7 @@ export interface DiscoveryQualificationReport {
       found: boolean;
       complete: boolean;
       total?: number;
+      resourceCap: number;
       position?: number;
       item?: unknown;
    };
@@ -584,6 +588,7 @@ export async function qualifyRoundWatchDiscovery(options: {
          ...(catalogResult.total === undefined
             ? {}
             : { total: catalogResult.total }),
+         resourceCap: DISCOVERY_RESOURCE_CAP,
          ...(catalogMatch
             ? {
                  position: catalogMatch.position + 1,
