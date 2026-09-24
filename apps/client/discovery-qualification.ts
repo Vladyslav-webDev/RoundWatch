@@ -61,6 +61,15 @@ export interface ChallengeInspection {
    };
 }
 
+export interface CatalogPaymentInspection {
+   current: boolean;
+   observedAmounts: string[];
+   observedPayTos: string[];
+   settleCount?: number;
+   firstSeen?: string;
+   lastSeen?: string;
+}
+
 export interface SearchObservation {
    query: string;
    supported: boolean;
@@ -85,6 +94,8 @@ export interface DiscoveryQualificationReport {
       total?: number;
       resourceCap: number;
       position?: number;
+      currentTerms?: boolean;
+      payment?: CatalogPaymentInspection;
       item?: unknown;
    };
    searches: SearchObservation[];
@@ -97,12 +108,14 @@ export function classifyDiscoveryQualification(input: {
    challengeValid: boolean;
    catalogFound: boolean;
    catalogComplete: boolean;
+   catalogCurrent: boolean;
    searchEndpointSupported: boolean;
    searchHits: number;
 }): DiscoveryQualificationReport['overall'] {
    if (!input.challengeValid) return 'fail';
    if (!input.catalogFound && !input.catalogComplete) return 'inconclusive';
    if (!input.catalogFound) return 'fail';
+   if (!input.catalogCurrent) return 'fail';
    if (input.searchEndpointSupported && input.searchHits === 0) return 'fail';
    if (input.searchEndpointSupported) return 'pass';
    return 'partial';
@@ -154,6 +167,7 @@ export function discoveryResourceUrl(item: unknown): string | undefined {
    const record = asRecord(item);
    if (!record) return undefined;
 
+   if (typeof record.resourceUrl === 'string') return record.resourceUrl;
    if (typeof record.resource === 'string') return record.resource;
    if (typeof record.url === 'string') return record.url;
 
@@ -186,6 +200,61 @@ export function findDiscoveryResource(
 
    if (position < 0) return undefined;
    return { item: items[position], position };
+}
+
+
+export function inspectCatalogPayment(
+   item: unknown,
+): CatalogPaymentInspection {
+   const root = asRecord(item);
+   const accepts = root && Array.isArray(root.accepts)
+      ? root.accepts
+           .map(asRecord)
+           .filter((entry): entry is JsonRecord => entry !== undefined)
+      : [];
+
+   const observedAmounts = [
+      ...new Set(
+         accepts
+            .map(entry => entry.amount)
+            .filter((amount): amount is string => typeof amount === 'string'),
+      ),
+   ];
+   const observedPayTos = [
+      ...new Set(
+         accepts
+            .map(entry => entry.payTo)
+            .filter((payTo): payTo is string => typeof payTo === 'string'),
+      ),
+   ];
+
+   const current = accepts.some(requirement => {
+      const extra = asRecord(requirement.extra);
+      return (
+         requirement.scheme === 'exact' &&
+         requirement.network === ALGORAND_MAINNET &&
+         requirement.amount === SERVICE_ATOMIC_AMOUNT &&
+         String(requirement.asset ?? extra?.asset ?? '') ===
+            String(USDC_MAINNET_ASA_ID) &&
+         requirement.payTo === EXPECTED_RECEIVER &&
+         extra?.tag === CHALLENGE_TAG
+      );
+   });
+
+   return {
+      current,
+      observedAmounts,
+      observedPayTos,
+      ...(root && typeof root.settleCount === 'number'
+         ? { settleCount: root.settleCount }
+         : {}),
+      ...(root && typeof root.firstSeen === 'string'
+         ? { firstSeen: root.firstSeen }
+         : {}),
+      ...(root && typeof root.lastSeen === 'string'
+         ? { lastSeen: root.lastSeen }
+         : {}),
+   };
 }
 
 export function decodePaymentRequiredHeader(header: string): unknown {
@@ -551,6 +620,9 @@ export async function qualifyRoundWatchDiscovery(options: {
       catalogResult.items,
       resourceUrl,
    );
+   const catalogPayment = catalogMatch
+      ? inspectCatalogPayment(catalogMatch.item)
+      : undefined;
 
    const searches: SearchObservation[] = [];
    for (const query of DISCOVERY_SEARCH_QUERIES) {
@@ -567,6 +639,7 @@ export async function qualifyRoundWatchDiscovery(options: {
       challengeValid: challengeResult.inspection.valid,
       catalogFound: catalogMatch !== undefined,
       catalogComplete: catalogResult.complete,
+      catalogCurrent: catalogPayment?.current ?? false,
       searchEndpointSupported,
       searchHits,
    });
@@ -592,6 +665,8 @@ export async function qualifyRoundWatchDiscovery(options: {
          ...(catalogMatch
             ? {
                  position: catalogMatch.position + 1,
+                 currentTerms: catalogPayment?.current ?? false,
+                 ...(catalogPayment ? { payment: catalogPayment } : {}),
                  item: catalogMatch.item,
               }
             : {}),
