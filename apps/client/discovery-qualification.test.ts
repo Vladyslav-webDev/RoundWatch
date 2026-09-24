@@ -14,6 +14,7 @@ import {
    discoveryItems,
    discoveryResourceUrl,
    discoveryTotal,
+   inspectCatalogPayment,
    findDiscoveryResource,
    inspectRoundWatchChallenge,
 } from './discovery-qualification.js';
@@ -87,6 +88,7 @@ test('discovery parser accepts both current and legacy list envelopes', () => {
 });
 
 test('discovery resource URL extraction handles known facilitator shapes', () => {
+   assert.equal(discoveryResourceUrl({ resourceUrl: RESOURCE }), RESOURCE);
    assert.equal(discoveryResourceUrl({ resource: RESOURCE }), RESOURCE);
    assert.equal(discoveryResourceUrl({ url: RESOURCE }), RESOURCE);
    assert.equal(
@@ -113,6 +115,48 @@ test('findDiscoveryResource requires the exact public resource URL', () => {
       findDiscoveryResource(items, `${RESOURCE}/`),
       undefined,
    );
+});
+
+
+test('catalog payment inspection distinguishes stale and current Bazaar pricing', () => {
+   const stale = inspectCatalogPayment({
+      resourceUrl: RESOURCE,
+      accepts: [
+         {
+            scheme: 'exact',
+            network: ALGORAND_MAINNET,
+            amount: '1000',
+            asset: String(USDC_MAINNET_ASA_ID),
+            payTo: EXPECTED_RECEIVER,
+            extra: { tag: CHALLENGE_TAG },
+         },
+      ],
+      settleCount: 3,
+      firstSeen: '2026-09-16T10:26:05.997Z',
+      lastSeen: '2026-09-24T12:07:27.130Z',
+   });
+
+   assert.equal(stale.current, false);
+   assert.deepEqual(stale.observedAmounts, ['1000']);
+   assert.deepEqual(stale.observedPayTos, [EXPECTED_RECEIVER]);
+   assert.equal(stale.settleCount, 3);
+
+   const current = inspectCatalogPayment({
+      resourceUrl: RESOURCE,
+      accepts: [
+         {
+            scheme: 'exact',
+            network: ALGORAND_MAINNET,
+            amount: SERVICE_ATOMIC_AMOUNT,
+            asset: String(USDC_MAINNET_ASA_ID),
+            payTo: EXPECTED_RECEIVER,
+            extra: { tag: CHALLENGE_TAG },
+         },
+      ],
+   });
+
+   assert.equal(current.current, true);
+   assert.deepEqual(current.observedAmounts, [SERVICE_ATOMIC_AMOUNT]);
 });
 
 test('PAYMENT-REQUIRED decoding and inspection validates the current discovery contract', () => {
@@ -158,6 +202,7 @@ test('qualification verdict does not call a capped catalog scan an absence proof
          challengeValid: true,
          catalogFound: false,
          catalogComplete: false,
+         catalogCurrent: false,
          searchEndpointSupported: false,
          searchHits: 0,
       }),
@@ -169,6 +214,7 @@ test('qualification verdict does not call a capped catalog scan an absence proof
          challengeValid: true,
          catalogFound: false,
          catalogComplete: true,
+         catalogCurrent: false,
          searchEndpointSupported: false,
          searchHits: 0,
       }),
@@ -180,6 +226,19 @@ test('qualification verdict does not call a capped catalog scan an absence proof
          challengeValid: true,
          catalogFound: true,
          catalogComplete: true,
+         catalogCurrent: false,
+         searchEndpointSupported: false,
+         searchHits: 0,
+      }),
+      'fail',
+   );
+
+   assert.equal(
+      classifyDiscoveryQualification({
+         challengeValid: true,
+         catalogFound: true,
+         catalogComplete: true,
+         catalogCurrent: true,
          searchEndpointSupported: false,
          searchHits: 0,
       }),
