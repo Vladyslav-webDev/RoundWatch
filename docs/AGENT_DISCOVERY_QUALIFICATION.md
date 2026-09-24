@@ -163,6 +163,40 @@ conclusion from the missing header.
 The next evidence point is therefore a fresh full catalog qualification after
 this settlement.
 
+## Fourth live run — fresh settlement did not restore visibility
+
+A fresh qualification at 2026-09-24T12:16:02Z, roughly eight and a half minutes
+after the successful 0.02 USDC MainNet settlement, again completed the full
+catalog and did not find the exact RoundWatch resource URL:
+
+- 23 pages read;
+- 2,232 resources total;
+- `complete: true`;
+- exact RoundWatch resource absent;
+- `overall: "fail"`.
+
+The catalog itself had grown from 2,230 to 2,232 entries since the third run,
+so the directory was not globally static during this interval. One fresh
+RoundWatch settlement therefore did not make the resource visible within the
+observed window.
+
+Do not spend again yet. The next free diagnostic is to verify the exact client
+boundary required by Bazaar: the server-declared `bazaar` extension must be
+echoed into the signed `PaymentPayload.extensions`.
+
+Run:
+
+```bash
+pnpm -C apps/client probe:bazaar-payload
+```
+
+This probe creates and signs the x402 payment payload locally, but it never
+serializes it into a paid retry and never sends or settles the payment. It
+prints only extension-shape metadata, not the signed transaction or secret key.
+If the Bazaar extension is missing or mutated, the defect is client-side. If
+the echo is exact, the remaining investigation moves to facilitator-side
+catalog processing/compatibility.
+
 ## Why this comes before an autonomous paid-agent test
 
 The final black-box milestone is stronger: an unknown compatible agent should
