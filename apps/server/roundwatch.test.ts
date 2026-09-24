@@ -2867,6 +2867,28 @@ test('watch scanning still fails closed on malformed transaction envelopes', asy
 });
 
 test('malformed excluded evidence cannot advance coverage or produce expiry', async () => {
+   const matchingInner: Record<string, unknown> = {
+      id: 'N01_MATCHING_INNER',
+      sender: PAYER,
+      note: Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64'),
+      'confirmed-round': 101,
+      'round-time': 1_800_000_000,
+      'tx-type': 'axfer',
+      'asset-transfer-transaction': {
+         receiver: RECEIVER,
+         'asset-id': TESTNET_USDC_ASSET_ID,
+         amount: Number(SPEC.atomicAmount),
+         'close-amount': 0,
+      },
+   };
+   const validInnerParent: Record<string, unknown> = {
+      id: 'N01_VALID_PARENT',
+      sender: RECEIVER,
+      'confirmed-round': 101,
+      'round-time': 1_800_000_000,
+      'tx-type': 'appl',
+      'inner-txns': [matchingInner],
+   };
    const malformedVariants: Array<Record<string, unknown>> = [
       {
          id: 'N01_INNER_ROOT',
@@ -2895,6 +2917,44 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
          'asset-transfer-transaction': {
             'close-to': RECEIVER,
          },
+      },
+      {
+         ...validInnerParent,
+         id: 'N01_UNKNOWN_PARENT_TYPE',
+         'tx-type': 'not-a-transaction-type',
+      },
+      {
+         ...validInnerParent,
+         id: 'N01_PAY_PARENT_WITH_INNER',
+         'tx-type': 'pay',
+      },
+      {
+         ...validInnerParent,
+         id: 'N01_CONTRADICTORY_TRANSFER_ENVELOPE',
+         'asset-transfer-transaction':
+            matchingInner['asset-transfer-transaction'],
+      },
+      {
+         ...validInnerParent,
+         id: 'N01_AXFER_WITH_MALFORMED_DESCENDANT',
+         'inner-txns': [{
+            ...matchingInner,
+            'inner-txns': [null],
+         }],
+      },
+      {
+         ...validInnerParent,
+         id: 'N01_UNKNOWN_SIBLING_TYPE',
+         'inner-txns': [
+            matchingInner,
+            {
+               id: 'N01_UNKNOWN_SIBLING',
+               sender: PAYER,
+               'confirmed-round': 101,
+               'round-time': 1_800_000_000,
+               'tx-type': 'garbage',
+            },
+         ],
       },
    ];
 

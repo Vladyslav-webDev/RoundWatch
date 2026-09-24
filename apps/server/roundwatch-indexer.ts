@@ -446,6 +446,25 @@ interface ParsedAssetTransferEnvelope extends ParsedTransactionCommon {
 
 const MAX_INDEXER_INNER_TRANSACTIONS = 1_000;
 const MAX_INDEXER_INNER_DEPTH = 16;
+const SUPPORTED_INDEXER_TRANSACTION_TYPES = new Set([
+   'pay',
+   'keyreg',
+   'acfg',
+   'axfer',
+   'afrz',
+   'appl',
+   'stpf',
+   'hb',
+]);
+
+function assertSupportedTransactionType(
+   txType: string,
+   label: string,
+): void {
+   if (!SUPPORTED_INDEXER_TRANSACTION_TYPES.has(txType)) {
+      throw new Error(`${label} tx-type is unsupported`);
+   }
+}
 
 function parseTransactionCommon(
    value: unknown,
@@ -462,6 +481,11 @@ function parseTransactionCommon(
    }
 
    const note = parseOptionalNote(transaction.note, label);
+   const txType = nonEmptyString(
+      transaction['tx-type'],
+      `${label} tx-type`,
+   );
+   assertSupportedTransactionType(txType, label);
 
    return {
       ...(transactionId === undefined
@@ -476,13 +500,44 @@ function parseTransactionCommon(
          transaction['round-time'],
          `${label} round-time`,
       ),
-      txType: nonEmptyString(
-         transaction['tx-type'],
-         `${label} tx-type`,
-      ),
+      txType,
       ...(note === undefined ? {} : { note }),
       record: transaction,
    };
+}
+
+function assertTransactionEnvelopeShape(
+   common: ParsedTransactionCommon,
+   label: string,
+): void {
+   const assetTransfer = common.record['asset-transfer-transaction'];
+   const innerTransactions = common.record['inner-txns'];
+
+   if (common.txType === 'axfer') {
+      if (innerTransactions !== undefined) {
+         throw new Error(
+            `${label} axfer transaction cannot contain inner transactions`,
+         );
+      }
+      return;
+   }
+
+   if (assetTransfer !== undefined) {
+      throw new Error(
+         `${label} ${common.txType} transaction contains an asset-transfer envelope`,
+      );
+   }
+
+   if (innerTransactions !== undefined) {
+      if (common.txType !== 'appl') {
+         throw new Error(
+            `${label} ${common.txType} transaction cannot contain inner transactions`,
+         );
+      }
+      if (!Array.isArray(innerTransactions)) {
+         throw new Error(`${label} inner-txns is not an array`);
+      }
+   }
 }
 
 function parseAssetTransferEnvelope(
@@ -637,6 +692,7 @@ function parseWatchTransaction(
 ): IndexedWatchTransaction | undefined {
    const label = `transaction page item ${index}`;
    const common = parseTransactionCommon(value, label, true);
+   assertTransactionEnvelopeShape(common, label);
 
    if (common.round < minRound || common.round > maxRound) {
       throw new Error(`${label} lies outside the requested round range`);
@@ -737,6 +793,7 @@ function inspectInnerTransaction(
    }
 
    const common = parseTransactionCommon(value, label, false);
+   assertTransactionEnvelopeShape(common, label);
    if (common.round < minRound || common.round > maxRound) {
       throw new Error(`${label} lies outside the requested round range`);
    }
