@@ -9,6 +9,7 @@ import {
    USDC_MAINNET_ASA_ID,
 } from './mainnet-safety.js';
 import {
+   classifyDiscoveryQualification,
    decodePaymentRequiredHeader,
    discoveryItems,
    discoveryResourceUrl,
@@ -148,4 +149,40 @@ test('challenge inspection fails closed on missing agent-discovery metadata', ()
    assert.equal(inspected.valid, false);
    assert.match(inspected.errors.join('\n'), /missing discovery tag: usdc/);
    assert.match(inspected.errors.join('\n'), /missing extensions\.bazaar/);
+});
+
+
+test('qualification verdict does not call a capped catalog scan an absence proof', () => {
+   assert.equal(
+      classifyDiscoveryQualification({
+         challengeValid: true,
+         catalogFound: false,
+         catalogComplete: false,
+         searchEndpointSupported: false,
+         searchHits: 0,
+      }),
+      'inconclusive',
+   );
+
+   assert.equal(
+      classifyDiscoveryQualification({
+         challengeValid: true,
+         catalogFound: false,
+         catalogComplete: true,
+         searchEndpointSupported: false,
+         searchHits: 0,
+      }),
+      'fail',
+   );
+
+   assert.equal(
+      classifyDiscoveryQualification({
+         challengeValid: true,
+         catalogFound: true,
+         catalogComplete: true,
+         searchEndpointSupported: false,
+         searchHits: 0,
+      }),
+      'partial',
+   );
 });
