@@ -23,6 +23,8 @@ No second paid E2E was run after the correctness patch. Routine deployment verif
 
 The root `Dockerfile` uses Node 24.14.0 and pnpm 12.3.4, installs the frozen workspace lockfile, and starts `apps/server` through `tsx`. The container exposes port 4021 and uses `/ready`, not liveness-only `/health`, for its internal health check.
 
+Render must use **`/ready` as the service Health Check Path** as well. The repository does not contain a Render Blueprint/`render.yaml`, so this setting is managed in the Render Dashboard rather than source control. Configure `roundwatch-api → Settings → Health Check Path` to `/ready`. Keep `/health` as a lightweight process-liveness endpoint only.
+
 The hosting platform terminates HTTPS and supplies `PORT`. One application process runs the API, settlement reconciler, watch poller, and local SQLite connection. Do not scale this image horizontally without first designing shared durable state and worker coordination.
 
 ## Required MainNet environment

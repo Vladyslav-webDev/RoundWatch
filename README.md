@@ -85,7 +85,7 @@ The production server does not contain or need a wallet mnemonic or private key.
 
 ### Health and readiness
 
-`GET /health` is liveness only. Use `GET /ready` to decide whether the durable service is ready for paid traffic.
+`GET /health` is liveness only. Use `GET /ready` to decide whether the durable service is ready for paid traffic. Render's platform health check must target `/ready`; `/health` must remain a lightweight process-liveness endpoint and must not be used as the paid-traffic readiness signal.
 
 ```http
 GET /health
