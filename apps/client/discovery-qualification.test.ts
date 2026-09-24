@@ -135,9 +135,15 @@ test('PAYMENT-REQUIRED decoding and inspection validates the current discovery c
 test('challenge inspection fails closed on missing agent-discovery metadata', () => {
    const raw = challenge();
    raw.resource.tags = ['algorand'];
-   raw.extensions = {};
+   const withoutBazaar = {
+      ...raw,
+      extensions: {},
+   };
 
-   const inspected = inspectRoundWatchChallenge(raw, RESOURCE);
+   const inspected = inspectRoundWatchChallenge(
+      withoutBazaar,
+      RESOURCE,
+   );
 
    assert.equal(inspected.valid, false);
    assert.match(inspected.errors.join('\n'), /missing discovery tag: usdc/);
