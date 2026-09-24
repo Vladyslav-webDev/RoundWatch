@@ -31,7 +31,7 @@
 
 RoundWatch watches **one exact future Algorand MainNet USDC payment when no transaction ID exists yet**. A caller defines the expected payment, pays a one-time x402 service fee, receives a durable watch ID, and can exit. RoundWatch persists the obligation and scan progress, then exposes verified on-chain evidence for later retrieval.
 
-**Production:** Algorand MainNet · Circle USDC · x402 v2 · GoPlausible facilitator · Bazaar cataloged · remote MCP endpoint · durable restart recovery.
+**Production:** Algorand MainNet · Circle USDC · x402 v2 · GoPlausible facilitator · Bazaar metadata live (catalog visibility under requalification) · remote MCP endpoint · durable restart recovery.
 
 ## What it solves
 
@@ -337,7 +337,9 @@ After the initial MainNet proof, the production service received a larger correc
 
 A follow-up production fix at `d05fabaea6124ed5658dd13cf06167a885aefeb0` replaced an invalid Bazaar example receiver with a checksum-valid Algorand address and added regression coverage. A post-deploy external `402` smoke decoded the live `payment-required` header and verified the production URL, MainNet network, `exact` scheme, ASA `31566704`, amount `1000`, and checksum-valid Bazaar example addresses. No second paid MainNet E2E was performed after these hardening releases or is implied.
 
-GoPlausible Bazaar had already discovered the production resource with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. On 2026-09-16, the merchant leaderboard entry showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank of 145 among 147 entries is a dated observation, not a permanent project property.
+GoPlausible Bazaar had discovered the production resource on 2026-09-16 with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. The merchant leaderboard entry then showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. That is historical evidence, not a permanent catalog guarantee.
+
+A fresh full-catalog qualification on 2026-09-24 scanned all 2,230 resources returned by the configured GoPlausible discovery endpoint and did not find the exact current RoundWatch resource URL. The live unpaid `402` still carries valid x402/Bazaar metadata. Current catalog visibility is therefore being requalified separately from the payment and runtime contract.
 
 Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 

@@ -1,6 +1,6 @@
 # RoundWatch MainNet readiness
 
-Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-economics production deployment are proven. The current production `main` is `80ed94c746f2eac4a784a3738c6dbe8306ecfa3e`.
+Status: production API, paid MainNet E2E, durable invoice match, historical Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-economics production deployment are proven. Current Bazaar catalog visibility is being requalified after a 2026-09-24 full-catalog probe no longer found the exact resource URL.
 
 This is a dated evidence record, not an availability or performance guarantee.
 
@@ -170,6 +170,10 @@ On **2026-09-16**, GoPlausible Bazaar discovery returned:
 
 The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. Its observed rank was 145 among 147 merchant entries at the time queried. That rank is a dated observation and may change.
 
+On **2026-09-24**, a fresh read-only qualification decoded a valid live `402` with the expected Bazaar metadata, then completed all 23 catalog pages reported by the same facilitator: 2,230 resources total, exact RoundWatch resource URL not present. The optional `/discovery/search` endpoint returned HTTP 404. This establishes a current distribution/catalog visibility defect without implying a payment-runtime failure.
+
+The x402 Bazaar flow catalogs discovery metadata when a paying client echoes the extension in a `PaymentPayload` processed by the facilitator. A guarded one-payment MainNet recatalog proof is provided in `apps/client/bazaar-recatalog.ts`; the paid mode remains disabled unless a human explicitly authorizes that exact spend.
+
 ## Readiness gates
 
 | Gate | Status | Evidence |
@@ -195,7 +199,7 @@ The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: tru
 | Paid MainNet service purchase | Passed | Settlement transaction and active watch recorded below |
 | Later exact invoice match | Passed | Same invoice txid and round recorded by Indexer and RoundWatch |
 | Persistence through redeploy | Passed | Existing matched watch unchanged after multiple redeploys |
-| Bazaar discovery metadata | Passed | Production metadata is present; live post-deploy `402` smoke validates current URL/payment terms and checksum-valid examples |
+| Bazaar discovery metadata | Passed; catalog visibility needs refresh | Live `402` metadata is valid; historical listing was proven on 2026-09-16, but a complete 2026-09-24 catalog scan did not contain the exact resource URL |
 | Challenge attribution | Passed | Merchant entry reported `challenge: true` |
 
 ## Current release state

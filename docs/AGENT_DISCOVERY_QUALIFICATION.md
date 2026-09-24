@@ -97,6 +97,46 @@ the observed 2,225-resource catalog while preserving a bounded external scan.
 If a future catalog exceeds that cap before an exact RoundWatch match is found,
 the result remains `inconclusive`.
 
+## Third live run — confirmed catalog visibility defect
+
+The third production run on 2026-09-24 completed the full catalog reported by
+the facilitator: 23 pages, 2,230 resources, `complete: true`. The exact
+RoundWatch production resource URL was not present, so the resulting
+`overall: "fail"` is now a real distribution finding rather than a probe
+artifact.
+
+At the same time, the live unpaid RoundWatch response remained valid: HTTP 402,
+x402 v2, expected MainNet payment terms, `serviceName: "RoundWatch"`, the
+expected discovery tags, and the Bazaar HTTP input/output declaration were all
+present. The problem is therefore current catalog visibility, not missing live
+resource metadata.
+
+The x402 Bazaar flow catalogs a resource when the facilitator processes a
+paying client's echoed Bazaar extension. Historical RoundWatch evidence shows
+that this happened successfully on 2026-09-16, but the current catalog no longer
+contains the resource. The next proof step is a single deliberately authorized
+MainNet service settlement using the current metadata while capturing the
+`EXTENSION-RESPONSES` header, followed by another read-only catalog
+qualification.
+
+Use the guarded helper:
+
+```bash
+pnpm -C apps/client probe:bazaar-recatalog preflight
+```
+
+The preflight is free and cannot sign or settle. The paid mode is intentionally
+blocked unless the exact MainNet spend has been explicitly approved and
+`--confirm-mainnet` is supplied:
+
+```bash
+pnpm -C apps/client probe:bazaar-recatalog settle --confirm-mainnet
+```
+
+That paid command creates one normal RoundWatch obligation and spends exactly
+one current service payment of 0.02 USDC plus the Algorand network fee. It does
+not send the watched invoice payment.
+
 ## Why this comes before an autonomous paid-agent test
 
 The final black-box milestone is stronger: an unknown compatible agent should
