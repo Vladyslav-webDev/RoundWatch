@@ -9,10 +9,11 @@
     "spike:roundwatch:prepare": "tsx roundwatch-spike.ts prepare",
     "spike:roundwatch:recover": "tsx roundwatch-spike.ts recover",
     "spike:roundwatch:pay": "tsx roundwatch-spike.ts pay",
-    "test": "tsx --test mainnet-safety.test.ts discovery-qualification.test.ts",
+    "test": "tsx --test mainnet-safety.test.ts discovery-qualification.test.ts bazaar-recatalog.test.ts",
     "probe:discovery": "tsx discovery-qualification.ts",
     "typecheck": "tsc --noEmit",
-    "probe:txn-size": "tsx txn-size-probe.ts"
+    "probe:txn-size": "tsx txn-size-probe.ts",
+    "probe:bazaar-recatalog": "tsx bazaar-recatalog.ts"
   },
   "dependencies": {
     "@x402/avm": "2.25.0",
