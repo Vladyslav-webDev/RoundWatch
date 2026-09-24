@@ -9,7 +9,8 @@
     "spike:roundwatch:prepare": "tsx roundwatch-spike.ts prepare",
     "spike:roundwatch:recover": "tsx roundwatch-spike.ts recover",
     "spike:roundwatch:pay": "tsx roundwatch-spike.ts pay",
-    "test": "tsx --test mainnet-safety.test.ts",
+    "test": "tsx --test mainnet-safety.test.ts discovery-qualification.test.ts",
+    "probe:discovery": "tsx discovery-qualification.ts",
     "typecheck": "tsc --noEmit",
     "probe:txn-size": "tsx txn-size-probe.ts"
   },

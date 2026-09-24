@@ -81,6 +81,9 @@ Near-term work should emphasize:
 - direct developer conversations and integration feedback;
 - concrete Bazaar and MCP discovery tests from clients that were not configured
   specifically for RoundWatch;
+- run the free/read-only [Agent discovery qualification v0](docs/AGENT_DISCOVERY_QUALIFICATION.md)
+  before any new paid autonomous-agent experiment, so catalog visibility and
+  usage failures remain distinguishable;
 - minimal copy-paste integration examples for x402-capable agents and services;
 - production observation of `402 -> paid retry -> durable watch -> status`
   behavior without manufacturing demand;
