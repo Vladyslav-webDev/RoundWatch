@@ -57,8 +57,9 @@ The command prints one JSON report.
 - `inconclusive`: the challenge is valid but the catalog pagination limit was
   reached before the facilitator proved the filtered result set complete.
 - `fail`: the live challenge is wrong, the exact resource is absent from a
-  complete filtered catalog result, or a supported search endpoint returns no
-  RoundWatch hit for all qualification queries.
+  complete catalog result, the exact resource exists with stale payment terms,
+  or a supported search endpoint returns no RoundWatch hit for all
+  qualification queries.
 
 A failed search qualification is a distribution problem, not automatically a
 payment/security defect. Do not change payment or evidence code merely to chase
@@ -97,13 +98,14 @@ the observed 2,225-resource catalog while preserving a bounded external scan.
 If a future catalog exceeds that cap before an exact RoundWatch match is found,
 the result remains `inconclusive`.
 
-## Third live run — confirmed catalog visibility defect
+## Third live run — initial absence report (later corrected)
 
 The third production run on 2026-09-24 completed the full catalog reported by
-the facilitator: 23 pages, 2,230 resources, `complete: true`. The exact
-RoundWatch production resource URL was not present, so the resulting
-`overall: "fail"` is now a real distribution finding rather than a probe
-artifact.
+the facilitator: 23 pages, 2,230 resources, `complete: true`. At the time the
+probe reported the exact RoundWatch production resource as absent. Later raw
+catalog forensics proved that conclusion was caused by an incomplete parser:
+GoPlausible uses a top-level `resourceUrl` field, while the earlier probe only
+recognized `resource` / `url` variants.
 
 At the same time, the live unpaid RoundWatch response remained valid: HTTP 402,
 x402 v2, expected MainNet payment terms, `serviceName: "RoundWatch"`, the
@@ -163,22 +165,18 @@ conclusion from the missing header.
 The next evidence point is therefore a fresh full catalog qualification after
 this settlement.
 
-## Fourth live run — fresh settlement did not restore visibility
+## Fourth live run — stale catalog state after fresh settlement
 
 A fresh qualification at 2026-09-24T12:16:02Z, roughly eight and a half minutes
-after the successful 0.02 USDC MainNet settlement, again completed the full
-catalog and did not find the exact RoundWatch resource URL:
+after the successful 0.02 USDC MainNet settlement, completed 23 pages / 2,232
+resources. The old parser again reported the exact resource as absent. Later
+forensics showed that the resource was in fact present under GoPlausible's
+top-level `resourceUrl` field, but with stale 2026-09-16 payment terms.
 
-- 23 pages read;
-- 2,232 resources total;
-- `complete: true`;
-- exact RoundWatch resource absent;
-- `overall: "fail"`.
-
-The catalog itself had grown from 2,230 to 2,232 entries since the third run,
-so the directory was not globally static during this interval. One fresh
-RoundWatch settlement therefore did not make the resource visible within the
-observed window.
+The catalog itself had grown from 2,230 to 2,232 entries, so the directory was
+not globally static during this interval. The important finding is therefore
+not absence: a fresh settlement updated RoundWatch's catalog activity counters
+without replacing the stale price/discovery payload.
 
 Do not spend again yet. The next free diagnostic is to verify the exact client
 boundary required by Bazaar: the server-declared `bazaar` extension must be
@@ -234,6 +232,37 @@ whether this facilitator actually narrows the catalog for the advertised
 `payTo` query parameter.
 
 No signer, payment payload, settlement, or state mutation is involved.
+
+## Raw catalog result — exact resource present, metadata stale
+
+The raw GoPlausible resource record was inspected directly after the forensic
+probe. It contains the exact current RoundWatch URL:
+
+`https://roundwatch-api.onrender.com/v1/watch`
+
+and the current service receiver, but the persisted payment/discovery metadata
+is still the original 2026-09-16 contract:
+
+- catalog `accepts[0].amount = "1000"` (0.001 USDC), while live production
+  advertises `"20000"` (0.02 USDC);
+- discovery example input also still contains the old 1000-atomic amount;
+- `firstSeen = 2026-09-16T10:26:05.997Z`;
+- `lastSeen = 2026-09-24T12:07:27.130Z`;
+- `settleCount = 3`.
+
+That `lastSeen` coincides with the fresh authorized 0.02 USDC settlement, so
+GoPlausible observed the new payment and updated activity for the existing
+resource, but did not refresh the stored payment/discovery terms.
+
+The merchant directory independently confirms the same service receiver with
+`resourceCount = 3`, `totalSettlements = 6`, and the same fresh
+`lastSeen`. The standard `payTo` query parameter did not narrow the
+GoPlausible resource result set in this observation: both filtered and
+unfiltered requests returned all 2,232 resources.
+
+The qualification probe now recognizes GoPlausible's `resourceUrl` shape and
+fails current qualification when the exact resource exists but its cataloged
+payment requirement does not match the live 0.02 USDC contract.
 
 ## Why this comes before an autonomous paid-agent test
 
