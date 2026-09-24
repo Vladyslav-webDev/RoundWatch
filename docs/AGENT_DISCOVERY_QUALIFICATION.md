@@ -16,7 +16,8 @@ free/read-only network operations:
    HTTP `402` plus a decodable `PAYMENT-REQUIRED` header;
 2. validates the live x402 v2 resource identity, MainNet payment requirement,
    provider metadata, tags, and Bazaar HTTP input/output declaration;
-3. pages through the facilitator's `GET /discovery/resources` catalog and
+3. queries the facilitator's `GET /discovery/resources` catalog using the
+   x402-standard `payTo` filter for the RoundWatch service receiver, then
    requires the exact public RoundWatch resource URL to be present;
 4. if the facilitator implements `GET /discovery/search`, runs several
    natural-language searches that do not use the RoundWatch product name and
@@ -53,13 +54,34 @@ The command prints one JSON report.
   least one RoundWatch hit.
 - `partial`: the live challenge and catalog listing are correct, but this
   facilitator does not expose the optional natural-language search endpoint.
-- `fail`: the live challenge is wrong, the exact resource is absent from the
-  catalog, or a supported search endpoint returns no RoundWatch hit for all
-  qualification queries.
+- `inconclusive`: the challenge is valid but the catalog pagination limit was
+  reached before the facilitator proved the filtered result set complete.
+- `fail`: the live challenge is wrong, the exact resource is absent from a
+  complete filtered catalog result, or a supported search endpoint returns no
+  RoundWatch hit for all qualification queries.
 
 A failed search qualification is a distribution problem, not automatically a
 payment/security defect. Do not change payment or evidence code merely to chase
 search ranking.
+
+
+## First live run and probe correction
+
+The first production run on 2026-09-24 produced a valid live 402 contract, but
+the original catalog probe scanned exactly 20 pages / 2,000 entries and then hit
+its own hard page cap without finding RoundWatch. Because that scan had not
+proved that the catalog was exhausted, treating the result as a definite
+catalog absence was a probe bug rather than evidence that RoundWatch had been
+removed from Bazaar.
+
+The corrected probe uses the standard `payTo` filter first and records whether
+pagination is actually complete. A capped incomplete scan is now
+`inconclusive`, never a false absence proof.
+
+The same first run also showed HTTP 404 for all four
+`/discovery/search` requests. That means the currently configured GoPlausible
+facilitator does not expose that optional endpoint at the probed path; it does
+not make a valid catalog listing fail by itself.
 
 ## Why this comes before an autonomous paid-agent test
 

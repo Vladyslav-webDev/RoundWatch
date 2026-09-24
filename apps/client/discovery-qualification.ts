@@ -78,13 +78,30 @@ export interface DiscoveryQualificationReport {
       pagesRead: number;
       resultCount: number;
       found: boolean;
+      complete: boolean;
+      total?: number;
       position?: number;
       item?: unknown;
    };
    searches: SearchObservation[];
    searchEndpointSupported: boolean;
    searchHits: number;
-   overall: 'pass' | 'partial' | 'fail';
+   overall: 'pass' | 'partial' | 'inconclusive' | 'fail';
+}
+
+export function classifyDiscoveryQualification(input: {
+   challengeValid: boolean;
+   catalogFound: boolean;
+   catalogComplete: boolean;
+   searchEndpointSupported: boolean;
+   searchHits: number;
+}): DiscoveryQualificationReport['overall'] {
+   if (!input.challengeValid) return 'fail';
+   if (!input.catalogFound && !input.catalogComplete) return 'inconclusive';
+   if (!input.catalogFound) return 'fail';
+   if (input.searchEndpointSupported && input.searchHits === 0) return 'fail';
+   if (input.searchEndpointSupported) return 'pass';
+   return 'partial';
 }
 
 export function asRecord(value: unknown): JsonRecord | undefined {
@@ -339,19 +356,25 @@ async function readJsonResponse(response: Response): Promise<unknown> {
 
 async function readCatalog(
    facilitatorUrl: string,
+   payTo: string,
 ): Promise<{
    status: number;
    pagesRead: number;
    items: unknown[];
+   complete: boolean;
+   total?: number;
 }> {
    const items: unknown[] = [];
    let status = 0;
    let pagesRead = 0;
+   let lastTotal: number | undefined;
+   let complete = false;
 
    for (let page = 0; page < DISCOVERY_PAGE_CAP; page += 1) {
       const url = new URL('/discovery/resources', facilitatorUrl);
       url.searchParams.set('type', 'http');
       url.searchParams.set('extensions', 'bazaar');
+      url.searchParams.set('payTo', payTo);
       url.searchParams.set('limit', String(DISCOVERY_PAGE_LIMIT));
       url.searchParams.set(
          'offset',
@@ -374,16 +397,23 @@ async function readCatalog(
       const pageItems = discoveryItems(payload);
       items.push(...pageItems);
 
-      const total = discoveryTotal(payload);
+      lastTotal = discoveryTotal(payload) ?? lastTotal;
       if (
          pageItems.length < DISCOVERY_PAGE_LIMIT ||
-         (total !== undefined && items.length >= total)
+         (lastTotal !== undefined && items.length >= lastTotal)
       ) {
+         complete = true;
          break;
       }
    }
 
-   return { status, pagesRead, items };
+   return {
+      status,
+      pagesRead,
+      items,
+      complete,
+      ...(lastTotal === undefined ? {} : { total: lastTotal }),
+   };
 }
 
 async function runSearch(
@@ -509,7 +539,10 @@ export async function qualifyRoundWatchDiscovery(options: {
       DEFAULT_ROUNDWATCH_RESOURCE_URL;
 
    const challengeResult = await readLiveChallenge(resourceUrl);
-   const catalogResult = await readCatalog(facilitatorUrl);
+   const catalogResult = await readCatalog(
+      facilitatorUrl,
+      EXPECTED_RECEIVER,
+   );
    const catalogMatch = findDiscoveryResource(
       catalogResult.items,
       resourceUrl,
@@ -526,16 +559,13 @@ export async function qualifyRoundWatchDiscovery(options: {
    const searchHits = supportedSearches.filter(search => search.found).length;
    const searchEndpointSupported = supportedSearches.length > 0;
 
-   const coreQualified =
-      challengeResult.inspection.valid && catalogMatch !== undefined;
-   const overall =
-      !coreQualified
-         ? 'fail'
-         : searchEndpointSupported && searchHits === 0
-           ? 'fail'
-           : searchEndpointSupported
-             ? 'pass'
-             : 'partial';
+   const overall = classifyDiscoveryQualification({
+      challengeValid: challengeResult.inspection.valid,
+      catalogFound: catalogMatch !== undefined,
+      catalogComplete: catalogResult.complete,
+      searchEndpointSupported,
+      searchHits,
+   });
 
    return {
       generatedAt: new Date().toISOString(),
@@ -550,6 +580,10 @@ export async function qualifyRoundWatchDiscovery(options: {
          pagesRead: catalogResult.pagesRead,
          resultCount: catalogResult.items.length,
          found: catalogMatch !== undefined,
+         complete: catalogResult.complete,
+         ...(catalogResult.total === undefined
+            ? {}
+            : { total: catalogResult.total }),
          ...(catalogMatch
             ? {
                  position: catalogMatch.position + 1,
@@ -568,7 +602,10 @@ async function main(): Promise<void> {
    const report = await qualifyRoundWatchDiscovery();
    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 
-   if (report.overall === 'fail') {
+   if (
+      report.overall === 'fail' ||
+      report.overall === 'inconclusive'
+   ) {
       process.exitCode = 1;
    }
 }
