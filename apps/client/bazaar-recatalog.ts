@@ -32,46 +32,18 @@ const EVIDENCE_PATH = resolve('data/bazaar-recatalog-mainnet.json');
 
 type JsonRecord = Record<string, unknown>;
 
-export interface BazaarExtensionOutcome {
+export interface BuyerExtensionSidechannelObservation {
    present: boolean;
-   decoded?: unknown;
-   status?: string;
-   rejectedReason?: string;
-   decodeError?: string;
+   expectedPresent: false;
 }
 
-export function decodeExtensionResponsesHeader(
+export function observeBuyerExtensionSidechannel(
    header: string | null,
-): BazaarExtensionOutcome {
-   if (!header) return { present: false };
-
-   try {
-      const normalized = header
-         .replace(/-/g, '+')
-         .replace(/_/g, '/')
-         .padEnd(Math.ceil(header.length / 4) * 4, '=');
-      const decodedText = Buffer.from(normalized, 'base64').toString('utf8');
-      const decoded = JSON.parse(decodedText) as unknown;
-      const root = asRecord(decoded);
-      const bazaar = root ? asRecord(root.bazaar) : undefined;
-
-      return {
-         present: true,
-         decoded,
-         ...(bazaar && typeof bazaar.status === 'string'
-            ? { status: bazaar.status }
-            : {}),
-         ...(bazaar && typeof bazaar.rejectedReason === 'string'
-            ? { rejectedReason: bazaar.rejectedReason }
-            : {}),
-      };
-   } catch (error) {
-      return {
-         present: true,
-         decodeError:
-            error instanceof Error ? error.message : 'unknown decode error',
-      };
-   }
+): BuyerExtensionSidechannelObservation {
+   return {
+      present: header !== null,
+      expectedPresent: false,
+   };
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -191,7 +163,7 @@ async function main(): Promise<void> {
    const settlement = new x402HTTPClient(client).getPaymentSettleResponse(
       name => paid.headers.get(name),
    );
-   const extensionOutcome = decodeExtensionResponsesHeader(
+   const buyerExtensionSidechannel = observeBuyerExtensionSidechannel(
       paid.headers.get('extension-responses'),
    );
 
@@ -218,7 +190,7 @@ async function main(): Promise<void> {
       settlementTransaction: settlement?.transaction,
       settlementNetwork: settlement?.network,
       watchId,
-      extensionResponses: extensionOutcome,
+      buyerExtensionSidechannel,
    };
 
    mkdirSync(dirname(EVIDENCE_PATH), { recursive: true });
@@ -242,15 +214,9 @@ async function main(): Promise<void> {
       );
    }
 
-   if (extensionOutcome.status === 'rejected') {
+   if (buyerExtensionSidechannel.present) {
       throw new Error(
-         `Bazaar rejected the discovery extension: ${extensionOutcome.rejectedReason ?? 'no rejection reason supplied'}`,
-      );
-   }
-
-   if (extensionOutcome.decodeError) {
-      throw new Error(
-         `Could not decode EXTENSION-RESPONSES: ${extensionOutcome.decodeError}`,
+         'Protocol violation: EXTENSION-RESPONSES is server-internal and must not be forwarded to the buyer',
       );
    }
 
