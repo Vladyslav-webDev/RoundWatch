@@ -11,14 +11,21 @@ Use the endpoints for different purposes:
 
 - `GET /health` is liveness only. It proves that the HTTP process can answer.
 - `GET /ready` is the paid-traffic readiness signal. It uses a cached real
-  SQLite write/rollback probe, requires recent successful poller and reconciler
-  cycles with no newer cycle error, and requires the configured minimum free
-  space on the database filesystem.
+  SQLite write/rollback probe, requires healthy poller and reconciler work,
+  treats a cycle where every attempted obligation fails as unready, accepts
+  live successful per-obligation progress as a heartbeat during long bounded
+  sweeps, and requires the configured minimum free space on the database
+  filesystem.
 
 After every deployment, require `/ready` to return HTTP 200 before directing
 new paid watch creation traffic. The application also refuses new paid watch
 creation with HTTP 503 before x402 verification while readiness is red. A
 healthy-but-not-ready process must not be treated as ready for paid obligations.
+
+Render's **Health Check Path must be `/ready`**. Keep `/health` available for
+lightweight liveness diagnostics, but do not configure Render routing/deploy
+health to use it. This repository has no Render Blueprint/`render.yaml`, so
+the platform health-check path is an operator-managed Dashboard setting.
 
 Routine production smoke tests should be free: liveness, readiness, an unpaid
 watch request that returns HTTP 402, and reads of already-known watch IDs.
