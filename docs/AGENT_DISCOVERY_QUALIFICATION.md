@@ -197,6 +197,44 @@ If the Bazaar extension is missing or mutated, the defect is client-side. If
 the echo is exact, the remaining investigation moves to facilitator-side
 catalog processing/compatibility.
 
+## Payload echo result and catalog forensics
+
+The local payload-echo probe then confirmed the required client boundary exactly:
+
+- server declared `extensions.bazaar`;
+- the generated signed `PaymentPayload` also contained `extensions.bazaar`;
+- the Bazaar JSON shape was unchanged;
+- the HTTP discovery declaration remained `POST` / JSON input / JSON output;
+- no paid retry or network submission occurred.
+
+That removes the current RoundWatch client echo path from the leading suspect
+list. The next free diagnostic is catalog forensics rather than another payment.
+
+Run:
+
+```bash
+pnpm -C apps/client probe:bazaar-forensics
+```
+
+The forensic probe reads the full Bazaar resource catalog and, where available,
+the facilitator merchant directory. It looks for several independent RoundWatch
+identity signals instead of only the exact public URL:
+
+- exact resource URL;
+- `roundwatch-api.onrender.com` host;
+- `serviceName: RoundWatch`;
+- the current service receiver;
+- the challenge tag;
+- any RoundWatch text embedded elsewhere in a catalog entry.
+
+It also compares an unfiltered catalog request with the same request using the
+standard `payTo` filter. This distinguishes a true absence from cases where the
+resource was cataloged under a changed URL or stale payment terms, and tells us
+whether this facilitator actually narrows the catalog for the advertised
+`payTo` query parameter.
+
+No signer, payment payload, settlement, or state mutation is involved.
+
 ## Why this comes before an autonomous paid-agent test
 
 The final black-box milestone is stronger: an unknown compatible agent should
