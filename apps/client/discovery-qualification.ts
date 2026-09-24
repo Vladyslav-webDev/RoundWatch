@@ -89,6 +89,21 @@ export interface DiscoveryQualificationReport {
    overall: 'pass' | 'partial' | 'inconclusive' | 'fail';
 }
 
+export function classifyDiscoveryQualification(input: {
+   challengeValid: boolean;
+   catalogFound: boolean;
+   catalogComplete: boolean;
+   searchEndpointSupported: boolean;
+   searchHits: number;
+}): DiscoveryQualificationReport['overall'] {
+   if (!input.challengeValid) return 'fail';
+   if (!input.catalogFound && !input.catalogComplete) return 'inconclusive';
+   if (!input.catalogFound) return 'fail';
+   if (input.searchEndpointSupported && input.searchHits === 0) return 'fail';
+   if (input.searchEndpointSupported) return 'pass';
+   return 'partial';
+}
+
 export function asRecord(value: unknown): JsonRecord | undefined {
    return value !== null && typeof value === 'object' && !Array.isArray(value)
       ? value as JsonRecord
@@ -544,20 +559,13 @@ export async function qualifyRoundWatchDiscovery(options: {
    const searchHits = supportedSearches.filter(search => search.found).length;
    const searchEndpointSupported = supportedSearches.length > 0;
 
-   const challengeQualified = challengeResult.inspection.valid;
-   const catalogQualified = catalogMatch !== undefined;
-   const overall =
-      !challengeQualified
-         ? 'fail'
-         : !catalogQualified && !catalogResult.complete
-           ? 'inconclusive'
-           : !catalogQualified
-             ? 'fail'
-             : searchEndpointSupported && searchHits === 0
-               ? 'fail'
-               : searchEndpointSupported
-                 ? 'pass'
-                 : 'partial';
+   const overall = classifyDiscoveryQualification({
+      challengeValid: challengeResult.inspection.valid,
+      catalogFound: catalogMatch !== undefined,
+      catalogComplete: catalogResult.complete,
+      searchEndpointSupported,
+      searchHits,
+   });
 
    return {
       generatedAt: new Date().toISOString(),
