@@ -115,9 +115,14 @@ The x402 Bazaar flow catalogs a resource when the facilitator processes a
 paying client's echoed Bazaar extension. Historical RoundWatch evidence shows
 that this happened successfully on 2026-09-16, but the current catalog no longer
 contains the resource. The next proof step is a single deliberately authorized
-MainNet service settlement using the current metadata while capturing the
-`EXTENSION-RESPONSES` header, followed by another read-only catalog
-qualification.
+MainNet service settlement using the current metadata, followed by another
+read-only catalog qualification.
+
+The x402 `EXTENSION-RESPONSES` channel is facilitator-to-resource-server
+internal metadata. It is intentionally stripped from the buyer-facing
+`PAYMENT-RESPONSE`, so the paying client must not treat absence of that header
+as a Bazaar failure. RoundWatch now logs any future Bazaar sidechannel outcome
+from the server-side settle hook instead.
 
 Use the guarded helper:
 
@@ -136,6 +141,27 @@ pnpm -C apps/client probe:bazaar-recatalog settle --confirm-mainnet
 That paid command creates one normal RoundWatch obligation and spends exactly
 one current service payment of 0.02 USDC plus the Algorand network fee. It does
 not send the watched invoice payment.
+
+## Paid recatalog settlement
+
+A deliberately authorized production settlement was completed on
+2026-09-24 using the current 0.02 USDC service contract:
+
+- HTTP 200 from the paid resource;
+- settlement succeeded on Algorand MainNet;
+- service transaction:
+  `VC5DYV4VC2PXPX66YX6GBGDA2Y2AWRURXQ6KKPBZNRTV6YAFMAHA`;
+- durable watch:
+  `73296bbf-9429-4512-8caa-30a09cfc320b`.
+
+The buyer-facing response did not contain `EXTENSION-RESPONSES`. That is the
+protocol-correct behavior: the sidechannel is server-internal and is not
+forwarded to buyers. The original recatalog helper incorrectly expected buyer
+visibility; that diagnostic assumption was corrected before drawing any Bazaar
+conclusion from the missing header.
+
+The next evidence point is therefore a fresh full catalog qualification after
+this settlement.
 
 ## Why this comes before an autonomous paid-agent test
 

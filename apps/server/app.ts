@@ -148,6 +148,60 @@ function normalizeX402DecodedPath(path: string): string {
    );
 }
 
+interface BazaarExtensionOutcome {
+   status?: string;
+   rejectedReason?: string;
+}
+
+function readBazaarExtensionOutcome(
+   result: unknown,
+): BazaarExtensionOutcome | undefined {
+   if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      return undefined;
+   }
+
+   const extensionResponses =
+      (result as { extensionResponses?: unknown }).extensionResponses;
+   if (
+      !extensionResponses ||
+      typeof extensionResponses !== 'object' ||
+      Array.isArray(extensionResponses)
+   ) {
+      return undefined;
+   }
+
+   const bazaar =
+      (extensionResponses as Record<string, unknown>).bazaar;
+   if (!bazaar || typeof bazaar !== 'object' || Array.isArray(bazaar)) {
+      return undefined;
+   }
+
+   const record = bazaar as Record<string, unknown>;
+   return {
+      ...(typeof record.status === 'string'
+         ? { status: record.status }
+         : {}),
+      ...(typeof record.rejectedReason === 'string'
+         ? { rejectedReason: record.rejectedReason }
+         : {}),
+   };
+}
+
+function logBazaarExtensionOutcome(result: unknown): void {
+   const outcome = readBazaarExtensionOutcome(result);
+
+   if (!outcome) {
+      console.info(
+         'RoundWatch Bazaar extension outcome unavailable from facilitator sidechannel',
+      );
+      return;
+   }
+
+   console.info(
+      `RoundWatch Bazaar extension outcome status=${outcome.status ?? 'unknown'}${outcome.rejectedReason ? ` rejectedReason=${outcome.rejectedReason}` : ''}`,
+   );
+}
+
 export interface AppDependencies {
    avmAddress: string;
    facilitatorClient: FacilitatorClient;
@@ -384,6 +438,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       ) {
          return;
       }
+
+      logBazaarExtensionOutcome(context.result);
 
       const watchId = getHeader(transport.responseHeaders, ROUNDWATCH_ID_HEADER);
 
