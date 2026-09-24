@@ -339,7 +339,7 @@ A follow-up production fix at `d05fabaea6124ed5658dd13cf06167a885aefeb0` replace
 
 GoPlausible Bazaar had discovered the production resource on 2026-09-16 with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. The merchant leaderboard entry then showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. That is historical evidence, not a permanent catalog guarantee.
 
-A fresh full-catalog qualification on 2026-09-24 scanned all 2,230 resources returned by the configured GoPlausible discovery endpoint and did not find the exact current RoundWatch resource URL. The live unpaid `402` still carries valid x402/Bazaar metadata. Current catalog visibility is therefore being requalified separately from the payment and runtime contract.
+A fresh 2026-09-24 qualification initially reported the RoundWatch resource absent, but raw catalog forensics corrected that parser error: GoPlausible stores the exact production URL under a top-level `resourceUrl` field. The resource is present, but its stored payment/discovery terms are stale at the original `1000` atomic (0.001 USDC) contract. A fresh authorized 0.02 USDC settlement advanced the same catalog record's `lastSeen` / `settleCount` without refreshing its stored `accepts` amount to the live `20000` atomic price.
 
 Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 
