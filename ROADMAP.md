@@ -64,6 +64,35 @@ discoverability. A compatible client can inspect the live machine-readable
 contract, but black-box discovery by an unknown agent remains a separate
 milestone below.
 
+The 2026-09-24 remediation checkpoint independently re-tested the previously
+reproduced security release blockers on exact production revision
+`4e291168ffee803ce663833608caa4fd1ea771f7` and verified them closed. See
+[the security verification baseline](docs/SECURITY_VERIFICATION_BASELINE_2026-09-24.md).
+
+## Current priority — Distribution and real integration evidence
+
+The immediate product priority is now to learn whether real developers and
+autonomous clients can discover, understand, and use RoundWatch without operator
+coaching. Security hardening remains a protected invariant, but it is no longer
+the default source of new work after closure of the verified release blockers.
+
+Near-term work should emphasize:
+
+- direct developer conversations and integration feedback;
+- concrete Bazaar and MCP discovery tests from clients that were not configured
+  specifically for RoundWatch;
+- minimal copy-paste integration examples for x402-capable agents and services;
+- production observation of `402 -> paid retry -> durable watch -> status`
+  behavior without manufacturing demand;
+- evidence about where users abandon the purchase path or misunderstand the
+  machine-readable contract; and
+- product changes justified by observed integration friction rather than
+  speculative feature expansion.
+
+Do not weaken or casually refactor the verified payment, evidence, recovery,
+expiry, or readiness boundaries while pursuing distribution. Changes to those
+areas should trigger focused security regression verification.
+
 ## Now — Autonomy Foundation v0
 
 The immediate priority is to make the payment and watch lifecycle unambiguous,

@@ -2,6 +2,19 @@
 
 This document describes the implemented boundaries and controls. It is not a claim of formal verification, an SLA, or unlimited production capacity.
 
+## Verification baseline
+
+The remediation cycle completed on 2026-09-24 with an independent targeted
+re-test of the previously reproduced release blockers against exact commit
+`4e291168ffee803ce663833608caa4fd1ea771f7`. All previously identified release
+blockers in that targeted scope were verified closed. The exact scope, test
+counts, operational Render readiness state, critical-core change policy, and
+future audit triggers are recorded in
+[SECURITY_VERIFICATION_BASELINE_2026-09-24.md](SECURITY_VERIFICATION_BASELINE_2026-09-24.md).
+
+That verification is a revision-specific evidence checkpoint, not a claim that
+future revisions inherit the result automatically.
+
 ## Wallet and signer boundary
 
 RoundWatch never needs the payer's mnemonic or private key. The payer restores and uses its signer in the client process, then sends only the signed x402 payment payload. The server is configured with its public Algorand receiver address (`AVM_ADDRESS`) and does not sign wallet transactions.
