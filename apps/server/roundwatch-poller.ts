@@ -11,6 +11,7 @@ import {
 } from './roundwatch-work-budget.js';
 import {
    WorkerHealthTracker,
+   type WorkerCycleOutcome,
    type WorkerHealthSnapshot,
 } from './roundwatch-worker-health.js';
 
@@ -97,12 +98,19 @@ export class RoundWatchPoller {
       return this.healthSnapshot().ready;
    }
 
-   async runOnce(): Promise<void> {
+   async runOnce(
+      onProgress?: () => void,
+   ): Promise<WorkerCycleOutcome> {
+      const outcome: WorkerCycleOutcome = {
+         attempted: 0,
+         succeeded: 0,
+         failed: 0,
+      };
       const watches = this.store.listActiveWatches();
 
       if (watches.length === 0) {
          this.nextWatchIndex = 0;
-         return;
+         return outcome;
       }
 
       const startIndex = this.nextWatchIndex % watches.length;
@@ -169,9 +177,13 @@ export class RoundWatchPoller {
       };
 
       for (const watch of ordered) {
+         outcome.attempted += 1;
          try {
             await this.serviceWatch(watch, getSweepTip, getSweepPage);
+            outcome.succeeded += 1;
+            onProgress?.();
          } catch (error) {
+            outcome.failed += 1;
             this.sessions.delete(watch.id);
             // A cached page may contain a provider continuation token that
             // later became invalid. Clear the bounded cache on any scan-path
@@ -184,6 +196,8 @@ export class RoundWatchPoller {
             );
          }
       }
+
+      return outcome;
    }
 
    private async serviceWatch(
@@ -420,8 +434,10 @@ export class RoundWatchPoller {
       this.running = true;
       this.workerHealth.markCycleStarted();
       try {
-         await this.runOnce();
-         this.workerHealth.markCycleSucceeded();
+         const outcome = await this.runOnce(() =>
+            this.workerHealth.markCycleProgress(),
+         );
+         this.workerHealth.markCycleCompleted(outcome);
       } catch (error) {
          this.workerHealth.markCycleFailed();
          console.error('RoundWatch poll failed:', safeErrorMessage(error));

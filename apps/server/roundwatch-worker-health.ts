@@ -1,9 +1,16 @@
+export interface WorkerCycleOutcome {
+   attempted: number;
+   succeeded: number;
+   failed: number;
+}
+
 export interface WorkerHealthSnapshot {
    started: boolean;
    running: boolean;
    ready: boolean;
    consecutiveFailures: number;
    lastCycleStartedAtMs?: number;
+   lastProgressAtMs?: number;
    lastSuccessAtMs?: number;
    lastErrorAtMs?: number;
 }
@@ -13,6 +20,7 @@ export class WorkerHealthTracker {
    private running = false;
    private consecutiveFailures = 0;
    private lastCycleStartedAtMs?: number;
+   private lastProgressAtMs?: number;
    private lastSuccessAtMs?: number;
    private lastErrorAtMs?: number;
 
@@ -32,10 +40,34 @@ export class WorkerHealthTracker {
       this.lastCycleStartedAtMs = this.now();
    }
 
-   markCycleSucceeded(): void {
+   markCycleProgress(): void {
+      if (!this.running) return;
+      this.lastProgressAtMs = this.now();
+   }
+
+   markCycleCompleted(outcome: WorkerCycleOutcome): void {
+      validateOutcome(outcome);
       this.running = false;
+
+      if (outcome.failed > 0) {
+         this.lastErrorAtMs = this.now();
+      }
+
+      if (
+         outcome.attempted > 0 &&
+         outcome.succeeded === 0 &&
+         outcome.failed > 0
+      ) {
+         this.consecutiveFailures += 1;
+         return;
+      }
+
       this.consecutiveFailures = 0;
       this.lastSuccessAtMs = this.now();
+   }
+
+   markCycleSucceeded(): void {
+      this.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
    }
 
    markCycleFailed(): void {
@@ -55,13 +87,28 @@ export class WorkerHealthTracker {
       }
 
       const now = this.now();
+      const freshestHealthyAt = Math.max(
+         this.lastSuccessAtMs ?? Number.NEGATIVE_INFINITY,
+         this.lastProgressAtMs ?? Number.NEGATIVE_INFINITY,
+      );
       const successFresh =
-         this.lastSuccessAtMs !== undefined &&
-         now - this.lastSuccessAtMs <= maxSilenceMilliseconds;
+         Number.isFinite(freshestHealthyAt) &&
+         now - freshestHealthyAt <= maxSilenceMilliseconds;
+
+      const currentCycleHeartbeat =
+         this.running && this.lastCycleStartedAtMs !== undefined
+            ? Math.max(
+                 this.lastCycleStartedAtMs,
+                 this.lastProgressAtMs !== undefined &&
+                    this.lastProgressAtMs >= this.lastCycleStartedAtMs
+                    ? this.lastProgressAtMs
+                    : this.lastCycleStartedAtMs,
+              )
+            : undefined;
       const cycleNotStalled =
          !this.running ||
-         (this.lastCycleStartedAtMs !== undefined &&
-            now - this.lastCycleStartedAtMs <= maxSilenceMilliseconds);
+         (currentCycleHeartbeat !== undefined &&
+            now - currentCycleHeartbeat <= maxSilenceMilliseconds);
       const ready =
          this.started &&
          successFresh &&
@@ -76,6 +123,9 @@ export class WorkerHealthTracker {
          ...(this.lastCycleStartedAtMs === undefined
             ? {}
             : { lastCycleStartedAtMs: this.lastCycleStartedAtMs }),
+         ...(this.lastProgressAtMs === undefined
+            ? {}
+            : { lastProgressAtMs: this.lastProgressAtMs }),
          ...(this.lastSuccessAtMs === undefined
             ? {}
             : { lastSuccessAtMs: this.lastSuccessAtMs }),
@@ -83,5 +133,18 @@ export class WorkerHealthTracker {
             ? {}
             : { lastErrorAtMs: this.lastErrorAtMs }),
       };
+   }
+}
+
+function validateOutcome(outcome: WorkerCycleOutcome): void {
+   for (const [label, value] of Object.entries(outcome)) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+         throw new Error(`worker cycle ${label} must be a non-negative safe integer`);
+      }
+   }
+   if (outcome.succeeded + outcome.failed !== outcome.attempted) {
+      throw new Error(
+         'worker cycle attempted must equal succeeded plus failed',
+      );
    }
 }

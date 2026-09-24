@@ -7,6 +7,7 @@ import {
 } from './roundwatch-work-budget.js';
 import {
    WorkerHealthTracker,
+   type WorkerCycleOutcome,
    type WorkerHealthSnapshot,
 } from './roundwatch-worker-health.js';
 
@@ -77,9 +78,11 @@ export class SettlementReconciler {
          if (this.running) return;
 
          this.workerHealth.markCycleStarted();
-         void this.reconcileOnce()
-            .then(() => {
-               this.workerHealth.markCycleSucceeded();
+         void this.reconcileOnce(() =>
+            this.workerHealth.markCycleProgress(),
+         )
+            .then(outcome => {
+               this.workerHealth.markCycleCompleted(outcome);
             })
             .catch(error => {
                this.workerHealth.markCycleFailed();
@@ -110,20 +113,34 @@ export class SettlementReconciler {
       return this.healthSnapshot().ready;
    }
 
-   async reconcileOnce(): Promise<void> {
-      if (this.running) return;
+   async reconcileOnce(
+      onProgress?: () => void,
+   ): Promise<WorkerCycleOutcome> {
+      const outcome: WorkerCycleOutcome = {
+         attempted: 0,
+         succeeded: 0,
+         failed: 0,
+      };
+      if (this.running) return outcome;
       this.running = true;
       try {
          for (const watch of this.store.listSettlementReconciliationCandidates()) {
+            outcome.attempted += 1;
             try {
                await this.reconcileWatch(watch);
+               outcome.succeeded += 1;
+               onProgress?.();
             } catch (error) {
+               outcome.failed += 1;
                this.absenceProofSessions.delete(watch.id);
                this.defer(watch);
                console.error(`RoundWatch settlement reconciliation failed for watch ${watch.id}:`, safeErrorMessage(error));
             }
          }
-      } finally { this.running = false; }
+      } finally {
+         this.running = false;
+      }
+      return outcome;
    }
 
    private async reconcileWatch(watch: WatchRecord): Promise<void> {

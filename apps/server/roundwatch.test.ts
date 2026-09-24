@@ -1048,7 +1048,7 @@ test('store readiness is cached, writable, and fails after close', () => {
    assert.equal(store.readinessCheck(), false);
 });
 
-test('worker health requires successful fresh progress and fails on errors or stalls', () => {
+test('worker health requires successful work, accepts live progress, and rejects all-failed cycles', () => {
    let now = 1_000;
    const tracker = new WorkerHealthTracker(() => now);
 
@@ -1057,25 +1057,100 @@ test('worker health requires successful fresh progress and fails on errors or st
 
    tracker.markCycleStarted();
    now = 1_100;
-   tracker.markCycleSucceeded();
+   tracker.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
    assert.equal(tracker.snapshot(1_000).ready, true);
 
    now = 1_200;
    tracker.markCycleStarted();
-   tracker.markCycleFailed();
+   now = 1_900;
+   tracker.markCycleProgress();
+   now = 2_600;
+   const progressing = tracker.snapshot(1_000);
+   assert.equal(progressing.ready, true);
+   assert.equal(progressing.running, true);
+   assert.equal(progressing.lastProgressAtMs, 1_900);
+
+   now = 3_001;
    assert.equal(tracker.snapshot(1_000).ready, false);
 
-   tracker.markCycleStarted();
-   now = 1_300;
-   tracker.markCycleSucceeded();
-   assert.equal(tracker.snapshot(1_000).ready, true);
+   now = 3_100;
+   tracker.markCycleCompleted({ attempted: 2, succeeded: 0, failed: 2 });
+   const failed = tracker.snapshot(1_000);
+   assert.equal(failed.ready, false);
+   assert.equal(failed.consecutiveFailures, 1);
 
    tracker.markCycleStarted();
-   now = 2_401;
+   now = 3_200;
+   tracker.markCycleProgress();
+   tracker.markCycleCompleted({ attempted: 2, succeeded: 1, failed: 1 });
+   const recovered = tracker.snapshot(1_000);
+   assert.equal(recovered.ready, true);
+   assert.equal(recovered.consecutiveFailures, 0);
+   assert.equal(recovered.lastErrorAtMs, 3_200);
+
+   tracker.markCycleStarted();
+   tracker.markCycleFailed();
    assert.equal(tracker.snapshot(1_000).ready, false);
 
    tracker.markStopped();
    assert.equal(tracker.snapshot(1_000).ready, false);
+});
+
+test('poller cycle outcome exposes isolated watch failures to readiness accounting', async () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      for (let i = 0; i < 2; i += 1) {
+         const serviceTx = `WORKER_FAIL_SERVICE_${i}`;
+         const watch = store.prepareWatch(
+            {
+               ...SPEC,
+               idempotencyKey: `worker-failure-${i}`,
+            },
+            intent(serviceTx),
+         ).watch;
+         store.activateWatch(
+            watch.id,
+            {
+               transaction: serviceTx,
+               network: ALGORAND_TESTNET,
+               payer: PAYER,
+            },
+            100,
+         );
+      }
+
+      const failingIndexer: RoundWatchIndexer = {
+         getCurrentRound: async () => {
+            throw new Error('synthetic total provider failure');
+         },
+         lookupAssetTransfer: async () => undefined,
+         getBlock: async round => ({ round, timestamp: 0 }),
+         searchWatchPage: async () => {
+            throw new Error('unexpected page request');
+         },
+         searchTransactionPage: async () => ({
+            transactions: [],
+            currentRound: 100,
+         }),
+      };
+
+      let progressSignals = 0;
+      const outcome = await new RoundWatchPoller(
+         store,
+         failingIndexer,
+      ).runOnce(() => {
+         progressSignals += 1;
+      });
+
+      assert.deepEqual(outcome, {
+         attempted: 2,
+         succeeded: 0,
+         failed: 2,
+      });
+      assert.equal(progressSignals, 0);
+   } finally {
+      store.close();
+   }
 });
 
 test('disk-headroom readiness uses available filesystem blocks and fails closed on stat errors', () => {
