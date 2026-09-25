@@ -54,7 +54,7 @@ function check(
    condition: boolean,
    detail: string,
 ): void {
-   checks.push({ name, ok: condition, detail });
+   checks.push({ name, ok: condition, detail: condition ? 'pass' : detail });
    if (!condition) {
       throw new Error(`${name}: ${detail}`);
    }
