@@ -244,11 +244,11 @@ function createWatchDiscovery(
    return declareDiscoveryExtension({
       bodyType: 'json',
       input: {
-         idempotencyKey: 'invoice-2026-09-15-001',
+         idempotencyKey: 'replace-with-unique-idempotency-key',
          expectedSender: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
          expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
          atomicAmount: '1000000',
-         invoiceNote: 'roundwatch:invoice-2026-09-15-001',
+         invoiceNote: 'replace-with-unique-invoice-note',
       },
       inputSchema: {
          properties: {
