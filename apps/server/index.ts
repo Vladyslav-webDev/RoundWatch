@@ -305,6 +305,7 @@ const app = createApp({
       burst: signedPaymentBurst,
       concurrency: signedPaymentConcurrency,
    },
+   requestTelemetry: {},
    readinessCheck: () => {
       const storage = store.readinessCheck();
       const pollerReady = poller.readinessCheck();
@@ -374,6 +375,9 @@ server.on('listening', () => {
    );
    console.log(
       `Readiness disk headroom floor: ${minimumFreeDiskBytes} bytes`,
+   );
+   console.log(
+      'Request telemetry: enabled (structured JSON; ephemeral HMAC fingerprints)',
    );
    console.log(
       `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx --test roundwatch.test.ts roundwatch-reconciler.test.ts roundwatch-metrics.test.ts free-payment-gate.test.ts",
+    "test": "tsx --test roundwatch.test.ts roundwatch-reconciler.test.ts roundwatch-metrics.test.ts free-payment-gate.test.ts request-telemetry.test.ts",
     "dev": "tsx index.ts",
     "start": "tsx index.ts",
     "typecheck": "tsc --noEmit",
