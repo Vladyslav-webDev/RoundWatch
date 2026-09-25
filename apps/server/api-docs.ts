@@ -214,7 +214,7 @@ export function buildOpenApiDocument(
                   },
                   '402': {
                      description:
-                        'Payment required. Read the PAYMENT-REQUIRED header, create the advertised x402 payment, then retry the same request with PAYMENT-SIGNATURE.',
+                        'Payment required and discovery metadata available. This unpaid response may be returned before semantic validation of the submitted body; use the declared OpenAPI/Bazaar request shape, then retry with PAYMENT-SIGNATURE. Signed retries are validated before facilitator verification or settlement.',
                      headers: {
                         'PAYMENT-REQUIRED': {
                            required: true,
