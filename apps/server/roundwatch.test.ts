@@ -214,6 +214,10 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
       );
       assert.ok(create?.responses?.['402']?.headers?.['PAYMENT-REQUIRED']);
       assert.equal(
+         document.paths?.['/v1/watch/recover']?.post?.operationId,
+         'recoverWatch',
+      );
+      assert.equal(
          document.paths?.['/v1/watch/{id}']?.get?.operationId,
          'getWatch',
       );
@@ -255,6 +259,9 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
       assert.match(body, /no transaction ID exists yet/i);
       assert.match(body, /RoundWatch is not a webhook delivery service/i);
       assert.match(body, /POST \/v1\/watch/);
+      assert.match(body, /POST \/v1\/watch\/recover/);
+      assert.match(body, /do not repay/i);
+      assert.match(body, /servicePayer/);
       assert.match(body, /GET \/v1\/watch\/\{id\}/);
       assert.match(body, /Readiness: .*\/ready/);
       assert.match(body, /1800000 ms/);
@@ -377,6 +384,7 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
          [
             'roundwatch.service_info',
             'roundwatch.prepare_watch',
+            'roundwatch.prepare_recovery',
             'roundwatch.get_watch',
          ],
       );
@@ -480,6 +488,66 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
             ?.exactDeadlineEligible,
          false,
       );
+      const recovery = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            ...modernHeaders,
+            'mcp-method': 'tools/call',
+            'mcp-name': 'roundwatch.prepare_recovery',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 31,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.prepare_recovery',
+               arguments: {
+                  idempotencyKey: 'mcp-invoice-001',
+                  expectedSender: PAYER,
+                  expectedReceiver: RECEIVER,
+                  atomicAmount: '1000000',
+                  invoiceNote: 'roundwatch:mcp-invoice-001',
+                  servicePayer: PAYER,
+               },
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                  'io.modelcontextprotocol/clientCapabilities': {},
+               },
+            },
+         }),
+      });
+      assert.equal(recovery.status, 200);
+      assert.equal(recovery.headers.get('payment-required'), null);
+      const recoveryBody = await recovery.json() as {
+         result?: {
+            isError?: unknown;
+            structuredContent?: {
+               paid?: unknown;
+               recovered?: unknown;
+               request?: {
+                  method?: unknown;
+                  url?: unknown;
+                  body?: { servicePayer?: unknown };
+               };
+            };
+         };
+      };
+      assert.equal(recoveryBody.result?.isError, false);
+      assert.equal(recoveryBody.result?.structuredContent?.paid, false);
+      assert.equal(recoveryBody.result?.structuredContent?.recovered, false);
+      assert.equal(
+         recoveryBody.result?.structuredContent?.request?.method,
+         'POST',
+      );
+      assert.equal(
+         recoveryBody.result?.structuredContent?.request?.url,
+         'https://roundwatch-api.onrender.com/v1/watch/recover',
+      );
+      assert.equal(
+         recoveryBody.result?.structuredContent?.request?.body?.servicePayer,
+         PAYER,
+      );
+
       assert.equal(
          store.getByIdempotencyKey('mcp-invoice-001'),
          undefined,

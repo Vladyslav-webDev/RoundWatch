@@ -37,6 +37,7 @@ export function buildOpenApiDocument(
    } = options;
 
    const watchStatusPath = `${watchPath}/{id}`;
+   const watchRecoveryPath = `${watchPath}/recover`;
    const eligibility = buildWatchEligibilityContract(
       watchTtlMilliseconds,
    );
@@ -269,6 +270,88 @@ export function buildOpenApiDocument(
                },
             },
          },
+         [watchRecoveryPath]: {
+            post: {
+               tags: ['RoundWatch'],
+               operationId: 'recoverWatch',
+               summary: 'Recover an existing watch after losing the paid create response',
+               description:
+                  'Free exact recovery lookup. Use this after a paid create may have succeeded but the caller lost the returned watchId. Submit the exact original watch specification plus the public Algorand service-payer address that signed the x402 service payment. This endpoint never verifies or settles a payment. It returns only an already activated or matched exact watch. Do not repay merely because the original response was lost.',
+               requestBody: {
+                  required: true,
+                  content: {
+                     'application/json': {
+                        schema: {
+                           $ref: '#/components/schemas/RecoverWatchRequest',
+                        },
+                     },
+                  },
+               },
+               responses: {
+                  '200': {
+                     description:
+                        'The exact previously paid watch was found and is recoverable.',
+                     content: {
+                        'application/json': {
+                           schema: {
+                              type: 'object',
+                              additionalProperties: false,
+                              required: ['watch'],
+                              properties: {
+                                 watch: {
+                                    $ref: '#/components/schemas/Watch',
+                                 },
+                              },
+                           },
+                        },
+                     },
+                  },
+                  '400': {
+                     description: 'Invalid recovery request.',
+                     content: {
+                        'application/json': {
+                           schema: { $ref: '#/components/schemas/ErrorResponse' },
+                        },
+                     },
+                  },
+                  '404': {
+                     description:
+                        'No exact recoverable watch matches the supplied specification and service payer.',
+                     content: {
+                        'application/json': {
+                           schema: { $ref: '#/components/schemas/ErrorResponse' },
+                        },
+                     },
+                  },
+                  '409': {
+                     description:
+                        'A matching obligation exists but is not currently recoverable. Inspect state and recovery disposition; retry only when recovery.retryable is true. The response intentionally does not expose the watch ID.',
+                     content: {
+                        'application/json': {
+                           schema: {
+                              $ref: '#/components/schemas/RecoveryConflictResponse',
+                           },
+                        },
+                     },
+                  },
+                  '429': {
+                     description:
+                        'Free recovery lookup capacity is temporarily exhausted.',
+                     headers: {
+                        'Retry-After': {
+                           description: 'Retry delay in seconds.',
+                           schema: { type: 'string' },
+                        },
+                     },
+                     content: {
+                        'application/json': {
+                           schema: { $ref: '#/components/schemas/ErrorResponse' },
+                        },
+                     },
+                  },
+               },
+            },
+         },
          [watchStatusPath]: {
             get: {
                tags: ['RoundWatch'],
@@ -404,6 +487,26 @@ export function buildOpenApiDocument(
                         'Optional exact UTF-8 Algorand transaction note. The runtime enforces a maximum of 128 UTF-8 bytes.',
                   },
                },
+            },
+            RecoverWatchRequest: {
+               allOf: [
+                  {
+                     $ref: '#/components/schemas/CreateWatchRequest',
+                  },
+                  {
+                     type: 'object',
+                     required: ['servicePayer'],
+                     properties: {
+                        servicePayer: {
+                           type: 'string',
+                           minLength: 58,
+                           maxLength: 58,
+                           description:
+                              'Checksum-valid public Algorand address that signed the x402 RoundWatch service payment for the original create attempt.',
+                        },
+                     },
+                  },
+               ],
             },
             CreateWatchResponse: {
                type: 'object',
@@ -561,6 +664,52 @@ export function buildOpenApiDocument(
                   },
                },
             },
+            RecoveryConflictResponse: {
+               type: 'object',
+               additionalProperties: false,
+               required: ['error', 'state', 'recovery'],
+               properties: {
+                  error: { type: 'string' },
+                  state: {
+                     type: 'string',
+                     enum: [
+                        'settlement_pending',
+                        'settlement_unknown',
+                        'expired',
+                        'indeterminate',
+                     ],
+                  },
+                  recovery: {
+                     type: 'object',
+                     additionalProperties: false,
+                     required: [
+                        'retryable',
+                        'terminal',
+                        'reason',
+                        'nextAction',
+                     ],
+                     properties: {
+                        retryable: { type: 'boolean' },
+                        terminal: { type: 'boolean' },
+                        reason: {
+                           type: 'string',
+                           enum: [
+                              'settlement_reconciliation_pending',
+                              'settlement_reconciliation_terminal',
+                              'watch_terminal_nonrecoverable',
+                           ],
+                        },
+                        nextAction: {
+                           type: 'string',
+                           enum: [
+                              'retry_recovery_later',
+                              'retain_checkpoint_and_investigate',
+                           ],
+                        },
+                     },
+                  },
+               },
+            },
             ErrorResponse: {
                type: 'object',
                required: ['error'],
@@ -623,7 +772,7 @@ RoundWatch lets a short-lived agent or service define an expected payment, pay o
 - CAIP-2: ${networkConfig.network}
 - Watched asset: Algorand USDC ASA ${networkConfig.usdcAssetId}
 - Create watch: POST ${watchPath}
-- Read watch: GET ${watchPath}/{id}
+- Read watch: GET ${watchPath}/{id}\n- Recover lost watch ID after a paid response is lost (free): POST ${watchPath}/recover
 - Service price: ${servicePriceUsd} USDC (${serviceAtomicAmount} atomic units)
 - Service receiver: ${serviceReceiver}
 - Eligibility window: ${watchTtlMilliseconds} ms from durable watch preparation; settlement time consumes part of this window
@@ -646,7 +795,7 @@ The x402 payment buys the RoundWatch monitoring service. It is separate from the
 - API root: ${base || '/'}
 - GitHub: ${GITHUB_URL}
 
-The MCP server exposes read-only discovery and status tools plus a preparation tool that validates and returns the exact x402 HTTP request. For modern MCP calls, send MCP-Protocol-Version: ${MCP_MODERN_PROTOCOL_VERSION} and the same protocol version in _meta.io.modelcontextprotocol/protocolVersion. The MCP layer does not hold a wallet and does not sign or settle the x402 payment.
+The MCP server exposes read-only discovery and status tools plus preparation tools for the paid create request and the free exact recovery request. For modern MCP calls, send MCP-Protocol-Version: ${MCP_MODERN_PROTOCOL_VERSION} and the same protocol version in _meta.io.modelcontextprotocol/protocolVersion. The MCP layer does not hold a wallet and does not sign or settle the x402 payment.
 
 ## Human documentation
 
@@ -656,6 +805,6 @@ The MCP server exposes read-only discovery and status tools plus a preparation t
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Invalid create input returns HTTP 400 before any x402 challenge or payment verification; HTTP 402 therefore means the submitted watch specification passed RoundWatch validation. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Invalid create input returns HTTP 400 before any x402 challenge or payment verification; HTTP 402 therefore means the submitted watch specification passed RoundWatch validation. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Persist that ID immediately. If the paid create may have succeeded but its response was lost, do not repay: POST the exact original watch specification plus servicePayer to ${watchPath}/recover. Recovery is free, exact-match only, and returns only an already activated or matched watch. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }

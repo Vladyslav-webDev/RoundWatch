@@ -144,6 +144,79 @@ const tools = [
       ],
    },
    {
+      name: 'roundwatch.prepare_recovery',
+      title: 'Prepare RoundWatch Recovery',
+      description:
+         'Validate and return the exact free HTTP request used to recover an existing watch after a paid create may have succeeded but the caller lost the returned watchId. This tool never signs, pays, or retries the paid create.',
+      inputSchema: {
+         type: 'object',
+         additionalProperties: false,
+         required: [
+            'idempotencyKey',
+            'expectedSender',
+            'expectedReceiver',
+            'atomicAmount',
+            'servicePayer',
+         ],
+         properties: {
+            idempotencyKey: {
+               type: 'string',
+               minLength: 8,
+               maxLength: 128,
+               description:
+                  'The exact original idempotency key from the paid create attempt.',
+            },
+            expectedSender: {
+               type: 'string',
+               minLength: 58,
+               maxLength: 58,
+               description:
+                  'The exact original expected future-payment sender.',
+            },
+            expectedReceiver: {
+               type: 'string',
+               minLength: 58,
+               maxLength: 58,
+               description:
+                  'The exact original expected future-payment receiver.',
+            },
+            atomicAmount: {
+               type: 'string',
+               pattern: '^[1-9]\\d*$',
+               description:
+                  'The exact original watched USDC amount in atomic units.',
+            },
+            invoiceNote: {
+               type: 'string',
+               minLength: 1,
+               maxLength: 128,
+               description:
+                  'The exact original optional invoice note, if one was supplied.',
+            },
+            servicePayer: {
+               type: 'string',
+               minLength: 58,
+               maxLength: 58,
+               description:
+                  'Public Algorand address that signed the original x402 RoundWatch service payment.',
+            },
+         },
+      },
+      annotations: {
+         readOnlyHint: true,
+         idempotentHint: true,
+         destructiveHint: false,
+         openWorldHint: false,
+      },
+      icons: [
+         {
+            src: 'https://roundwatch.observer/favicon.svg',
+            mimeType: 'image/svg+xml',
+            sizes: ['any'],
+         },
+      ],
+   },
+   {
       name: 'roundwatch.get_watch',
       title: 'Get RoundWatch Watch',
       description:
@@ -275,7 +348,7 @@ export async function handleMcpHttpRequest(
                supportedVersions: [MCP_MODERN_PROTOCOL_VERSION],
                capabilities: { tools: {} },
                instructions:
-                  'RoundWatch monitors one exact future Algorand USDC payment when no transaction ID exists yet. Use service_info to inspect the contract, prepare_watch to validate and prepare the paid HTTP request, and get_watch to retrieve durable status. prepare_watch never performs the x402 payment itself.',
+                  'RoundWatch monitors one exact future Algorand USDC payment when no transaction ID exists yet. Use service_info to inspect the contract, prepare_watch to validate and prepare the paid HTTP request, prepare_recovery to prepare the free exact recovery request if a paid response was lost, and get_watch to retrieve durable status. Preparation tools never sign or settle payments.',
                ttlMs: TOOL_LIST_TTL_MS,
                cacheScope: 'public',
             },
@@ -420,6 +493,39 @@ export async function handleMcpHttpRequest(
             return toolSuccess(id, structuredContent, modern);
          }
 
+         case 'roundwatch.prepare_recovery': {
+            const validation = validateRecoveryArguments(args);
+            if ('error' in validation) {
+               return toolError(id, validation.error, modern);
+            }
+
+            const structuredContent = {
+               recovered: false,
+               paid: false,
+               purpose:
+                  'Prepared free exact recovery request only. Use this when a paid create may have succeeded but its response containing watchId was lost. Do not repay.',
+               request: {
+                  method: 'POST',
+                  url: absoluteUrl(
+                     dependencies.publicBaseUrl,
+                     `${dependencies.watchPath}/recover`,
+                  ),
+                  headers: {
+                     'Content-Type': 'application/json',
+                  },
+                  body: validation.value,
+               },
+               nextSteps: [
+                  'POST this request without PAYMENT-SIGNATURE.',
+                  'If HTTP 200, persist watch.id and use roundwatch.get_watch or GET the status endpoint.',
+                  'If HTTP 409, inspect recovery.retryable and retry only the free recovery lookup when instructed.',
+                  'Never repeat the paid create merely because the original response was lost.',
+               ],
+            };
+
+            return toolSuccess(id, structuredContent, modern);
+         }
+
          case 'roundwatch.get_watch': {
             const argumentKeys = Object.keys(args);
             if (
@@ -496,6 +602,16 @@ function serviceInfo(dependencies: McpDependencies) {
          url: absoluteUrl(dependencies.publicBaseUrl, dependencies.watchPath),
          paid: true,
       },
+      recoverWatch: {
+         method: 'POST',
+         url: absoluteUrl(
+            dependencies.publicBaseUrl,
+            `${dependencies.watchPath}/recover`,
+         ),
+         paid: false,
+         exactMatch: true,
+         requiresServicePayer: true,
+      },
       getWatch: {
          method: 'GET',
          urlTemplate: absoluteUrl(
@@ -531,7 +647,8 @@ function serviceInfo(dependencies: McpDependencies) {
             dependencies.watchTtlMilliseconds,
          ),
          'RoundWatch is not a webhook delivery service.',
-         'The MCP prepare tool does not sign or settle x402 payments.',
+         'The MCP preparation tools do not sign or settle x402 payments.',
+         'If a paid create response is lost, use free exact recovery instead of paying again.',
       ],
    };
 }
@@ -621,6 +738,58 @@ function validatePrepareArguments(
          expectedReceiver,
          atomicAmount,
          ...(typeof invoiceNote === 'string' ? { invoiceNote } : {}),
+      },
+   };
+}
+
+function validateRecoveryArguments(
+   args: Record<string, unknown>,
+):
+   | {
+        value: {
+           idempotencyKey: string;
+           expectedSender: string;
+           expectedReceiver: string;
+           atomicAmount: string;
+           invoiceNote?: string;
+           servicePayer: string;
+        };
+     }
+   | { error: string } {
+   const allowed = new Set([
+      'idempotencyKey',
+      'expectedSender',
+      'expectedReceiver',
+      'atomicAmount',
+      'invoiceNote',
+      'servicePayer',
+   ]);
+
+   for (const key of Object.keys(args)) {
+      if (!allowed.has(key)) {
+         return { error: `Unknown argument: ${key}` };
+      }
+   }
+
+   const servicePayer = args.servicePayer;
+   if (
+      typeof servicePayer !== 'string' ||
+      !isValidAlgorandAddress(servicePayer)
+   ) {
+      return { error: 'servicePayer must be a valid Algorand address' };
+   }
+
+   const prepareArgs = { ...args };
+   delete prepareArgs.servicePayer;
+   const prepared = validatePrepareArguments(prepareArgs);
+   if ('error' in prepared) {
+      return prepared;
+   }
+
+   return {
+      value: {
+         ...prepared.value,
+         servicePayer,
       },
    };
 }
