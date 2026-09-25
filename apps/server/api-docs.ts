@@ -3,6 +3,7 @@ import {
    buildWatchEligibilityContract,
    eligibilityBoundarySummary,
 } from './roundwatch-contract.js';
+import { MCP_MODERN_PROTOCOL_VERSION } from './mcp.js';
 
 interface MachineReadableDocsOptions {
    networkConfig: RoundWatchNetworkConfig;
@@ -157,7 +158,7 @@ export function buildOpenApiDocument(
                operationId: 'createWatch',
                summary: 'Create a durable watch for one exact future USDC payment',
                description:
-                  `Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. The service contract includes a ${workUnitBudget}-turn work budget. ${eligibilitySummary} An unpaid request receives HTTP 402 with a PAYMENT-REQUIRED x402 v2 challenge. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.`,
+                  `Submit the expected sender, receiver, atomic amount, and optional exact note for one top-level direct USDC asset transfer. Inner transactions, clawback transfers, and asset close-out transfers do not count as matches. The service contract includes a ${workUnitBudget}-turn work budget. ${eligibilitySummary} RoundWatch validates the watch specification before x402 handling: malformed input returns HTTP 400 without a payment challenge, while a semantically valid unpaid request receives HTTP 402 with PAYMENT-REQUIRED. After a valid PAYMENT-SIGNATURE is settled and durable activation is confirmed, the same request returns a watch ID. The watched asset is selected by the server and is not supplied by the caller.`,
                'x-x402': x402Contract,
                requestBody: {
                   required: true,
@@ -203,7 +204,7 @@ export function buildOpenApiDocument(
                   },
                   '400': {
                      description:
-                        'Invalid watch request or invalid PAYMENT-SIGNATURE header.',
+                        'Invalid watch request, rejected before x402 payment handling, or invalid PAYMENT-SIGNATURE header.',
                      content: {
                         'application/json': {
                            schema: { $ref: '#/components/schemas/ErrorResponse' },
@@ -225,6 +226,15 @@ export function buildOpenApiDocument(
                   '409': {
                      description:
                         'The idempotency key already belongs to an existing watch.',
+                     content: {
+                        'application/json': {
+                           schema: { $ref: '#/components/schemas/ErrorResponse' },
+                        },
+                     },
+                  },
+                  '503': {
+                     description:
+                        'RoundWatch is alive but durable storage or background workers are not ready to accept a paid obligation. Retry after /ready returns 200.',
                      content: {
                         'application/json': {
                            schema: { $ref: '#/components/schemas/ErrorResponse' },
@@ -630,12 +640,13 @@ The x402 payment buys the RoundWatch monitoring service. It is separate from the
 - OpenAPI: ${base}/openapi.json
 - LLM instructions: ${base}/llms.txt
 - MCP Streamable HTTP: ${base}/mcp
+- MCP preferred protocol version: ${MCP_MODERN_PROTOCOL_VERSION}
 - Liveness: ${base}/health
 - Readiness: ${base}/ready
 - API root: ${base || '/'}
 - GitHub: ${GITHUB_URL}
 
-The MCP server exposes read-only discovery and status tools plus a preparation tool that validates and returns the exact x402 HTTP request. The MCP layer does not hold a wallet and does not sign or settle the x402 payment.
+The MCP server exposes read-only discovery and status tools plus a preparation tool that validates and returns the exact x402 HTTP request. For modern MCP calls, send MCP-Protocol-Version: ${MCP_MODERN_PROTOCOL_VERSION} and the same protocol version in _meta.io.modelcontextprotocol/protocolVersion. The MCP layer does not hold a wallet and does not sign or settle the x402 payment.
 
 ## Human documentation
 
@@ -645,6 +656,6 @@ The MCP server exposes read-only discovery and status tools plus a preparation t
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Invalid create input returns HTTP 400 before any x402 challenge or payment verification; HTTP 402 therefore means the submitted watch specification passed RoundWatch validation. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }

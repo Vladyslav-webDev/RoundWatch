@@ -396,6 +396,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       },
    );
    const parsedWatchBodies = new WeakMap<Request, unknown>();
+   const validatedWatchSpecs = new WeakMap<Request, WatchSpec>();
    const workUnitBudget = store.configuredWorkUnitBudget();
    const watchTtlMilliseconds = store.configuredWatchTtlMilliseconds();
    const eligibilityContract = buildWatchEligibilityContract(
@@ -820,6 +821,29 @@ export function createApp(dependencies: AppDependencies): Hono {
       await next();
    });
 
+   app.use(watchPath, async (c, next) => {
+      if (c.req.method !== 'POST') {
+         await next();
+         return;
+      }
+
+      if (!parsedWatchBodies.has(c.req.raw)) {
+         return c.json({ error: 'Expected a JSON request body', code: 'invalid_watch_request' }, 400);
+      }
+
+      const parsed = parseWatchSpec(
+         parsedWatchBodies.get(c.req.raw),
+         networkConfig.usdcAssetIdNumber,
+      );
+
+      if ('error' in parsed) {
+         return c.json({ error: parsed.error, code: 'invalid_watch_request' }, 400);
+      }
+
+      validatedWatchSpecs.set(c.req.raw, parsed.spec);
+      await next();
+   });
+
    // This resumes only after @x402/hono has finished settlement.
    app.use(watchPath, async (c, next) => {
       await next();
@@ -970,15 +994,9 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    app.post(watchPath, async c => {
-      if (!parsedWatchBodies.has(c.req.raw)) {
-         return c.json({ error: 'Expected a JSON request body' }, 400);
-      }
-
-      const body = parsedWatchBodies.get(c.req.raw);
-      const parsed = parseWatchSpec(body, networkConfig.usdcAssetIdNumber);
-
-      if ('error' in parsed) {
-         return c.json({ error: parsed.error }, 400);
+      const spec = validatedWatchSpecs.get(c.req.raw);
+      if (!spec) {
+         return c.json({ error: 'Watch request was not validated', code: 'invalid_watch_request' }, 400);
       }
 
       let settlementIntent: SettlementIntent | undefined;
@@ -1017,7 +1035,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       let prepared;
 
       try {
-         prepared = store.prepareWatch(parsed.spec, settlementIntent);
+         prepared = store.prepareWatch(spec, settlementIntent);
       } catch (error) {
          if (error instanceof WatchCapacityError) {
             console.warn(`RoundWatch admission rejected scope=${error.scope}`);

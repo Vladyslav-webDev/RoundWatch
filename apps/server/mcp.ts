@@ -12,14 +12,14 @@ import {
    readJsonBodyWithLimit,
 } from './request-body.js';
 
-const MODERN_PROTOCOL_VERSION = '2026-07-28';
+export const MCP_MODERN_PROTOCOL_VERSION = '2026-07-28';
 const LEGACY_PROTOCOL_VERSION = '2025-11-25';
 const LEGACY_PROTOCOL_VERSIONS = new Set([
    '2025-11-25',
    '2025-06-18',
 ]);
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
-   MODERN_PROTOCOL_VERSION,
+   MCP_MODERN_PROTOCOL_VERSION,
    ...LEGACY_PROTOCOL_VERSIONS,
 ]);
 const SERVER_NAME = 'roundwatch';
@@ -272,7 +272,7 @@ export async function handleMcpHttpRequest(
          id,
          modernResult(
             {
-               supportedVersions: [MODERN_PROTOCOL_VERSION],
+               supportedVersions: [MCP_MODERN_PROTOCOL_VERSION],
                capabilities: { tools: {} },
                instructions:
                   'RoundWatch monitors one exact future Algorand USDC payment when no transaction ID exists yet. Use service_info to inspect the contract, prepare_watch to validate and prepare the paid HTTP request, and get_watch to retrieve durable status. prepare_watch never performs the x402 payment itself.',
@@ -731,7 +731,7 @@ function validateProtocolSignals(
       }
 
       // The 2026-07-28 era has no initialize handshake.
-      if (requested === MODERN_PROTOCOL_VERSION) {
+      if (requested === MCP_MODERN_PROTOCOL_VERSION) {
          return protocolInvalidParams(
             'initialize is only valid for supported legacy protocol versions',
          );
@@ -753,14 +753,14 @@ function validateProtocolSignals(
 
    const modern =
       message.method === 'server/discover' ||
-      header === MODERN_PROTOCOL_VERSION ||
-      metaValue === MODERN_PROTOCOL_VERSION;
+      header === MCP_MODERN_PROTOCOL_VERSION ||
+      metaValue === MCP_MODERN_PROTOCOL_VERSION;
 
    if (
       modern &&
-      ((header !== null && header !== MODERN_PROTOCOL_VERSION) ||
+      ((header !== null && header !== MCP_MODERN_PROTOCOL_VERSION) ||
          (typeof metaValue === 'string' &&
-            metaValue !== MODERN_PROTOCOL_VERSION))
+            metaValue !== MCP_MODERN_PROTOCOL_VERSION))
    ) {
       return protocolHeaderMismatch(
          'Modern MCP requests must use one consistent modern protocol version',
@@ -815,8 +815,8 @@ function validateModernHeaders(
    message: JsonRpcRequest,
 ): string | undefined {
    const protocolVersion = request.headers.get('mcp-protocol-version');
-   if (protocolVersion !== MODERN_PROTOCOL_VERSION) {
-      return `MCP-Protocol-Version must be ${MODERN_PROTOCOL_VERSION}`;
+   if (protocolVersion !== MCP_MODERN_PROTOCOL_VERSION) {
+      return `MCP-Protocol-Version must be ${MCP_MODERN_PROTOCOL_VERSION}`;
    }
 
    const method = request.headers.get('mcp-method');
@@ -831,9 +831,9 @@ function validateModernHeaders(
    }
    if (
       meta['io.modelcontextprotocol/protocolVersion'] !==
-      MODERN_PROTOCOL_VERSION
+      MCP_MODERN_PROTOCOL_VERSION
    ) {
-      return `params._meta.io.modelcontextprotocol/protocolVersion must be ${MODERN_PROTOCOL_VERSION}`;
+      return `params._meta.io.modelcontextprotocol/protocolVersion must be ${MCP_MODERN_PROTOCOL_VERSION}`;
    }
    if (
       Object.prototype.hasOwnProperty.call(
