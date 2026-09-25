@@ -2,8 +2,8 @@ import { BrandMark, Icon } from "./graphics";
 
 const API_BASE = "https://roundwatch-api.onrender.com";
 const REPOSITORY = "https://github.com/Vladyslav-webDev/RoundWatch";
-const EXAMPLE_SENDER = "3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ";
-const EXAMPLE_RECEIVER = "EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY";
+const EXAMPLE_SENDER = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ";
+const EXAMPLE_RECEIVER = "AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI";
 
 function QuickstartBrand() {
   return (
@@ -80,8 +80,10 @@ export default function QuickstartPage() {
               <p>
                 Send the expected sender, receiver, atomic amount, and optional
                 invoice note. The watched asset is server-selected MainNet USDC,
-                not a caller-controlled field. The addresses below are valid public
-                example addresses from the verified MainNet proof.
+                not a caller-controlled field. The addresses below are checksum-valid
+                public examples. <code>expectedReceiver</code> is the receiver of the
+                future payment being watched; it is separate from the RoundWatch
+                service receiver advertised by the x402 challenge.
               </p>
               <CodeBlock>{requestBody}</CodeBlock>
             </div>
@@ -92,9 +94,11 @@ export default function QuickstartPage() {
             <div>
               <h2>Inspect the 402 before paying</h2>
               <p>
-                An ordinary request returns <code>402 Payment Required</code>. This
-                is a free preflight. No payment is sent until an x402-capable client
-                signs and retries the same request.
+                A semantically valid unpaid request returns
+                <code> 402 Payment Required</code>. This is a free preflight.
+                Malformed watch input returns <code>400</code> before x402 handling,
+                so a <code>402</code> means RoundWatch accepted the watch
+                specification and is now asking only for the service payment.
               </p>
               <CodeBlock>{unpaidRequest}</CodeBlock>
               <p className="quickstart-note">
@@ -124,8 +128,9 @@ export default function QuickstartPage() {
                 </a>
               </div>
               <p className="quickstart-warning mono">
-                MainNet spends real USDC. Use TestNet while integrating unless you
-                deliberately intend to pay on MainNet.
+                The hosted RoundWatch API is MainNet only and spends real USDC.
+                For TestNet integration, run RoundWatch locally with
+                ROUNDWATCH_NETWORK=testnet or use your own TestNet deployment.
               </p>
             </div>
           </article>
@@ -141,9 +146,13 @@ export default function QuickstartPage() {
                 and owns the waiting obligation after your process exits.
               </p>
               <CodeBlock>{`{
-  "watchId": "f5d2fb6f-b224-4aae-989c-87a5418fd2ae",
+  "watchId": "YOUR_WATCH_ID",
   "message": "The watch is returned only if x402 settlement and durable activation succeed"
 }`}</CodeBlock>
+              <p className="quickstart-note">
+                The watch ID is created by a successful paid request. Documentation
+                uses a placeholder instead of a supposedly live example record.
+              </p>
             </div>
           </article>
 
@@ -194,7 +203,10 @@ export default function QuickstartPage() {
             </div>
             <div>
               <dt>Eligibility deadline</dt>
-              <dd>30 minutes from durable creation; expiry is proof-based</dd>
+              <dd>
+                30 minutes from durable watch preparation; settlement time consumes
+                part of the window; expiry is proof-based
+              </dd>
             </div>
             <div>
               <dt>Work budget</dt>
@@ -230,6 +242,14 @@ export default function QuickstartPage() {
             <a href={`${REPOSITORY}/blob/main/docs/MAINNET_READINESS.md`}>
               <span>MainNet evidence</span>
               <small>Verified settlement and matched payment proof</small>
+            </a>
+            <a href={`${API_BASE}/openapi.json`}>
+              <span>OpenAPI</span>
+              <small>Machine-readable create and status schemas</small>
+            </a>
+            <a href={`${API_BASE}/llms.txt`}>
+              <span>Agent contract</span>
+              <small>Live machine-readable integration guidance</small>
             </a>
           </div>
         </section>
