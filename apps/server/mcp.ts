@@ -12,7 +12,7 @@ import {
    readJsonBodyWithLimit,
 } from './request-body.js';
 
-export const MCP_MCP_MODERN_PROTOCOL_VERSION = '2026-07-28';
+export const MCP_MODERN_PROTOCOL_VERSION = '2026-07-28';
 const LEGACY_PROTOCOL_VERSION = '2025-11-25';
 const LEGACY_PROTOCOL_VERSIONS = new Set([
    '2025-11-25',
