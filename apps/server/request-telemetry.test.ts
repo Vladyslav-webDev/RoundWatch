@@ -64,7 +64,6 @@ test('request telemetry classifies watch, status, and MCP traffic while suppress
          networkConfig: MAINNET_NETWORK_CONFIG,
          publicBaseUrl: 'https://roundwatch-api.onrender.com',
          requireSettlementIntent: false,
-         syncFacilitatorOnStart: false,
          requestTelemetry: telemetryCollector(lines),
       });
 
