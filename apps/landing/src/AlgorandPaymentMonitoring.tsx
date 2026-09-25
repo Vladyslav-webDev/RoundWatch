@@ -306,6 +306,14 @@ export default function AlgorandPaymentMonitoringPage() {
               </p>
 
               <CodeBlock>{roundWatchRequest}</CodeBlock>
+              <p className="guide-note">
+                The hosted RoundWatch API is MainNet. It validates the watch
+                specification before x402 handling: malformed input returns HTTP 400,
+                while a valid unpaid request returns HTTP 402. The live machine-readable
+                contract is published at
+                <code> https://roundwatch-api.onrender.com/openapi.json</code> and
+                <code> /llms.txt</code>.
+              </p>
 
               <div className="guide-actions">
                 <a className="button button-primary" href="/start">
@@ -314,7 +322,7 @@ export default function AlgorandPaymentMonitoringPage() {
                 </a>
                 <a
                   className="button button-secondary"
-                  href="https://github.com/Vladyslav-webDev/x402-challenge"
+                  href="https://github.com/Vladyslav-webDev/RoundWatch"
                 >
                   <span>Inspect the implementation</span>
                   <Icon name="arrow" />
