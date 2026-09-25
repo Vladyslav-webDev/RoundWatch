@@ -1129,7 +1129,19 @@ export function createApp(dependencies: AppDependencies): Hono {
          return c.json({ error: 'Recoverable watch not found' }, 404);
       }
 
-      if (existing.state !== 'active' && existing.state !== 'matched') {
+      const settlementConfirmed =
+         typeof existing.serviceTransaction === 'string' &&
+         existing.serviceTransaction.length > 0;
+      const recoverable =
+         settlementConfirmed &&
+         (
+            existing.state === 'active' ||
+            existing.state === 'matched' ||
+            existing.state === 'expired' ||
+            existing.state === 'indeterminate'
+         );
+
+      if (!recoverable) {
          c.header('cache-control', 'no-store');
          return c.json(
             {

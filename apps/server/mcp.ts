@@ -147,7 +147,7 @@ const tools = [
       name: 'roundwatch.prepare_recovery',
       title: 'Prepare RoundWatch Recovery',
       description:
-         'Validate and return the exact free HTTP request used to recover an existing watch after a paid create may have succeeded but the caller lost the returned watchId. This tool never signs, pays, or retries the paid create.',
+         'Validate and return the exact free HTTP request used to recover an existing watch after a paid create may have succeeded but the caller lost the returned watchId. Confirmed-settlement watches remain recoverable even after terminal expiry or post-activation indeterminate completion. This tool never signs, pays, or retries the paid create.',
       inputSchema: {
          type: 'object',
          additionalProperties: false,

@@ -276,7 +276,7 @@ export function buildOpenApiDocument(
                operationId: 'recoverWatch',
                summary: 'Recover an existing watch after losing the paid create response',
                description:
-                  'Free exact recovery lookup. Use this after a paid create may have succeeded but the caller lost the returned watchId. Submit the exact original watch specification plus the public Algorand service-payer address that signed the x402 service payment. This endpoint never verifies or settles a payment. It returns only an already activated or matched exact watch. Do not repay merely because the original response was lost.',
+                  'Free exact recovery lookup. Use this after a paid create may have succeeded but the caller lost the returned watchId. Submit the exact original watch specification plus the public Algorand service-payer address that signed the x402 service payment. This endpoint never verifies or settles a payment. It returns an exact watch once service settlement was confirmed, including durable terminal states such as expired or post-activation indeterminate. Unsettled or settlement-ambiguous obligations remain non-recoverable. Do not repay merely because the original response was lost.',
                requestBody: {
                   required: true,
                   content: {
@@ -675,7 +675,6 @@ export function buildOpenApiDocument(
                      enum: [
                         'settlement_pending',
                         'settlement_unknown',
-                        'expired',
                         'indeterminate',
                      ],
                   },
@@ -805,6 +804,6 @@ The MCP server exposes read-only discovery and status tools plus preparation too
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Invalid create input returns HTTP 400 before any x402 challenge or payment verification; HTTP 402 therefore means the submitted watch specification passed RoundWatch validation. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Persist that ID immediately. If the paid create may have succeeded but its response was lost, do not repay: POST the exact original watch specification plus servicePayer to ${watchPath}/recover. Recovery is free, exact-match only, and returns only an already activated or matched watch. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Invalid create input returns HTTP 400 before any x402 challenge or payment verification; HTTP 402 therefore means the submitted watch specification passed RoundWatch validation. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Persist that ID immediately. If the paid create may have succeeded but its response was lost, do not repay: POST the exact original watch specification plus servicePayer to ${watchPath}/recover. Recovery is free and exact-match only. Once RoundWatch confirmed the service settlement, recovery remains available even after the watch becomes expired or post-activation indeterminate; unsettled or settlement-ambiguous obligations remain hidden. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }

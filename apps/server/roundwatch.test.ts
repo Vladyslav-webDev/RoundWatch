@@ -2274,6 +2274,95 @@ test('recovery lookup returns only an exact existing activated watch and never i
    }
 });
 
+test('recovery lookup keeps confirmed-settlement terminal watches recoverable', async () => {
+   const store = new RoundWatchStore(':memory:', { workUnitBudget: 1 });
+   try {
+      const expired = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'recovery-expired-settled' },
+         intent('RECOVERY_EXPIRED_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         expired.id,
+         {
+            transaction: 'RECOVERY_EXPIRED_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         150,
+      );
+      assert.equal(store.setClosingRound(expired.id, 151), 151);
+      assert.equal(store.advanceScanRound(expired.id, 150, 151), true);
+      assert.equal(store.markExpired(expired.id, 151, 151), true);
+
+      const indeterminate = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'recovery-indeterminate-settled' },
+         intent('RECOVERY_INDETERMINATE_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         indeterminate.id,
+         {
+            transaction: 'RECOVERY_INDETERMINATE_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         160,
+      );
+      assert.equal(store.claimWorkUnit(indeterminate.id), 'claimed');
+      assert.equal(store.claimWorkUnit(indeterminate.id), 'exhausted');
+      assert.equal(store.getWatch(indeterminate.id)?.state, 'indeterminate');
+
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+      });
+
+      const recover = async (
+         idempotencyKey: string,
+      ): Promise<{ status: number; body: { watch?: Record<string, unknown> } }> => {
+         const response = await app.request('/spike/watch/recover', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+               idempotencyKey,
+               expectedSender: SPEC.expectedSender,
+               expectedReceiver: SPEC.expectedReceiver,
+               atomicAmount: SPEC.atomicAmount,
+               invoiceNote: SPEC.invoiceNote,
+               servicePayer: PAYER,
+            }),
+         });
+
+         return {
+            status: response.status,
+            body: await response.json() as { watch?: Record<string, unknown> },
+         };
+      };
+
+      const expiredRecovery = await recover('recovery-expired-settled');
+      assert.equal(expiredRecovery.status, 200);
+      assert.equal(expiredRecovery.body.watch?.id, expired.id);
+      assert.equal(expiredRecovery.body.watch?.state, 'expired');
+
+      const indeterminateRecovery = await recover(
+         'recovery-indeterminate-settled',
+      );
+      assert.equal(indeterminateRecovery.status, 200);
+      assert.equal(indeterminateRecovery.body.watch?.id, indeterminate.id);
+      assert.equal(indeterminateRecovery.body.watch?.state, 'indeterminate');
+   } finally {
+      store.close();
+   }
+});
+
 test('recovery lookup refuses non-active obligations without exposing a watch ID', async () => {
    const store = new RoundWatchStore(':memory:');
    try {
