@@ -1670,6 +1670,65 @@ test('noncanonical paid-route aliases are rejected before x402 verification', as
    }
 });
 
+test('malformed watch input is rejected before x402 challenge and payment-header handling', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let verifyCalls = 0;
+   let settleCalls = 0;
+
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+            verify: async () => {
+               verifyCalls += 1;
+               throw new Error('unexpected verification');
+            },
+            settle: async () => {
+               settleCalls += 1;
+               throw new Error('unexpected settlement');
+            },
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(100),
+         syncFacilitatorOnStart: false,
+      });
+
+      for (const headers of [
+         { 'content-type': 'application/json' },
+         {
+            'content-type': 'application/json',
+            'payment-signature': 'malformed-but-must-not-be-read',
+         },
+      ]) {
+         const response = await app.request('/spike/watch', {
+            method: 'POST',
+            headers,
+            body: '{}',
+         });
+
+         assert.equal(response.status, 400);
+         assert.equal(response.headers.get('payment-required'), null);
+         assert.equal(response.headers.get('payment-response'), null);
+         const body = await response.json() as {
+            error?: string;
+            code?: string;
+         };
+         assert.equal(body.code, 'invalid_watch_request');
+         assert.match(body.error ?? '', /idempotencyKey/i);
+      }
+
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
+   } finally {
+      store.close();
+   }
+});
+
 test('x402 payment headers are exposed to browser clients and preflight allows payment signatures', async () => {
    const store = new RoundWatchStore(':memory:');
    try {
