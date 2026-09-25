@@ -22,7 +22,7 @@
     "@x402/core": "2.25.0",
     "@x402/fetch": "2.25.0",
     "algosdk": "^3.7.0",
-    "dotenv": "17.4.2"
+    "dotenv": "18.0.1"
   },
   "devDependencies": {
     "@types/node": "22.20.2",
