@@ -1886,8 +1886,16 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
                info?: {
                   input?: {
                      body?: {
+                        idempotencyKey?: unknown;
                         expectedSender?: unknown;
                         expectedReceiver?: unknown;
+                     };
+                  };
+                  output?: {
+                     example?: {
+                        watchId?: unknown;
+                        expiresAt?: unknown;
+                        message?: unknown;
                      };
                   };
                };
@@ -1923,6 +1931,23 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
       assert.equal(isValidAlgorandAddress(expectedReceiver), true);
       assert.equal(expectedSender, PAYER);
       assert.equal(expectedReceiver, RECEIVER);
+      assert.equal(
+         example.idempotencyKey,
+         'replace-with-unique-idempotency-key',
+      );
+
+      const outputExample =
+         decoded.extensions?.bazaar?.info?.output?.example;
+      assert.ok(outputExample);
+      assert.equal(
+         outputExample.watchId,
+         'WATCH_ID_RETURNED_AFTER_SUCCESSFUL_PAID_CREATION',
+      );
+      assert.equal(
+         outputExample.expiresAt,
+         'ISO_8601_DEADLINE_RETURNED_FOR_THIS_WATCH',
+      );
+      assert.match(String(outputExample.message), /Example only/i);
    } finally {
       store.close();
    }
