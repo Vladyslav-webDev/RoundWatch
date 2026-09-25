@@ -22,6 +22,7 @@ export type RequestClassification =
 export type PaymentTelemetryOutcome =
    | 'not_present'
    | 'challenge'
+   | 'presented'
    | 'rejected'
    | 'settled';
 
@@ -248,15 +249,18 @@ function classifyRequest(
       if (statusCode === 400 && !paymentPresented) {
          return 'watch_create_malformed';
       }
-      if (paymentPresented && statusCode >= 400) {
-         return 'watch_create_payment_rejected';
-      }
       if (statusCode === 429) return 'watch_create_rate_limited';
       if (statusCode === 503) return 'watch_create_unavailable';
+      if (statusCode >= 500) return 'watch_create_failed';
+      if (
+         paymentPresented &&
+         (statusCode === 400 || statusCode === 402 || statusCode === 409)
+      ) {
+         return 'watch_create_payment_rejected';
+      }
       if (statusCode >= 200 && statusCode < 300 && paymentPresented) {
          return 'watch_create_success';
       }
-      if (statusCode >= 500) return 'watch_create_failed';
       if (statusCode >= 400) return 'watch_create_malformed';
    }
 
@@ -272,7 +276,7 @@ function paymentOutcome(
    if (paymentPresented && classification === 'watch_create_payment_rejected') {
       return 'rejected';
    }
-   return paymentPresented ? 'rejected' : 'not_present';
+   return paymentPresented ? 'presented' : 'not_present';
 }
 
 function dynamicWatchId(path: string, watchPath: string): string | undefined {
