@@ -1738,7 +1738,7 @@ test('noncanonical paid-route aliases are rejected before x402 verification', as
    }
 });
 
-test('malformed watch input is rejected before x402 challenge and payment-header handling', async () => {
+test('unpaid malformed watch input receives discovery 402, while signed malformed input cannot reach facilitator', async () => {
    const store = new RoundWatchStore(':memory:');
    let verifyCalls = 0;
    let settleCalls = 0;
@@ -1766,29 +1766,51 @@ test('malformed watch input is rejected before x402 challenge and payment-header
          syncFacilitatorOnStart: false,
       });
 
-      for (const headers of [
-         { 'content-type': 'application/json' },
-         {
-            'content-type': 'application/json',
-            'payment-signature': 'malformed-but-must-not-be-read',
-         },
-      ]) {
-         const response = await app.request('/spike/watch', {
-            method: 'POST',
-            headers: headers as Record<string, string>,
-            body: '{}',
-         });
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: '{}',
+      });
 
-         assert.equal(response.status, 400);
-         assert.equal(response.headers.get('payment-required'), null);
-         assert.equal(response.headers.get('payment-response'), null);
-         const body = await response.json() as {
-            error?: string;
-            code?: string;
-         };
-         assert.equal(body.code, 'invalid_watch_request');
-         assert.match(body.error ?? '', /idempotencyKey/i);
-      }
+      assert.equal(unpaid.status, 402);
+      assert.ok(unpaid.headers.get('payment-required'));
+      assert.equal(unpaid.headers.get('payment-response'), null);
+
+      const paymentHeader = encodePaymentSignatureHeader({
+         x402Version: 2,
+         accepted: {
+            scheme: 'exact',
+            network: ALGORAND_TESTNET,
+            amount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT,
+            asset: String(TESTNET_USDC_ASSET_ID),
+            payTo: RECEIVER,
+            maxTimeoutSeconds: 60,
+            extra: {},
+         },
+         payload: {
+            paymentGroup: [SIGNED_SERVICE_PAYMENT],
+            paymentIndex: 0,
+         },
+      } as PaymentPayload);
+
+      const signed = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body: '{}',
+      });
+
+      assert.equal(signed.status, 400);
+      assert.equal(signed.headers.get('payment-required'), null);
+      assert.equal(signed.headers.get('payment-response'), null);
+      const signedBody = await signed.json() as {
+         error?: string;
+         code?: string;
+      };
+      assert.equal(signedBody.code, 'invalid_watch_request');
+      assert.match(signedBody.error ?? '', /idempotencyKey/i);
 
       assert.equal(verifyCalls, 0);
       assert.equal(settleCalls, 0);
