@@ -296,13 +296,13 @@ function createWatchDiscovery(
       },
       output: {
          example: {
-            watchId: 'f5d2fb6f-b224-4aae-989c-87a5418fd2ae',
+            watchId: 'WATCH_ID_RETURNED_AFTER_SUCCESSFUL_PAID_CREATION',
             workUnitBudget,
             eligibilityTtlMs: watchTtlMilliseconds,
             eligibility,
-            expiresAt: '2026-09-22T12:30:00.000Z',
+            expiresAt: 'ISO_8601_DEADLINE_RETURNED_FOR_THIS_WATCH',
             message:
-               'The watch is returned only if x402 settlement and durable activation succeed',
+               'Example only. A real watch is returned only if x402 settlement and durable activation succeed',
          },
          schema: {
             type: 'object',
