@@ -152,8 +152,8 @@ importers:
         specifier: ^2.25.0
         version: 2.25.0
       '@x402/hono':
-        specifier: ^2.25.0
-        version: 2.25.0(ethers@6.17.0)(hono@4.13.7)(typescript@7.0.2)
+        specifier: ^2.26.0
+        version: 2.26.0(ethers@6.17.0)(hono@4.13.7)(typescript@7.0.2)
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -559,16 +559,19 @@ packages:
   '@x402/core@2.25.0':
     resolution: {integrity: sha512-5Ys0XYz3FKutxVKoXC46R/XPT/oaAbuj7ahzrlVHwQxZJPH9u6u91IOh0ztz+7G/zYGsaXR8l3ety205QtEnUw==}
 
-  '@x402/extensions@2.25.0':
-    resolution: {integrity: sha512-7gXpYoHX8CkQ4bwUfzx0GS6VQlx810+GiGOAYhwsbTtIZFt/ahz/5CjCs7qfoKYcgAWcVyvBCl9U3FYYBX01nA==}
+  '@x402/core@2.26.0':
+    resolution: {integrity: sha512-8dlXip9u0JjyELzzFz48vntuMajvUjA8IYpitfaW423m53bR49amZDIn3n4gXRYoNEKzGB9Rtn8at35WHz61cA==}
+
+  '@x402/extensions@2.26.0':
+    resolution: {integrity: sha512-ItD85ryWsUa86TV8AjtY31SYqZhnnhoVKuVihtmv6r1cuLTgIxE21ugZmGswbLkS+rTvP0gy3M/6xp00i5S5lQ==}
 
   '@x402/fetch@2.25.0':
     resolution: {integrity: sha512-kpmxnMTjxZJD5r4yVhRDtCrBVfGhum+XwrUUUdffi3Y91eAm9ZiWCDNHLtahOS2kmuzTR2NPbbIoohZQJmQsxg==}
 
-  '@x402/hono@2.25.0':
-    resolution: {integrity: sha512-wjDY8dW3fY0VsKLkbGWtjqxfYbgRH1lUu+vACRx6jDyy5R6rS0GnHFcenEBvhjKgH1jCzyP32anp4+tRv1S3jg==}
+  '@x402/hono@2.26.0':
+    resolution: {integrity: sha512-q/UKxcDs1LzM24ON0BGAoOecFeYl7TqV0Dgui+nJd64l+ef0XU2VLXW9/N4dY5t6gyNRe2EknvQ7DIiJ3WD+NA==}
     peerDependencies:
-      '@x402/paywall': ^2.25.0
+      '@x402/paywall': ^2.26.0
       hono: ^4.0.0
     peerDependenciesMeta:
       '@x402/paywall':
@@ -1035,12 +1038,16 @@ snapshots:
     dependencies:
       zod: 3.25.76
 
-  '@x402/extensions@2.25.0(ethers@6.17.0)(typescript@7.0.2)':
+  '@x402/core@2.26.0':
+    dependencies:
+      zod: 3.25.76
+
+  '@x402/extensions@2.26.0(ethers@6.17.0)(typescript@7.0.2)':
     dependencies:
       '@noble/curves': 1.9.7
       '@scure/base': 1.2.6
       '@signinwithethereum/siwe': 4.2.1(ethers@6.17.0)(viem@2.56.3(typescript@7.0.2)(zod@3.25.76))
-      '@x402/core': 2.25.0
+      '@x402/core': 2.26.0
       ajv: 8.20.0
       jose: 5.10.0
       tweetnacl: 1.0.3
@@ -1056,10 +1063,10 @@ snapshots:
     dependencies:
       '@x402/core': 2.25.0
 
-  '@x402/hono@2.25.0(ethers@6.17.0)(hono@4.13.7)(typescript@7.0.2)':
+  '@x402/hono@2.26.0(ethers@6.17.0)(hono@4.13.7)(typescript@7.0.2)':
     dependencies:
-      '@x402/core': 2.25.0
-      '@x402/extensions': 2.25.0(ethers@6.17.0)(typescript@7.0.2)
+      '@x402/core': 2.26.0
+      '@x402/extensions': 2.26.0(ethers@6.17.0)(typescript@7.0.2)
       hono: 4.13.7
     transitivePeerDependencies:
       - bufferutil
