@@ -273,7 +273,10 @@ async function main(): Promise<void> {
 
    const createUrl = absoluteUrl(baseUrl, create.path);
    const readinessUrl = absoluteUrl(baseUrl, readiness.path);
-   const statusTemplate = absoluteUrl(baseUrl, getWatch.path);
+   // Preserve the OpenAPI path placeholder literally in evidence. URL
+   // construction would percent-encode {id}, which could make a false 404
+   // qualification pass without actually substituting a synthetic watch ID.
+   const statusTemplate = `${baseUrl}${getWatch.path}`;
 
    const llmsOpenApi = extractLlmsUrl(llms, 'OpenAPI');
    const llmsMcp = extractLlmsUrl(llms, 'MCP Streamable HTTP');
@@ -355,9 +358,10 @@ async function main(): Promise<void> {
       challenge.bazaarDeclared,
       'live 402 challenge does not declare extensions.bazaar');
 
-   const randomStatusUrl = statusTemplate.replace(
-      '{id}',
-      randomUUID(),
+   const syntheticWatchId = randomUUID();
+   const randomStatusUrl = absoluteUrl(
+      baseUrl,
+      getWatch.path.replace('{id}', syntheticWatchId),
    );
    const statusResponse = await fetch(randomStatusUrl, {
       headers: { 'user-agent': 'roundwatch-black-box-qualification/1.0' },
