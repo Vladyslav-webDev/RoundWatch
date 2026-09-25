@@ -71,6 +71,10 @@ jobs:
       - name: MainNet client safety tests
         run: pnpm -C apps/client test
 
+      - name: Live free black-box qualification
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/black-box-qualification'
+        run: pnpm -C apps/client probe:black-box
+
       - name: Canonical transaction-size probe
         run: pnpm -C apps/client probe:txn-size
 
