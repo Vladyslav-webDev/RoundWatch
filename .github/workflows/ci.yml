@@ -76,3 +76,35 @@ jobs:
 
       - name: Build production container
         run: docker build -t roundwatch-ci .
+
+      - name: One-shot production remediation smoke
+        if: github.event_name == 'pull_request' && github.head_ref == 'ops/post-remediation-production-smoke'
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://roundwatch-api.onrender.com'
+          ua='RoundWatch-PostRemediation-Smoke/1.0'
+
+          bad_headers="$(mktemp)"
+          bad_body="$(mktemp)"
+          bad_status="$(
+            curl -sS -D "$bad_headers" -o "$bad_body" -w '%{http_code}'               -X POST "$base/v1/watch"               -H "User-Agent: $ua"               -H 'Content-Type: application/json'               --data '{}'
+          )"
+          test "$bad_status" = '400'
+          ! grep -qi '^payment-required:' "$bad_headers"
+          ! grep -qi '^payment-response:' "$bad_headers"
+          grep -q '"code":"invalid_watch_request"' "$bad_body"
+
+          good_headers="$(mktemp)"
+          good_body="$(mktemp)"
+          good_status="$(
+            curl -sS -D "$good_headers" -o "$good_body" -w '%{http_code}'               -X POST "$base/v1/watch"               -H "User-Agent: $ua"               -H 'Content-Type: application/json'               --data '{"idempotencyKey":"post-remediation-smoke-20260925","expectedSender":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ","expectedReceiver":"AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI","atomicAmount":"1"}'
+          )"
+          test "$good_status" = '402'
+          grep -qi '^payment-required:' "$good_headers"
+
+          curl -sS -H "User-Agent: $ua" "$base/llms.txt"             | grep -q 'MCP preferred protocol version: 2026-07-28'
+
+          echo "malformed_create=$bad_status no_payment_headers=true"
+          echo "valid_unpaid_create=$good_status payment_required=true"
+          echo "llms_mcp_version=2026-07-28"
