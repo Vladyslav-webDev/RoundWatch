@@ -5,7 +5,7 @@ import type { FacilitatorClient } from '@x402/core/server';
 
 import { createApp } from './app.js';
 import {
-   ALGORAND_MAINNET,
+   ALGORAND_MAINNET_CAIP2,
    MAINNET_NETWORK_CONFIG,
 } from './network-config.js';
 import { RoundWatchStore } from './roundwatch-store.js';
@@ -27,7 +27,7 @@ function facilitator(): FacilitatorClient {
             {
                x402Version: 2,
                scheme: 'exact',
-               network: ALGORAND_MAINNET,
+               network: ALGORAND_MAINNET_CAIP2,
             },
          ],
          extensions: [],
