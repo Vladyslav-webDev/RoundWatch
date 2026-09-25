@@ -21,7 +21,7 @@
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "@x402-avm/extensions": "^2.6.1",
-    "@x402/avm": "^2.25.0",
+    "@x402/avm": "^2.26.0",
     "@x402/core": "^2.25.0",
     "@x402/hono": "^2.25.0",
     "dotenv": "^17.4.2",
