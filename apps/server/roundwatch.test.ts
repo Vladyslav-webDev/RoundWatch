@@ -1707,7 +1707,7 @@ test('malformed watch input is rejected before x402 challenge and payment-header
       ]) {
          const response = await app.request('/spike/watch', {
             method: 'POST',
-            headers,
+            headers: headers as Record<string, string>,
             body: '{}',
          });
 
