@@ -792,8 +792,19 @@ export function createApp(dependencies: AppDependencies): Hono {
       await next();
    });
 
+   // Bazaar discovery has a chicken-and-egg requirement for body-dependent
+   // POST resources: an unpaid caller must be able to receive PAYMENT-REQUIRED
+   // plus the declared example/schema before it knows how to construct the
+   // purchase body. Therefore semantic body validation is intentionally
+   // deferred until the caller presents PAYMENT-SIGNATURE.
+   //
+   // Safety invariant: every signed watch-create attempt is parsed and
+   // validated before @x402/hono can verify or settle the payment.
    app.use(watchPath, async (c, next) => {
-      if (c.req.method !== 'POST') {
+      if (
+         c.req.method !== 'POST' ||
+         c.req.header('payment-signature') === undefined
+      ) {
          await next();
          return;
       }
@@ -822,13 +833,22 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    app.use(watchPath, async (c, next) => {
-      if (c.req.method !== 'POST') {
+      if (
+         c.req.method !== 'POST' ||
+         c.req.header('payment-signature') === undefined
+      ) {
          await next();
          return;
       }
 
       if (!parsedWatchBodies.has(c.req.raw)) {
-         return c.json({ error: 'Expected a JSON request body', code: 'invalid_watch_request' }, 400);
+         return c.json(
+            {
+               error: 'Expected a JSON request body',
+               code: 'invalid_watch_request',
+            },
+            400,
+         );
       }
 
       const parsed = parseWatchSpec(
@@ -837,7 +857,10 @@ export function createApp(dependencies: AppDependencies): Hono {
       );
 
       if ('error' in parsed) {
-         return c.json({ error: parsed.error, code: 'invalid_watch_request' }, 400);
+         return c.json(
+            { error: parsed.error, code: 'invalid_watch_request' },
+            400,
+         );
       }
 
       validatedWatchSpecs.set(c.req.raw, parsed.spec);
