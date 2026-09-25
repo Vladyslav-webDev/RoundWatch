@@ -281,6 +281,9 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
          /https:\/\/roundwatch-api\.onrender\.com\/openapi\.json/,
       );
       assert.match(body, /0\.02 USDC \(20000 atomic units\)/);
+      assert.match(body, /before semantic body validation/i);
+      assert.match(body, /invalid signed input returns HTTP 400/i);
+      assert.match(body, /cannot spend/i);
       assert.match(body, /Vladyslav-webDev\/RoundWatch/);
    } finally {
       store.close();
