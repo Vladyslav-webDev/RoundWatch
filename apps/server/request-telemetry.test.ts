@@ -317,4 +317,40 @@ test('telemetry helpers normalize dynamic routes and compact common user agents'
    assert.equal(event?.host, 'roundwatch-api.onrender.com');
    assert.equal(JSON.stringify(event).includes('secret-watch-id'), false);
    assert.equal(JSON.stringify(event).includes('192.0.2.9'), false);
+
+   const successfulCreate = buildRequestTelemetryEvent(
+      {
+         method: 'POST',
+         path: '/v1/watch',
+         statusCode: 200,
+         durationMs: 8,
+         watchPath: '/v1/watch',
+         paymentPresented: true,
+         userAgent: 'undici',
+         host: 'roundwatch-api.onrender.com',
+         requestId: 'request-success',
+         timestamp: '2026-09-25T06:31:00.000Z',
+      },
+      'test-key',
+   );
+   assert.equal(successfulCreate?.classification, 'watch_create_success');
+   assert.equal(successfulCreate?.paymentOutcome, 'settled');
+
+   const malformedCreate = buildRequestTelemetryEvent(
+      {
+         method: 'POST',
+         path: '/v1/watch',
+         statusCode: 400,
+         durationMs: 2,
+         watchPath: '/v1/watch',
+         paymentPresented: false,
+         userAgent: 'curl/8.12.0',
+         host: 'roundwatch-api.onrender.com',
+         requestId: 'request-malformed',
+         timestamp: '2026-09-25T06:32:00.000Z',
+      },
+      'test-key',
+   );
+   assert.equal(malformedCreate?.classification, 'watch_create_malformed');
+   assert.equal(malformedCreate?.paymentOutcome, 'not_present');
 });
