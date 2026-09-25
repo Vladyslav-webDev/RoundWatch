@@ -57,6 +57,10 @@ import {
    RequestBodyTooLargeError,
    readJsonBodyWithLimit,
 } from './request-body.js';
+import {
+   createRequestTelemetryMiddleware,
+   type RequestTelemetryOptions,
+} from './request-telemetry.js';
 
 export const ALGORAND_TESTNET = TESTNET_NETWORK_CONFIG.network;
 export const TESTNET_USDC_ASSET_ID = TESTNET_NETWORK_CONFIG.usdcAssetIdNumber;
@@ -216,6 +220,7 @@ export interface AppDependencies {
    mcpRequestGateOptions?: SignedPaymentGateOptions;
    recoveryRequestGateOptions?: SignedPaymentGateOptions;
    readinessCheck?: () => ReadinessSnapshot;
+   requestTelemetry?: RequestTelemetryOptions;
 }
 
 const demoDiscovery = declareDiscoveryExtension({
@@ -363,6 +368,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       mcpRequestGateOptions,
       recoveryRequestGateOptions,
       readinessCheck,
+      requestTelemetry,
    } = dependencies;
 
    const signedPaymentGate = new SignedPaymentGate(
@@ -506,6 +512,13 @@ export function createApp(dependencies: AppDependencies): Hono {
    });
 
    const app = new Hono();
+
+   if (requestTelemetry) {
+      app.use(
+         '*',
+         createRequestTelemetryMiddleware(watchPath, requestTelemetry),
+      );
+   }
 
    app.use(
       '*',
