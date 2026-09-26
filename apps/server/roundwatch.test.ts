@@ -1751,7 +1751,13 @@ test('unpaid malformed watch input receives discovery 402, while signed malforme
          avmAddress: RECEIVER,
          facilitatorClient: {
             getSupported: async () => ({
-               kinds: [],
+               kinds: [
+                  {
+                     x402Version: 2,
+                     scheme: 'exact',
+                     network: ALGORAND_TESTNET,
+                  },
+               ],
                extensions: [],
                signers: {},
             }),
