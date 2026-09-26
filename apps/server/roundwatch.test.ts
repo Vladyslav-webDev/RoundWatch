@@ -1772,7 +1772,6 @@ test('unpaid malformed watch input receives discovery 402, while signed malforme
          } as unknown as FacilitatorClient,
          store,
          indexer: new FakeIndexer(100),
-         syncFacilitatorOnStart: false,
       });
 
       const unpaid = await app.request('/spike/watch', {
