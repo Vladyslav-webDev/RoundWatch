@@ -451,10 +451,15 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                      response.status,
                      diagnostic.safeProviderMessage,
                   );
+                  const retryAfterMilliseconds =
+                     readRetryAfterMilliseconds(response);
+                  const providerRequestId =
+                     readSafeProviderRequestId(response);
+                  const contentType = safeContentType(response);
                   const error = new IndexerHttpError({
                      status: response.status,
                      purpose,
-                     providerHost: url.host,
+                     providerHost: url.hostname,
                      pathTemplate: indexerPathTemplate(purpose),
                      ...(purpose === 'scan-page'
                         ? { variant: this.scanQueryVariant }
@@ -463,21 +468,15 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                      attemptId: randomUUID(),
                      code: classification.code,
                      retryDisposition: classification.retryDisposition,
-                     ...(readRetryAfterMilliseconds(response) === undefined
+                     ...(retryAfterMilliseconds === undefined
                         ? {}
-                        : {
-                             retryAfterMilliseconds:
-                                readRetryAfterMilliseconds(response),
-                          }),
-                     ...(readSafeProviderRequestId(response) === undefined
+                        : { retryAfterMilliseconds }),
+                     ...(providerRequestId === undefined
                         ? {}
-                        : {
-                             providerRequestId:
-                                readSafeProviderRequestId(response),
-                          }),
-                     ...(safeContentType(response) === undefined
+                        : { providerRequestId }),
+                     ...(contentType === undefined
                         ? {}
-                        : { contentType: safeContentType(response) }),
+                        : { contentType }),
                      declaredBodyBytes: diagnostic.declaredBodyBytes,
                      capturedBodyBytes: diagnostic.capturedBodyBytes,
                      bodyTruncated: diagnostic.bodyTruncated,
@@ -1256,7 +1255,7 @@ function safeContentType(response: Response): string | undefined {
    const raw = response.headers.get('content-type');
    if (!raw) return undefined;
    const mediaType = raw.split(';', 1)[0]!.trim().toLowerCase();
-   return /^[a-z0-9!#function headerContentLength(response: Response): number {^_.+-]+\/[a-z0-9!#function headerContentLength(response: Response): number {^_.+-]+$/.test(mediaType)
+   return /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(mediaType)
       ? mediaType
       : undefined;
 }
@@ -1391,14 +1390,13 @@ async function readIndexerErrorDiagnostic(
       }
    }
 
+   const safeProviderMessage = allowlistedProviderMessage(text);
    return {
       declaredBodyBytes,
       capturedBodyBytes,
       bodyTruncated,
       bodyReadFailed,
-      ...(allowlistedProviderMessage(text) === undefined
-         ? {}
-         : { safeProviderMessage: allowlistedProviderMessage(text) }),
+      ...(safeProviderMessage === undefined ? {} : { safeProviderMessage }),
    };
 }
 
