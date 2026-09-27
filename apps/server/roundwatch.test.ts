@@ -4759,9 +4759,11 @@ test('historical cache payload-byte budget prevents oversized cross-sweep retent
 });
 
 test('scan failure clears historical pages so stale provider tokens cannot loop forever', async () => {
+   let now = new Date('2026-09-27T13:00:00.000Z');
    const store = new RoundWatchStore(':memory:', {
       maxOpenWatches: 1,
       maxOpenWatchesPerPayer: 1,
+      now: () => now,
    });
    const indexer = new SharedPageFakeIndexer(101);
 
@@ -4783,7 +4785,13 @@ test('scan failure clears historical pages so stale provider tokens cannot loop 
          nextToken: 'provider-token',
       });
 
-      const poller = new RoundWatchPoller(store, indexer);
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      );
       await poller.runOnce();
       assert.equal(indexer.pageCalls.length, 1);
 
@@ -4791,13 +4799,24 @@ test('scan failure clears historical pages so stale provider tokens cannot loop 
       await poller.runOnce();
       assert.equal(indexer.pageCalls.length, 2);
 
+      const deferred = store.getWatch(watch.id);
+      assert.ok(deferred?.pollingRetryAt);
+
       indexer.pages.push({
          transactions: [],
          currentRound: 101,
       });
+
+      // Cooldown itself performs no provider work and spends no extra turn.
+      await poller.runOnce();
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 100);
+
+      now = new Date(Date.parse(deferred!.pollingRetryAt!) + 1);
       await poller.runOnce();
 
-      // The first page must be fetched again after the failed continuation.
+      // After the persisted cooldown, page 1 is fetched again from the durable
+      // cursor. The failed continuation token is never reused.
       assert.equal(indexer.pageCalls.length, 3);
       assert.equal(store.getWatch(watch.id)?.scanAfterRound, 101);
    } finally {
