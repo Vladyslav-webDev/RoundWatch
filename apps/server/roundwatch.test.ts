@@ -4286,6 +4286,95 @@ test('permanent Indexer rejection consumes one turn, persists fail-closed termin
    }
 });
 
+test('provider-wide permanent HTTP error stays active and readiness-impacting instead of being isolated to one watch', async () => {
+   let now = new Date('2026-09-27T12:05:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 5,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'provider-auth-readiness',
+         },
+         intent('PROVIDER_AUTH_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'PROVIDER_AUTH_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async () =>
+            Response.json(
+               { message: 'synthetic provider auth failure' },
+               { status: 401 },
+            ),
+         1_000,
+         undefined,
+         'C',
+      );
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      );
+
+      const first = await poller.runOnce();
+      assert.deepEqual(first, {
+         attempted: 1,
+         succeeded: 0,
+         failed: 1,
+      });
+
+      const deferred = store.getWatch(prepared.id);
+      assert.equal(deferred?.state, 'active');
+      assert.equal(deferred?.terminalReason, undefined);
+      assert.equal(deferred?.pollingFailureCode, 'provider_unauthorized');
+      assert.equal(deferred?.pollingFailureDisposition, 'unknown');
+      assert.equal(deferred?.pollingFailureCount, 1);
+      assert.equal(deferred?.workUnitsUsed, 1);
+      assert.equal(deferred?.scanAfterRound, 100);
+      assert.ok(deferred?.pollingRetryAt);
+
+      const tracker = new WorkerHealthTracker(() => now.getTime());
+      tracker.markStarted();
+      tracker.markCycleStarted();
+      tracker.markCycleCompleted(first);
+      assert.equal(tracker.snapshot(60_000).ready, false);
+
+      // The persisted cooldown produces no provider request, but that no-op
+      // cycle cannot turn readiness green while provider recovery is unproven.
+      const coolingDown = await poller.runOnce();
+      assert.deepEqual(coolingDown, {
+         attempted: 0,
+         succeeded: 0,
+         failed: 0,
+      });
+      tracker.markCycleStarted();
+      tracker.markCycleCompleted(coolingDown);
+      assert.equal(tracker.snapshot(60_000).ready, false);
+      assert.equal(store.getWatch(prepared.id)?.workUnitsUsed, 1);
+   } finally {
+      store.close();
+   }
+});
+
 test('429 polling failure persists cooldown across restart without spending work while waiting', async () => {
    const directory = mkdtempSync(join(tmpdir(), 'roundwatch-poll-backoff-'));
    const databasePath = join(directory, 'roundwatch.sqlite');
