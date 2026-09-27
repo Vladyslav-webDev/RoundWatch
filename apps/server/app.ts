@@ -1562,6 +1562,12 @@ function publicWatch(watch: WatchRecord): Record<string, unknown> {
       'serviceLastValid',
       'reconciliationAttempts',
       'reconciliationNextAttemptAt',
+      'pollingFailureCode',
+      'pollingFailureStatus',
+      'pollingFailureDisposition',
+      'pollingFailureCount',
+      'pollingLastFailureAt',
+      'pollingRetryAt',
       'closingRound',
    ]) {
       delete result[internal];
