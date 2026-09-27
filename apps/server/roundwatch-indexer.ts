@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { IndexedAssetTransfer } from './roundwatch-reconciler.js';
 import type { WatchRecord } from './roundwatch-store.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
@@ -11,7 +12,108 @@ export type ScanQueryVariant = 'A' | 'B' | 'C' | 'D';
 
 export const DEFAULT_SCAN_QUERY_VARIANT: ScanQueryVariant = 'C';
 export const MAX_INDEXER_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
+export const MAX_INDEXER_ERROR_BODY_BYTES = 2 * 1024;
 export const MAX_INDEXER_NEXT_TOKEN_BYTES = 4 * 1024;
+
+export type IndexerRetryDisposition = 'permanent' | 'transient' | 'unknown';
+
+export type IndexerHttpErrorCode =
+   | 'zero_address_sender_unsupported'
+   | 'rate_limited'
+   | 'provider_unauthorized'
+   | 'provider_forbidden'
+   | 'provider_not_found'
+   | 'provider_request_rejected'
+   | 'provider_server_error'
+   | 'provider_http_error';
+
+interface IndexerHttpErrorDetails {
+   status: number;
+   purpose: IndexerRequestPurpose;
+   providerHost: string;
+   pathTemplate: string;
+   variant?: ScanQueryVariant;
+   parameterNames: string[];
+   attemptId: string;
+   code: IndexerHttpErrorCode;
+   retryDisposition: IndexerRetryDisposition;
+   retryAfterMilliseconds?: number;
+   providerRequestId?: string;
+   contentType?: string;
+   declaredBodyBytes: number;
+   capturedBodyBytes: number;
+   bodyTruncated: boolean;
+   bodyReadFailed: boolean;
+}
+
+export class IndexerHttpError extends Error {
+   readonly status: number;
+   readonly purpose: IndexerRequestPurpose;
+   readonly providerHost: string;
+   readonly pathTemplate: string;
+   readonly variant: ScanQueryVariant | undefined;
+   readonly parameterNames: string[];
+   readonly attemptId: string;
+   readonly code: IndexerHttpErrorCode;
+   readonly retryDisposition: IndexerRetryDisposition;
+   readonly retryAfterMilliseconds: number | undefined;
+   readonly providerRequestId: string | undefined;
+   readonly contentType: string | undefined;
+   readonly declaredBodyBytes: number;
+   readonly capturedBodyBytes: number;
+   readonly bodyTruncated: boolean;
+   readonly bodyReadFailed: boolean;
+
+   constructor(details: IndexerHttpErrorDetails) {
+      super(
+         `Indexer ${details.purpose} request failed with HTTP ${details.status} code=${details.code} disposition=${details.retryDisposition} attempt=${details.attemptId}`,
+      );
+      this.name = 'IndexerHttpError';
+      this.status = details.status;
+      this.purpose = details.purpose;
+      this.providerHost = details.providerHost;
+      this.pathTemplate = details.pathTemplate;
+      this.variant = details.variant;
+      this.parameterNames = [...details.parameterNames];
+      this.attemptId = details.attemptId;
+      this.code = details.code;
+      this.retryDisposition = details.retryDisposition;
+      this.retryAfterMilliseconds = details.retryAfterMilliseconds;
+      this.providerRequestId = details.providerRequestId;
+      this.contentType = details.contentType;
+      this.declaredBodyBytes = details.declaredBodyBytes;
+      this.capturedBodyBytes = details.capturedBodyBytes;
+      this.bodyTruncated = details.bodyTruncated;
+      this.bodyReadFailed = details.bodyReadFailed;
+   }
+
+   telemetry(): Record<string, unknown> {
+      return {
+         status: this.status,
+         purpose: this.purpose,
+         providerHost: this.providerHost,
+         pathTemplate: this.pathTemplate,
+         ...(this.variant === undefined ? {} : { variant: this.variant }),
+         parameterNames: [...this.parameterNames],
+         attemptId: this.attemptId,
+         code: this.code,
+         retryDisposition: this.retryDisposition,
+         ...(this.retryAfterMilliseconds === undefined
+            ? {}
+            : { retryAfterMilliseconds: this.retryAfterMilliseconds }),
+         ...(this.providerRequestId === undefined
+            ? {}
+            : { providerRequestId: this.providerRequestId }),
+         ...(this.contentType === undefined
+            ? {}
+            : { contentType: this.contentType }),
+         declaredBodyBytes: this.declaredBodyBytes,
+         capturedBodyBytes: this.capturedBodyBytes,
+         bodyTruncated: this.bodyTruncated,
+         bodyReadFailed: this.bodyReadFailed,
+      };
+   }
+}
 
 export function resolveScanQueryVariant(
    value: string | undefined,
@@ -335,11 +437,56 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                }
 
                if (!response.ok) {
-                  responseBytes = headerContentLength(response);
-                  await cancelUnconsumedResponseBody(response);
-                  throw new Error(
-                     `Indexer ${purpose} request failed with HTTP ${response.status}`,
+                  const diagnostic = await readIndexerErrorDiagnostic(
+                     response,
+                     MAX_INDEXER_ERROR_BODY_BYTES,
+                     Math.min(this.timeoutMilliseconds, 250),
                   );
+                  responseBytes =
+                     diagnostic.declaredBodyBytes > 0
+                        ? diagnostic.declaredBodyBytes
+                        : diagnostic.capturedBodyBytes;
+
+                  const classification = classifyIndexerHttpFailure(
+                     response.status,
+                     diagnostic.safeProviderMessage,
+                  );
+                  const retryAfterMilliseconds =
+                     readRetryAfterMilliseconds(response);
+                  const providerRequestId =
+                     readSafeProviderRequestId(response);
+                  const contentType = safeContentType(response);
+                  const error = new IndexerHttpError({
+                     status: response.status,
+                     purpose,
+                     providerHost: url.hostname,
+                     pathTemplate: indexerPathTemplate(purpose),
+                     ...(purpose === 'scan-page'
+                        ? { variant: this.scanQueryVariant }
+                        : {}),
+                     parameterNames: [...new Set(url.searchParams.keys())].sort(),
+                     attemptId: randomUUID(),
+                     code: classification.code,
+                     retryDisposition: classification.retryDisposition,
+                     ...(retryAfterMilliseconds === undefined
+                        ? {}
+                        : { retryAfterMilliseconds }),
+                     ...(providerRequestId === undefined
+                        ? {}
+                        : { providerRequestId }),
+                     ...(contentType === undefined
+                        ? {}
+                        : { contentType }),
+                     declaredBodyBytes: diagnostic.declaredBodyBytes,
+                     capturedBodyBytes: diagnostic.capturedBodyBytes,
+                     bodyTruncated: diagnostic.bodyTruncated,
+                     bodyReadFailed: diagnostic.bodyReadFailed,
+                  });
+
+                  console.warn(
+                     `RoundWatch Indexer HTTP failure ${JSON.stringify(error.telemetry())}`,
+                  );
+                  throw error;
                }
 
                const declaredBytes = headerContentLength(response);
@@ -1026,6 +1173,231 @@ function nonEmptyString(value: unknown, label: string): string {
 function isCanonicalBase64(value: string): boolean {
    if (value.length === 0 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return false;
    return Buffer.from(value, 'base64').toString('base64') === value;
+}
+
+const ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE =
+   'invalid input: searching transactions by zero address with asset sender role is not supported';
+
+interface IndexerErrorDiagnostic {
+   declaredBodyBytes: number;
+   capturedBodyBytes: number;
+   bodyTruncated: boolean;
+   bodyReadFailed: boolean;
+   safeProviderMessage?: string;
+}
+
+function classifyIndexerHttpFailure(
+   status: number,
+   safeProviderMessage: string | undefined,
+): {
+   code: IndexerHttpErrorCode;
+   retryDisposition: IndexerRetryDisposition;
+} {
+   if (safeProviderMessage === ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE) {
+      return {
+         code: 'zero_address_sender_unsupported',
+         retryDisposition: 'permanent',
+      };
+   }
+   if (status === 429) {
+      return { code: 'rate_limited', retryDisposition: 'transient' };
+   }
+   if (status >= 500 && status <= 599) {
+      return {
+         code: 'provider_server_error',
+         retryDisposition: 'transient',
+      };
+   }
+   if (status === 401) {
+      return {
+         code: 'provider_unauthorized',
+         retryDisposition: 'permanent',
+      };
+   }
+   if (status === 403) {
+      return {
+         code: 'provider_forbidden',
+         retryDisposition: 'permanent',
+      };
+   }
+   if (status === 404) {
+      return {
+         code: 'provider_not_found',
+         retryDisposition: 'permanent',
+      };
+   }
+   if (status === 400 || status === 422) {
+      return {
+         code: 'provider_request_rejected',
+         retryDisposition: 'unknown',
+      };
+   }
+   return { code: 'provider_http_error', retryDisposition: 'unknown' };
+}
+
+function indexerPathTemplate(purpose: IndexerRequestPurpose): string {
+   switch (purpose) {
+      case 'health':
+         return '/health';
+      case 'activation':
+      case 'reconciliation':
+         return '/v2/transactions/{transactionId}';
+      case 'checkpoint':
+         return '/v2/blocks/{round}';
+      case 'scan-page':
+         return '/v2/assets/{assetId}/transactions';
+      case 'absence-proof':
+         return '/v2/transactions';
+   }
+}
+
+function safeContentType(response: Response): string | undefined {
+   const raw = response.headers.get('content-type');
+   if (!raw) return undefined;
+   const mediaType = raw.split(';', 1)[0]!.trim().toLowerCase();
+   return /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(mediaType)
+      ? mediaType
+      : undefined;
+}
+
+function readSafeProviderRequestId(response: Response): string | undefined {
+   for (const name of ['cf-ray', 'x-request-id', 'x-amzn-requestid', 'traceparent']) {
+      const value = response.headers.get(name)?.trim();
+      if (value && /^[A-Za-z0-9._:-]{1,128}$/.test(value)) {
+         return `${name}:${value}`;
+      }
+   }
+   return undefined;
+}
+
+function readRetryAfterMilliseconds(response: Response): number | undefined {
+   const raw = response.headers.get('retry-after')?.trim();
+   if (!raw) return undefined;
+
+   if (/^\d+$/.test(raw)) {
+      const seconds = Number(raw);
+      if (Number.isSafeInteger(seconds) && seconds >= 0) {
+         return Math.min(seconds, 3_600) * 1_000;
+      }
+      return undefined;
+   }
+
+   const date = Date.parse(raw);
+   if (!Number.isFinite(date)) return undefined;
+   return Math.min(Math.max(0, date - Date.now()), 3_600_000);
+}
+
+function allowlistedProviderMessage(text: string | undefined): string | undefined {
+   if (!text) return undefined;
+
+   try {
+      const parsed = JSON.parse(text) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+         return undefined;
+      }
+      const message = (parsed as Record<string, unknown>).message;
+      return message === ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE
+         ? ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE
+         : undefined;
+   } catch {
+      return undefined;
+   }
+}
+
+async function readIndexerErrorDiagnostic(
+   response: Response,
+   limitBytes: number,
+   readTimeoutMilliseconds: number,
+): Promise<IndexerErrorDiagnostic> {
+   const declaredBodyBytes = headerContentLength(response);
+   if (!response.body) {
+      return {
+         declaredBodyBytes,
+         capturedBodyBytes: 0,
+         bodyTruncated: declaredBodyBytes > 0,
+         bodyReadFailed: false,
+      };
+   }
+
+   const reader = response.body.getReader();
+   const chunks: Uint8Array[] = [];
+   let capturedBodyBytes = 0;
+   let bodyTruncated = declaredBodyBytes > limitBytes;
+   let bodyReadFailed = false;
+   const deadline = Date.now() + Math.max(1, readTimeoutMilliseconds);
+
+   try {
+      while (capturedBodyBytes < limitBytes) {
+         const remainingMilliseconds = Math.max(1, deadline - Date.now());
+         let timeout: ReturnType<typeof setTimeout> | undefined;
+         try {
+            const result = await Promise.race([
+               reader.read(),
+               new Promise<never>((_resolve, reject) => {
+                  timeout = setTimeout(
+                     () => reject(new Error('Indexer error-body read timed out')),
+                     remainingMilliseconds,
+                  );
+               }),
+            ]);
+
+            if (result.done) break;
+            const remainingBytes = limitBytes - capturedBodyBytes;
+            if (result.value.byteLength > remainingBytes) {
+               chunks.push(result.value.subarray(0, remainingBytes));
+               capturedBodyBytes += remainingBytes;
+               bodyTruncated = true;
+               await reader.cancel('indexer error body prefix captured');
+               break;
+            }
+
+            chunks.push(result.value);
+            capturedBodyBytes += result.value.byteLength;
+
+            if (capturedBodyBytes === limitBytes) {
+               bodyTruncated = true;
+               await reader.cancel('indexer error body prefix captured');
+               break;
+            }
+         } finally {
+            if (timeout !== undefined) clearTimeout(timeout);
+         }
+      }
+   } catch {
+      bodyReadFailed = true;
+      try {
+         await reader.cancel('indexer error body diagnostic failed');
+      } catch {
+         // Preserve the HTTP failure even when disposal fails.
+      }
+   } finally {
+      reader.releaseLock();
+   }
+
+   const body = new Uint8Array(capturedBodyBytes);
+   let offset = 0;
+   for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+   }
+
+   let text: string | undefined;
+   if (capturedBodyBytes > 0 && !bodyTruncated && !bodyReadFailed) {
+      try {
+         text = new TextDecoder('utf-8', { fatal: true }).decode(body);
+      } catch {
+         bodyReadFailed = true;
+      }
+   }
+
+   const safeProviderMessage = allowlistedProviderMessage(text);
+   return {
+      declaredBodyBytes,
+      capturedBodyBytes,
+      bodyTruncated,
+      bodyReadFailed,
+      ...(safeProviderMessage === undefined ? {} : { safeProviderMessage }),
+   };
 }
 
 function headerContentLength(response: Response): number {
