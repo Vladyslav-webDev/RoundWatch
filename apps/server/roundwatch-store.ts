@@ -11,7 +11,21 @@ export type WatchState =
    | 'expired'
    | 'indeterminate';
 
-export type WatchTerminalReason = 'work_budget_exhausted';
+export type WatchTerminalReason =
+   | 'work_budget_exhausted'
+   | 'indexer_permanent_failure';
+
+export type PollingFailureDisposition =
+   | 'permanent'
+   | 'transient'
+   | 'unknown';
+
+export interface PollingFailure {
+   code: string;
+   status?: number;
+   disposition: PollingFailureDisposition;
+   retryAt?: Date;
+}
 
 export const DEFAULT_WATCH_TTL_MILLISECONDS = 30 * 60 * 1_000;
 export const DEFAULT_MAX_OPEN_WATCHES = 50;
@@ -86,6 +100,12 @@ export interface WatchRecord extends WatchSpec {
    workUnitBudget?: number;
    workUnitsUsed: number;
    terminalReason?: WatchTerminalReason;
+   pollingFailureCode?: string;
+   pollingFailureStatus?: number;
+   pollingFailureDisposition?: PollingFailureDisposition;
+   pollingFailureCount: number;
+   pollingLastFailureAt?: string;
+   pollingRetryAt?: string;
 }
 
 export interface SettlementEvidence {
@@ -129,6 +149,12 @@ interface WatchRow {
    work_unit_budget: number | null;
    work_units_used: number;
    terminal_reason: WatchTerminalReason | null;
+   polling_failure_code: string | null;
+   polling_failure_status: number | null;
+   polling_failure_disposition: PollingFailureDisposition | null;
+   polling_failure_count: number;
+   polling_last_failure_at: string | null;
+   polling_retry_at: string | null;
 }
 
 export class RoundWatchStore {
@@ -208,6 +234,21 @@ export class RoundWatchStore {
       this.ensureColumn('work_unit_budget', 'work_unit_budget INTEGER');
       this.ensureColumn('work_units_used', 'work_units_used INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('terminal_reason', 'terminal_reason TEXT');
+      this.ensureColumn('polling_failure_code', 'polling_failure_code TEXT');
+      this.ensureColumn('polling_failure_status', 'polling_failure_status INTEGER');
+      this.ensureColumn(
+         'polling_failure_disposition',
+         'polling_failure_disposition TEXT',
+      );
+      this.ensureColumn(
+         'polling_failure_count',
+         'polling_failure_count INTEGER NOT NULL DEFAULT 0',
+      );
+      this.ensureColumn(
+         'polling_last_failure_at',
+         'polling_last_failure_at TEXT',
+      );
+      this.ensureColumn('polling_retry_at', 'polling_retry_at TEXT');
       this.ensureWatchStateConstraint();
 
       // Existing rows predate the durable work contract. Give them a fresh
@@ -242,6 +283,10 @@ export class RoundWatchStore {
             state,
             settlement_reconciliation_terminal
          );
+
+         CREATE INDEX IF NOT EXISTS roundwatch_polling_due_idx
+         ON roundwatch_watches(state, polling_retry_at, created_at)
+         WHERE state = 'active';
       `);
 
       // evidence_version=0 rows are legacy. No new proof fields are fabricated.
