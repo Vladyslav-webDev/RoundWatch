@@ -202,6 +202,8 @@ export class RoundWatchPoller {
             this.clearHistoricalPageCache();
             const persisted = this.persistPollingFailure(watch, error);
             if (persisted?.state === 'indeterminate') {
+               outcome.isolatedFailures =
+                  (outcome.isolatedFailures ?? 0) + 1;
                this.finishMetric(persisted, 'indeterminate');
             }
             console.error(
