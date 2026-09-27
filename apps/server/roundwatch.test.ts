@@ -213,6 +213,8 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
          false,
       );
       assert.ok(create?.responses?.['402']?.headers?.['PAYMENT-REQUIRED']);
+      assert.ok(create?.responses?.['408']);
+      assert.ok(create?.responses?.['413']);
       assert.equal(
          document.paths?.['/v1/watch/recover']?.post?.operationId,
          'recoverWatch',
@@ -282,7 +284,9 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
       );
       assert.match(body, /0\.02 USDC \(20000 atomic units\)/);
       assert.match(body, /before semantic body validation/i);
-      assert.match(body, /invalid signed input returns HTTP 400/i);
+      assert.match(body, /invalid watch specifications return HTTP 400/i);
+      assert.match(body, /oversized bodies return HTTP 413/i);
+      assert.match(body, /body-read timeouts return HTTP 408/i);
       assert.match(body, /cannot spend/i);
       assert.match(body, /Vladyslav-webDev\/RoundWatch/);
    } finally {
@@ -1537,6 +1541,120 @@ test('watch creation rejects oversized JSON before payment verification middlewa
       assert.equal(response.status, 413);
       assert.equal(facilitator.verifyCalls, 0);
       assert.equal(store.getByIdempotencyKey('oversized-watch-body'), undefined);
+   } finally {
+      store.close();
+   }
+});
+
+test('signed watch body admission bounds slow readers and releases after timeout', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const facilitator = new DelayedRejectingFacilitator();
+
+   try {
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: facilitator,
+         store,
+         indexer: new FakeIndexer(100),
+         signedWatchBodyGateOptions: {
+            requestsPerSecond: 1_000,
+            burst: 8,
+            concurrency: 1,
+         },
+         signedWatchBodyReadTimeoutMilliseconds: 100,
+      });
+
+      const unsigned = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: '{}',
+      });
+      assert.equal(unsigned.status, 402);
+      const encoded = unsigned.headers.get('payment-required');
+      assert.ok(encoded);
+      const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+      const paymentHeader = encodePaymentSignatureHeader({
+         x402Version: 2,
+         accepted: required,
+         payload: {
+            paymentGroup: [SIGNED_SERVICE_PAYMENT],
+            paymentIndex: 0,
+         },
+      });
+
+      let signalReadStarted!: () => void;
+      const readStarted = new Promise<void>(resolve => {
+         signalReadStarted = resolve;
+      });
+      let signalled = false;
+      const slowBody = new ReadableStream<Uint8Array>(
+         {
+            pull() {
+               if (!signalled) {
+                  signalled = true;
+                  signalReadStarted();
+               }
+            },
+         },
+         { highWaterMark: 0 },
+      );
+      const slowRequest = new Request('http://localhost/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body: slowBody,
+         duplex: 'half',
+      } as RequestInit & { duplex: 'half' });
+
+      const slowResponsePromise = app.fetch(slowRequest);
+      await readStarted;
+
+      const validBody = JSON.stringify({
+         idempotencyKey: 'body-admission-after-timeout',
+         expectedSender: PAYER,
+         expectedReceiver: RECEIVER,
+         atomicAmount: '1',
+      });
+
+      const blocked = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body: validBody,
+      });
+      assert.equal(blocked.status, 429);
+      assert.equal(blocked.headers.get('retry-after'), '1');
+      const blockedBody = await blocked.json() as { code?: string };
+      assert.equal(
+         blockedBody.code,
+         'signed_watch_body_rate_limited',
+      );
+      assert.equal(facilitator.verifyCalls, 0);
+
+      const timedOut = await slowResponsePromise;
+      assert.equal(timedOut.status, 408);
+      const timeoutBody = await timedOut.json() as { code?: string };
+      assert.equal(timeoutBody.code, 'watch_request_body_timeout');
+      assert.equal(facilitator.verifyCalls, 0);
+
+      const afterTimeout = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body: validBody,
+      });
+      assert.equal(afterTimeout.status, 402);
+      assert.equal(facilitator.verifyCalls, 1);
+      assert.equal(
+         store.getByIdempotencyKey('body-admission-after-timeout'),
+         undefined,
+      );
    } finally {
       store.close();
    }

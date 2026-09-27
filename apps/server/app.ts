@@ -54,6 +54,7 @@ import {
 import { handleMcpHttpRequest } from './mcp.js';
 import {
    MAX_WATCH_REQUEST_BODY_BYTES,
+   RequestBodyReadTimeoutError,
    RequestBodyTooLargeError,
    readJsonBodyWithLimit,
 } from './request-body.js';
@@ -74,6 +75,7 @@ const ROUNDWATCH_ID_HEADER = 'x-roundwatch-id';
 const MAX_SAFE_ATOMIC_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
 const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
+const DEFAULT_SIGNED_WATCH_BODY_READ_TIMEOUT_MILLISECONDS = 5_000;
 const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
 const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
 const ROUNDWATCH_DISCOVERY_TAGS = [
@@ -217,6 +219,8 @@ export interface AppDependencies {
    requireSettlementIntent?: boolean;
    economicsMetrics?: RoundWatchEconomicsMetrics;
    signedPaymentGateOptions?: SignedPaymentGateOptions;
+   signedWatchBodyGateOptions?: SignedPaymentGateOptions;
+   signedWatchBodyReadTimeoutMilliseconds?: number;
    mcpRequestGateOptions?: SignedPaymentGateOptions;
    recoveryRequestGateOptions?: SignedPaymentGateOptions;
    readinessCheck?: () => ReadinessSnapshot;
@@ -365,6 +369,9 @@ export function createApp(dependencies: AppDependencies): Hono {
       requireSettlementIntent = networkConfig.name === 'mainnet',
       economicsMetrics,
       signedPaymentGateOptions,
+      signedWatchBodyGateOptions,
+      signedWatchBodyReadTimeoutMilliseconds =
+         DEFAULT_SIGNED_WATCH_BODY_READ_TIMEOUT_MILLISECONDS,
       mcpRequestGateOptions,
       recoveryRequestGateOptions,
       readinessCheck,
@@ -379,6 +386,22 @@ export function createApp(dependencies: AppDependencies): Hono {
          concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
       },
    );
+   const signedWatchBodyGate = new SignedPaymentGate(
+      signedWatchBodyGateOptions ?? {
+         requestsPerSecond:
+            DEFAULT_SIGNED_PAYMENT_REQUESTS_PER_SECOND,
+         burst: DEFAULT_SIGNED_PAYMENT_BURST,
+         concurrency: DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
+      },
+   );
+   if (
+      !Number.isFinite(signedWatchBodyReadTimeoutMilliseconds) ||
+      signedWatchBodyReadTimeoutMilliseconds <= 0
+   ) {
+      throw new Error(
+         'signedWatchBodyReadTimeoutMilliseconds must be a positive finite number',
+      );
+   }
    const mcpRequestGate = new SignedPaymentGate(
       mcpRequestGateOptions ?? {
          requestsPerSecond:
@@ -809,24 +832,55 @@ export function createApp(dependencies: AppDependencies): Hono {
          return;
       }
 
-      try {
-         const body = await readJsonBodyWithLimit(
-            c.req.raw,
-            MAX_WATCH_REQUEST_BODY_BYTES,
+      // Signed watch bodies are attacker-controlled streams. Admit them before
+      // reading so slow/incomplete bodies cannot bypass bounded request
+      // concurrency merely by stalling ahead of the payment-verification gate.
+      const bodyAdmission = signedWatchBodyGate.tryAcquire();
+      if (!bodyAdmission.allowed) {
+         c.header('retry-after', '1');
+         return c.json(
+            {
+               error:
+                  'Signed watch body admission capacity is temporarily exhausted',
+               code: 'signed_watch_body_rate_limited',
+            },
+            429,
          );
-         parsedWatchBodies.set(c.req.raw, body);
-      } catch (error) {
-         if (error instanceof RequestBodyTooLargeError) {
-            return c.json(
-               {
-                  error: 'Watch request body is too large',
-                  code: 'watch_request_body_too_large',
-               },
-               413,
-            );
-         }
+      }
 
-         return c.json({ error: 'Expected a JSON request body' }, 400);
+      try {
+         try {
+            const body = await readJsonBodyWithLimit(
+               c.req.raw,
+               MAX_WATCH_REQUEST_BODY_BYTES,
+               signedWatchBodyReadTimeoutMilliseconds,
+            );
+            parsedWatchBodies.set(c.req.raw, body);
+         } catch (error) {
+            if (error instanceof RequestBodyTooLargeError) {
+               return c.json(
+                  {
+                     error: 'Watch request body is too large',
+                     code: 'watch_request_body_too_large',
+                  },
+                  413,
+               );
+            }
+
+            if (error instanceof RequestBodyReadTimeoutError) {
+               return c.json(
+                  {
+                     error: 'Watch request body read timed out',
+                     code: 'watch_request_body_timeout',
+                  },
+                  408,
+               );
+            }
+
+            return c.json({ error: 'Expected a JSON request body' }, 400);
+         }
+      } finally {
+         bodyAdmission.release();
       }
 
       await next();

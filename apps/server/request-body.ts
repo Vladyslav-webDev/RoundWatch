@@ -5,15 +5,29 @@ export class RequestBodyTooLargeError extends Error {
    }
 }
 
+export class RequestBodyReadTimeoutError extends Error {
+   constructor(readonly timeoutMilliseconds: number) {
+      super(`Request body read exceeded ${timeoutMilliseconds} ms`);
+      this.name = 'RequestBodyReadTimeoutError';
+   }
+}
+
 export const MAX_MCP_REQUEST_BODY_BYTES = 32 * 1024;
 export const MAX_WATCH_REQUEST_BODY_BYTES = 8 * 1024;
 
 export async function readJsonBodyWithLimit(
    request: Request,
    limitBytes: number,
+   timeoutMilliseconds?: number,
 ): Promise<unknown> {
    if (!Number.isSafeInteger(limitBytes) || limitBytes <= 0) {
       throw new Error('limitBytes must be a positive safe integer');
+   }
+   if (
+      timeoutMilliseconds !== undefined &&
+      (!Number.isFinite(timeoutMilliseconds) || timeoutMilliseconds <= 0)
+   ) {
+      throw new Error('timeoutMilliseconds must be a positive finite number');
    }
 
    const declaredLength = parseDeclaredLength(
@@ -30,22 +44,43 @@ export async function readJsonBodyWithLimit(
    const reader = request.body.getReader();
    const chunks: Uint8Array[] = [];
    let totalBytes = 0;
+   const deadline =
+      timeoutMilliseconds === undefined
+         ? undefined
+         : performance.now() + timeoutMilliseconds;
 
    try {
       while (true) {
-         const { done, value } = await reader.read();
+         const { done, value } = await readChunk(
+            reader,
+            deadline,
+            timeoutMilliseconds,
+         );
          if (done) break;
 
          totalBytes += value.byteLength;
          if (totalBytes > limitBytes) {
-            await reader.cancel('request body limit exceeded');
+            void reader.cancel('request body limit exceeded').catch(() => {});
             throw new RequestBodyTooLargeError(limitBytes);
          }
 
          chunks.push(value);
       }
+   } catch (error) {
+      if (error instanceof RequestBodyReadTimeoutError) {
+         // Do not await transport cancellation here: the read deadline must
+         // remain authoritative even if an underlying stream is slow to
+         // acknowledge cancellation.
+         void reader.cancel('request body read timeout').catch(() => {});
+      }
+      throw error;
    } finally {
-      reader.releaseLock();
+      try {
+         reader.releaseLock();
+      } catch {
+         // A transport may still be unwinding a cancelled read. The request is
+         // already rejected and no downstream consumer may reuse this stream.
+      }
    }
 
    const body = new Uint8Array(totalBytes);
@@ -57,6 +92,39 @@ export async function readJsonBodyWithLimit(
 
    const text = new TextDecoder('utf-8', { fatal: true }).decode(body);
    return JSON.parse(text);
+}
+
+async function readChunk(
+   reader: ReadableStreamDefaultReader<Uint8Array>,
+   deadline: number | undefined,
+   timeoutMilliseconds: number | undefined,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+   if (deadline === undefined || timeoutMilliseconds === undefined) {
+      return reader.read();
+   }
+
+   const remainingMilliseconds = deadline - performance.now();
+   if (remainingMilliseconds <= 0) {
+      throw new RequestBodyReadTimeoutError(timeoutMilliseconds);
+   }
+
+   let timer: ReturnType<typeof setTimeout> | undefined;
+   try {
+      return await Promise.race([
+         reader.read(),
+         new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+               () =>
+                  reject(
+                     new RequestBodyReadTimeoutError(timeoutMilliseconds),
+                  ),
+               Math.ceil(remainingMilliseconds),
+            );
+         }),
+      ]);
+   } finally {
+      if (timer !== undefined) clearTimeout(timer);
+   }
 }
 
 function parseDeclaredLength(value: string | null): number | undefined {
