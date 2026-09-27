@@ -399,7 +399,13 @@ export class RoundWatchStore {
                evidence_version,
                work_unit_budget,
                work_units_used,
-               terminal_reason
+               terminal_reason,
+               polling_failure_code,
+               polling_failure_status,
+               polling_failure_disposition,
+               polling_failure_count,
+               polling_last_failure_at,
+               polling_retry_at
             ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
          `).run(
             id,
@@ -860,7 +866,13 @@ export class RoundWatchStore {
             reconciliation_next_attempt_at TEXT,
             work_unit_budget INTEGER,
             work_units_used INTEGER NOT NULL DEFAULT 0,
-            terminal_reason TEXT
+            terminal_reason TEXT,
+            polling_failure_code TEXT,
+            polling_failure_status INTEGER,
+            polling_failure_disposition TEXT,
+            polling_failure_count INTEGER NOT NULL DEFAULT 0,
+            polling_last_failure_at TEXT,
+            polling_retry_at TEXT
          );
       `);
    }
@@ -957,7 +969,13 @@ export class RoundWatchStore {
                reconciliation_next_attempt_at,
                work_unit_budget,
                work_units_used,
-               terminal_reason
+               terminal_reason,
+               polling_failure_code,
+               polling_failure_status,
+               polling_failure_disposition,
+               polling_failure_count,
+               polling_last_failure_at,
+               polling_retry_at
             FROM roundwatch_watches_legacy;
 
             DROP TABLE roundwatch_watches_legacy;
@@ -1090,6 +1108,22 @@ function mapRow(row: WatchRow): WatchRecord {
       ...(row.work_unit_budget === null ? {} : { workUnitBudget: row.work_unit_budget }),
       workUnitsUsed: row.work_units_used,
       ...(row.terminal_reason === null ? {} : { terminalReason: row.terminal_reason }),
+      ...(row.polling_failure_code === null
+         ? {}
+         : { pollingFailureCode: row.polling_failure_code }),
+      ...(row.polling_failure_status === null
+         ? {}
+         : { pollingFailureStatus: row.polling_failure_status }),
+      ...(row.polling_failure_disposition === null
+         ? {}
+         : { pollingFailureDisposition: row.polling_failure_disposition }),
+      pollingFailureCount: row.polling_failure_count,
+      ...(row.polling_last_failure_at === null
+         ? {}
+         : { pollingLastFailureAt: row.polling_last_failure_at }),
+      ...(row.polling_retry_at === null
+         ? {}
+         : { pollingRetryAt: row.polling_retry_at }),
    };
 }
 
