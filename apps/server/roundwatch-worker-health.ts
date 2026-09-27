@@ -69,17 +69,23 @@ export class WorkerHealthTracker {
          return;
       }
 
-      if (
-         outcome.succeeded === 0 &&
-         readinessFailures > 0
-      ) {
+      if (outcome.succeeded === 0 && readinessFailures > 0) {
          this.consecutiveFailures += 1;
          return;
       }
 
-      // Either actual work succeeded, or every failure in this cycle was
-      // durably isolated/fail-closed to its own obligation. In both cases the
-      // worker remains operational for unrelated watches.
+      if (outcome.succeeded === 0) {
+         // An isolated-only cycle proves the worker contained this obligation,
+         // but it does not prove recovery from an earlier provider-wide
+         // failure. Preserve any pre-existing unhealthy state.
+         if (this.consecutiveFailures === 0) {
+            this.lastSuccessAtMs = completedAt;
+         }
+         return;
+      }
+
+      // At least one real obligation made progress, so an earlier transient
+      // worker/provider failure has demonstrated recovery.
       this.consecutiveFailures = 0;
       this.lastSuccessAtMs = completedAt;
    }
