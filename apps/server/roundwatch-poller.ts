@@ -1,10 +1,16 @@
 import {
+   IndexerHttpError,
    matchesWatch,
    type RoundWatchIndexer,
    type TransactionPage,
 } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
-import type { RoundWatchStore, WatchRecord, WatchState } from './roundwatch-store.js';
+import type {
+   PollingFailureDisposition,
+   RoundWatchStore,
+   WatchRecord,
+   WatchState,
+} from './roundwatch-store.js';
 import {
    IndexerRequestTurnBudget,
    MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN,
@@ -18,6 +24,9 @@ import {
 export const DEFAULT_SCAN_ROUND_WINDOW = 100;
 export const DEFAULT_SCAN_PAGE_CACHE_ENTRIES = 16;
 export const DEFAULT_SCAN_PAGE_CACHE_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS = 5_000;
+export const MAX_POLL_FAILURE_BACKOFF_MILLISECONDS = 5 * 60_000;
+export const MAX_POLL_RETRY_AFTER_MILLISECONDS = 60 * 60_000;
 
 interface ScanSession {
    minRound: number;
@@ -106,7 +115,7 @@ export class RoundWatchPoller {
          succeeded: 0,
          failed: 0,
       };
-      const watches = this.store.listActiveWatches();
+      const watches = this.store.listPollingCandidates();
 
       if (watches.length === 0) {
          this.nextWatchIndex = 0;
@@ -180,6 +189,7 @@ export class RoundWatchPoller {
          outcome.attempted += 1;
          try {
             await this.serviceWatch(watch, getSweepTip, getSweepPage);
+            this.store.clearPollingFailure(watch.id);
             outcome.succeeded += 1;
             onProgress?.();
          } catch (error) {
@@ -187,9 +197,13 @@ export class RoundWatchPoller {
             this.sessions.delete(watch.id);
             // A cached page may contain a provider continuation token that
             // later became invalid. Clear the bounded cache on any scan-path
-            // failure so the next sweep restarts from fresh provider state
-            // instead of replaying a stale token forever.
+            // failure so the next admitted attempt restarts from durable
+            // coverage rather than replaying stale provider state.
             this.clearHistoricalPageCache();
+            const persisted = this.persistPollingFailure(watch, error);
+            if (persisted?.state === 'indeterminate') {
+               this.finishMetric(persisted, 'indeterminate');
+            }
             console.error(
                `RoundWatch poll failed for watch ${watch.id}:`,
                safeErrorMessage(error),
@@ -198,6 +212,47 @@ export class RoundWatchPoller {
       }
 
       return outcome;
+   }
+
+   private persistPollingFailure(
+      watch: WatchRecord,
+      error: unknown,
+   ): WatchRecord | undefined {
+      const failure = classifyPollingFailure(error);
+
+      if (failure.disposition === 'permanent') {
+         const updated = this.store.recordPollingFailure(watch.id, {
+            code: failure.code,
+            ...(failure.status === undefined ? {} : { status: failure.status }),
+            disposition: 'permanent',
+         });
+         if (updated) {
+            console.warn(
+               `RoundWatch polling permanently blocked watch=${watch.id} code=${failure.code} work=${updated.workUnitsUsed}/${updated.workUnitBudget ?? 'unknown'}; terminal state=indeterminate`,
+            );
+         }
+         return updated;
+      }
+
+      const failureNumber = Math.max(1, watch.pollingFailureCount + 1);
+      const retryDelay = pollingRetryDelayMilliseconds(
+         watch.id,
+         failureNumber,
+         failure.retryAfterMilliseconds,
+      );
+      const retryAt = new Date(this.now().getTime() + retryDelay);
+      const updated = this.store.recordPollingFailure(watch.id, {
+         code: failure.code,
+         ...(failure.status === undefined ? {} : { status: failure.status }),
+         disposition: failure.disposition,
+         retryAt,
+      });
+      if (updated) {
+         console.warn(
+            `RoundWatch polling deferred watch=${watch.id} code=${failure.code} disposition=${failure.disposition} retryAt=${retryAt.toISOString()} failures=${updated.pollingFailureCount}`,
+         );
+      }
+      return updated;
    }
 
    private async serviceWatch(
@@ -452,6 +507,88 @@ export class RoundWatchPoller {
          }
       }
    }
+}
+
+interface ClassifiedPollingFailure {
+   code: string;
+   status?: number;
+   disposition: PollingFailureDisposition;
+   retryAfterMilliseconds?: number;
+}
+
+function classifyPollingFailure(error: unknown): ClassifiedPollingFailure {
+   if (error instanceof IndexerHttpError) {
+      return {
+         code: error.code,
+         status: error.status,
+         disposition: error.retryDisposition,
+         ...(error.retryAfterMilliseconds === undefined
+            ? {}
+            : { retryAfterMilliseconds: error.retryAfterMilliseconds }),
+      };
+   }
+
+   if (isTimeoutError(error)) {
+      return {
+         code: 'indexer_timeout',
+         disposition: 'transient',
+      };
+   }
+
+   if (error instanceof TypeError) {
+      return {
+         code: 'indexer_network_failure',
+         disposition: 'transient',
+      };
+   }
+
+   return {
+      code: 'indexer_protocol_failure',
+      disposition: 'unknown',
+   };
+}
+
+function pollingRetryDelayMilliseconds(
+   watchId: string,
+   failureNumber: number,
+   retryAfterMilliseconds: number | undefined,
+): number {
+   const exponent = Math.min(Math.max(0, failureNumber - 1), 12);
+   const base = Math.min(
+      DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS * 2 ** exponent,
+      MAX_POLL_FAILURE_BACKOFF_MILLISECONDS,
+   );
+   const jittered = Math.max(
+      DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS,
+      Math.floor(base * deterministicJitterFactor(watchId, failureNumber)),
+   );
+   const boundedRetryAfter =
+      retryAfterMilliseconds === undefined
+         ? 0
+         : Math.min(
+              Math.max(0, retryAfterMilliseconds),
+              MAX_POLL_RETRY_AFTER_MILLISECONDS,
+           );
+   return Math.max(jittered, boundedRetryAfter);
+}
+
+function deterministicJitterFactor(
+   watchId: string,
+   failureNumber: number,
+): number {
+   let hash = 2_166_136_261;
+   for (const char of `${watchId}:${failureNumber}`) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16_777_619) >>> 0;
+   }
+   return 0.8 + (hash % 401) / 1_000;
+}
+
+function isTimeoutError(error: unknown): boolean {
+   return (
+      error instanceof Error &&
+      (error.name === 'TimeoutError' || error.name === 'AbortError')
+   );
 }
 
 function safeErrorMessage(error: unknown): string {
