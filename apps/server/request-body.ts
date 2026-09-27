@@ -60,7 +60,7 @@ export async function readJsonBodyWithLimit(
 
          totalBytes += value.byteLength;
          if (totalBytes > limitBytes) {
-            await reader.cancel('request body limit exceeded');
+            void reader.cancel('request body limit exceeded').catch(() => {});
             throw new RequestBodyTooLargeError(limitBytes);
          }
 
@@ -68,12 +68,10 @@ export async function readJsonBodyWithLimit(
       }
    } catch (error) {
       if (error instanceof RequestBodyReadTimeoutError) {
-         try {
-            await reader.cancel('request body read timeout');
-         } catch {
-            // The timeout result is authoritative even if cancellation races
-            // with a transport-level stream failure.
-         }
+         // Do not await transport cancellation here: the read deadline must
+         // remain authoritative even if an underlying stream is slow to
+         // acknowledge cancellation.
+         void reader.cancel('request body read timeout').catch(() => {});
       }
       throw error;
    } finally {
