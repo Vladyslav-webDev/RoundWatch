@@ -77,6 +77,8 @@ const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 const DEFAULT_SIGNED_WATCH_BODY_READ_TIMEOUT_MILLISECONDS = 5_000;
 const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
+const ALGORAND_ZERO_ADDRESS = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+const EXAMPLE_MONITORED_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
 const ROUNDWATCH_DISCOVERY_TAGS = [
    'algorand',
@@ -249,7 +251,7 @@ function createWatchDiscovery(
       bodyType: 'json',
       input: {
          idempotencyKey: 'replace-with-unique-idempotency-key',
-         expectedSender: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
+         expectedSender: EXAMPLE_MONITORED_SENDER,
          expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
          atomicAmount: '1000000',
          invoiceNote: 'replace-with-unique-invoice-note',
@@ -917,6 +919,11 @@ export function createApp(dependencies: AppDependencies): Hono {
          );
       }
 
+      const admissionError = validateNewWatchAdmission(parsed.spec);
+      if (admissionError) {
+         return c.json(admissionError, 400);
+      }
+
       validatedWatchSpecs.set(c.req.raw, parsed.spec);
       await next();
    });
@@ -1367,6 +1374,20 @@ function extractSettlementIntent(
       firstValid,
       lastValid,
    };
+}
+
+function validateNewWatchAdmission(
+   spec: WatchSpec,
+): { error: string; code: string } | undefined {
+   if (spec.expectedSender === ALGORAND_ZERO_ADDRESS) {
+      return {
+         error:
+            'expectedSender must not be the Algorand zero address for new watches',
+         code: 'unsupported_expected_sender',
+      };
+   }
+
+   return undefined;
 }
 
 function parseWatchSpec(
