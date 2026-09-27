@@ -56,9 +56,10 @@ import {
 } from './roundwatch-store.js';
 
 const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+const WATCH_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const RECEIVER = 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
 const SPEC: WatchSpec = {
-   idempotencyKey: 'invoice-0001', expectedSender: PAYER, expectedReceiver: RECEIVER,
+   idempotencyKey: 'invoice-0001', expectedSender: WATCH_SENDER, expectedReceiver: RECEIVER,
    assetId: TESTNET_USDC_ASSET_ID, atomicAmount: '2500000', invoiceNote: 'invoice:1',
 };
 const intent = (tx = 'SERVICE_TX'): SettlementIntent => ({
@@ -227,6 +228,7 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
          document.paths?.['/ready']?.get?.operationId,
          'getReadiness',
       );
+      assert.doesNotMatch(JSON.stringify(document), new RegExp(PAYER));
    } finally {
       store.close();
    }
@@ -288,6 +290,7 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
       assert.match(body, /oversized bodies return HTTP 413/i);
       assert.match(body, /body-read timeouts return HTTP 408/i);
       assert.match(body, /cannot spend/i);
+      assert.match(body, /nonzero expectedSender/i);
       assert.match(body, /Vladyslav-webDev\/RoundWatch/);
    } finally {
       store.close();
@@ -1613,7 +1616,7 @@ test('signed watch body admission bounds slow readers and releases after timeout
 
       const validBody = JSON.stringify({
          idempotencyKey: 'body-admission-after-timeout',
-         expectedSender: PAYER,
+         expectedSender: WATCH_SENDER,
          expectedReceiver: RECEIVER,
          atomicAmount: '1',
       });
@@ -1686,7 +1689,7 @@ test('all paid resources share the signed-payment verification admission gate', 
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify({
                        idempotencyKey: 'gate-regression-watch',
-                       expectedSender: PAYER,
+                       expectedSender: WATCH_SENDER,
                        expectedReceiver: RECEIVER,
                        atomicAmount: '1',
                     }),
@@ -1719,7 +1722,7 @@ test('all paid resources share the signed-payment verification admission gate', 
                   ? {
                        body: JSON.stringify({
                           idempotencyKey: 'gate-regression-watch',
-                          expectedSender: PAYER,
+                          expectedSender: WATCH_SENDER,
                           expectedReceiver: RECEIVER,
                           atomicAmount: '1',
                        }),
@@ -1945,6 +1948,104 @@ test('unpaid malformed watch input receives discovery 402, while signed malforme
    }
 });
 
+test('zero expectedSender is discovery-only when unsigned and rejected before payment verification when signed', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let verifyCalls = 0;
+   let settleCalls = 0;
+
+   try {
+      const facilitator = {
+         getSupported: async () => ({
+            kinds: [
+               {
+                  x402Version: 2,
+                  scheme: 'exact',
+                  network: ALGORAND_TESTNET,
+               },
+            ],
+            extensions: [],
+            signers: {},
+         }),
+         verify: async () => {
+            verifyCalls += 1;
+            throw new Error('zero-sender watch must not reach verification');
+         },
+         settle: async () => {
+            settleCalls += 1;
+            throw new Error('zero-sender watch must not settle');
+         },
+      } as unknown as FacilitatorClient;
+
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: facilitator,
+         store,
+         indexer: new FakeIndexer(100),
+      });
+
+      const body = JSON.stringify({
+         idempotencyKey: 'zero-sender-regression',
+         expectedSender: PAYER,
+         expectedReceiver: RECEIVER,
+         atomicAmount: '1',
+      });
+
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body,
+      });
+
+      assert.equal(unpaid.status, 402);
+      assert.ok(unpaid.headers.get('payment-required'));
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
+      assert.equal(
+         store.getByIdempotencyKey('zero-sender-regression'),
+         undefined,
+      );
+
+      const encoded = unpaid.headers.get('payment-required');
+      assert.ok(encoded);
+      const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+      const paymentHeader = encodePaymentSignatureHeader({
+         x402Version: 2,
+         accepted: required,
+         payload: {
+            paymentGroup: [SIGNED_SERVICE_PAYMENT],
+            paymentIndex: 0,
+         },
+      });
+
+      const signed = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body,
+      });
+
+      assert.equal(signed.status, 400);
+      assert.equal(signed.headers.get('payment-required'), null);
+      assert.equal(signed.headers.get('payment-response'), null);
+      const rejected = await signed.json() as {
+         error?: string;
+         code?: string;
+      };
+      assert.equal(rejected.code, 'unsupported_expected_sender');
+      assert.match(rejected.error ?? '', /zero address/i);
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
+      assert.equal(
+         store.getByIdempotencyKey('zero-sender-regression'),
+         undefined,
+      );
+   } finally {
+      store.close();
+   }
+});
+
 test('x402 payment headers are exposed to browser clients and preflight allows payment signatures', async () => {
    const store = new RoundWatchStore(':memory:');
    try {
@@ -2145,7 +2246,8 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
       }
       assert.equal(isValidAlgorandAddress(expectedSender), true);
       assert.equal(isValidAlgorandAddress(expectedReceiver), true);
-      assert.equal(expectedSender, PAYER);
+      assert.equal(expectedSender, WATCH_SENDER);
+      assert.notEqual(expectedSender, PAYER);
       assert.equal(expectedReceiver, RECEIVER);
       assert.equal(
          example.idempotencyKey,
@@ -2417,6 +2519,68 @@ test('recovery lookup returns only an exact existing activated watch and never i
       assert.equal(missing.status, 404);
       assert.equal(missing.headers.get('payment-required'), null);
       assert.equal(facilitatorCalls, 0);
+   } finally {
+      store.close();
+   }
+});
+
+test('recovery preserves exact legacy zero-sender watches created before admission hardening', async () => {
+   const store = new RoundWatchStore(':memory:');
+
+   try {
+      const legacySpec: WatchSpec = {
+         ...SPEC,
+         idempotencyKey: 'legacy-zero-sender-recovery',
+         expectedSender: PAYER,
+      };
+      const prepared = store.prepareWatch(
+         legacySpec,
+         intent('LEGACY_ZERO_SENDER_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'LEGACY_ZERO_SENDER_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         150,
+      );
+
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         syncFacilitatorOnStart: false,
+      });
+
+      const response = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            idempotencyKey: legacySpec.idempotencyKey,
+            expectedSender: legacySpec.expectedSender,
+            expectedReceiver: legacySpec.expectedReceiver,
+            atomicAmount: legacySpec.atomicAmount,
+            invoiceNote: legacySpec.invoiceNote,
+            servicePayer: PAYER,
+         }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('payment-required'), null);
+      const recovered = await response.json() as {
+         watch?: Record<string, unknown>;
+      };
+      assert.equal(recovered.watch?.id, prepared.id);
+      assert.equal(recovered.watch?.expectedSender, PAYER);
    } finally {
       store.close();
    }
