@@ -59,7 +59,7 @@ const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
 const WATCH_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const RECEIVER = 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
 const SPEC: WatchSpec = {
-   idempotencyKey: 'invoice-0001', expectedSender: WATCH_SENDER, expectedReceiver: RECEIVER,
+   idempotencyKey: 'invoice-0001', expectedSender: PAYER, expectedReceiver: RECEIVER,
    assetId: TESTNET_USDC_ASSET_ID, atomicAmount: '2500000', invoiceNote: 'invoice:1',
 };
 const intent = (tx = 'SERVICE_TX'): SettlementIntent => ({
@@ -2284,7 +2284,11 @@ test('paid x402 middleware persists signed purchase terms and activates from the
    });
 
    try {
-      const spec = { ...SPEC, idempotencyKey: 'middleware-paid' };
+      const spec = {
+         ...SPEC,
+         idempotencyKey: 'middleware-paid',
+         expectedSender: WATCH_SENDER,
+      };
       const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
       const paid = await app.request('/spike/watch', {
          method: 'POST',
@@ -2342,7 +2346,11 @@ test('settled payment survives activation lookup failure and reconciles without 
    });
 
    try {
-      const spec = { ...SPEC, idempotencyKey: 'middleware-recovery' };
+      const spec = {
+         ...SPEC,
+         idempotencyKey: 'middleware-recovery',
+         expectedSender: WATCH_SENDER,
+      };
       const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
       const paid = await app.request('/spike/watch', {
          method: 'POST',
@@ -2399,7 +2407,11 @@ test('route-level global and payer admission rejection occur before x402 settlem
             indexer: new MiddlewareIndexer(),
             requireSettlementIntent: true,
          });
-         const spec = { ...SPEC, idempotencyKey: rejectedKey };
+         const spec = {
+            ...SPEC,
+            idempotencyKey: rejectedKey,
+            expectedSender: WATCH_SENDER,
+         };
          const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
          const response = await app.request('/spike/watch', {
             method: 'POST',
