@@ -270,7 +270,7 @@ function createWatchDiscovery(
                minLength: 58,
                maxLength: 58,
                description:
-                  'Algorand address expected to send the future USDC payment',
+                  'Nonzero Algorand address expected to send the future USDC payment',
             },
             expectedReceiver: {
                type: 'string',
