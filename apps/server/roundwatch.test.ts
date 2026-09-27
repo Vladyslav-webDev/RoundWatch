@@ -26,7 +26,9 @@ import {
 } from './network-config.js';
 import {
    AlgorandIndexerClient,
+   IndexerHttpError,
    matchesWatch,
+   MAX_INDEXER_ERROR_BODY_BYTES,
    MAX_INDEXER_NEXT_TOKEN_BYTES,
    resolveScanQueryVariant,
    type IndexedBlock,
@@ -3893,7 +3895,6 @@ test('Indexer cancels every unconsumed response body on early exits', async () =
    const responses = [
       trackedResponse('declared-oversize', 200, 65),
       trackedResponse('not-found', 404, 16),
-      trackedResponse('non-ok', 503, 16),
    ];
 
    const indexer = new AlgorandIndexerClient(
@@ -3925,14 +3926,187 @@ test('Indexer cancels every unconsumed response body on early exits', async () =
       ['declared-oversize', 'not-found'],
    );
 
-   await assert.rejects(
-      indexer.getCurrentRound('health'),
-      /failed with HTTP 503/,
+});
+
+test('Indexer HTTP failures expose bounded structured diagnostics without leaking provider bodies or query values', async () => {
+   const zeroSenderMessage =
+      'invalid input: searching transactions by zero address with asset sender role is not supported';
+   const responseBody = JSON.stringify({ message: zeroSenderMessage });
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () =>
+         new Response(responseBody, {
+            status: 400,
+            headers: {
+               'content-type': 'application/json; charset=utf-8',
+               'content-length': String(Buffer.byteLength(responseBody)),
+               'cf-ray': 'abc123-TEST',
+            },
+         }),
+      1_000,
+      undefined,
+      'C',
    );
-   assert.deepEqual(
-      cancellations,
-      ['declared-oversize', 'not-found', 'non-ok'],
+
+   let caught: unknown;
+   try {
+      await indexer.searchWatchPage(watchRecord({}), 10, 20);
+   } catch (error) {
+      caught = error;
+   }
+
+   assert.ok(caught instanceof IndexerHttpError);
+   assert.equal(caught.status, 400);
+   assert.equal(caught.purpose, 'scan-page');
+   assert.equal(caught.providerHost, 'indexer.invalid');
+   assert.equal(
+      caught.pathTemplate,
+      '/v2/assets/{assetId}/transactions',
    );
+   assert.equal(caught.variant, 'C');
+   assert.equal(caught.code, 'zero_address_sender_unsupported');
+   assert.equal(caught.retryDisposition, 'permanent');
+   assert.equal(caught.providerRequestId, 'cf-ray:abc123-TEST');
+   assert.equal(caught.contentType, 'application/json');
+   assert.equal(caught.bodyTruncated, false);
+   assert.equal(caught.bodyReadFailed, false);
+   assert.equal(
+      caught.capturedBodyBytes,
+      Buffer.byteLength(responseBody),
+   );
+   assert.ok(caught.parameterNames.includes('address'));
+   assert.ok(caught.parameterNames.includes('address-role'));
+   assert.ok(caught.parameterNames.includes('note-prefix'));
+   assert.doesNotMatch(caught.message, new RegExp(PAYER));
+   assert.doesNotMatch(caught.message, /invoice:1/);
+   assert.doesNotMatch(
+      JSON.stringify(caught.telemetry()),
+      new RegExp(PAYER),
+   );
+   assert.doesNotMatch(
+      JSON.stringify(caught.telemetry()),
+      /invoice:1/,
+   );
+});
+
+test('Indexer unknown 400 bodies remain private and do not become trusted telemetry text', async () => {
+   const secret =
+      `private=${PAYER};note=${SPEC.invoiceNote};PAYMENT-SIGNATURE=topsecret`;
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () =>
+         Response.json(
+            { message: secret },
+            { status: 400 },
+         ),
+      1_000,
+      undefined,
+      'C',
+   );
+
+   let caught: unknown;
+   try {
+      await indexer.searchWatchPage(watchRecord({}), 10, 20);
+   } catch (error) {
+      caught = error;
+   }
+
+   assert.ok(caught instanceof IndexerHttpError);
+   assert.equal(caught.code, 'provider_request_rejected');
+   assert.equal(caught.retryDisposition, 'unknown');
+   const visible = `${caught.message}\n${JSON.stringify(caught.telemetry())}`;
+   assert.doesNotMatch(visible, new RegExp(PAYER));
+   assert.doesNotMatch(visible, new RegExp(SPEC.invoiceNote!));
+   assert.doesNotMatch(visible, /topsecret/);
+});
+
+test('Indexer 429 exposes bounded Retry-After as transient structured failure', async () => {
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () =>
+         Response.json(
+            { message: 'slow down' },
+            {
+               status: 429,
+               headers: { 'retry-after': '12' },
+            },
+         ),
+   );
+
+   let caught: unknown;
+   try {
+      await indexer.getCurrentRound('health');
+   } catch (error) {
+      caught = error;
+   }
+
+   assert.ok(caught instanceof IndexerHttpError);
+   assert.equal(caught.status, 429);
+   assert.equal(caught.code, 'rate_limited');
+   assert.equal(caught.retryDisposition, 'transient');
+   assert.equal(caught.retryAfterMilliseconds, 12_000);
+   assert.equal(caught.pathTemplate, '/health');
+   assert.equal(caught.variant, undefined);
+});
+
+test('Indexer error-body capture is byte-bounded and cancels the remainder', async () => {
+   let cancelled = false;
+   const oversized = new TextEncoder().encode(
+      'x'.repeat(MAX_INDEXER_ERROR_BODY_BYTES + 128),
+   );
+   const indexer = new AlgorandIndexerClient(
+      'https://indexer.invalid',
+      new IndexerRequestDispatcher({
+         requestsPerSecond: 1_000,
+         burst: 10,
+         concurrency: 1,
+      }),
+      async () =>
+         new Response(
+            new ReadableStream<Uint8Array>({
+               start(controller) {
+                  controller.enqueue(oversized);
+               },
+               cancel() {
+                  cancelled = true;
+               },
+            }),
+            {
+               status: 503,
+               headers: { 'content-type': 'text/plain' },
+            },
+         ),
+   );
+
+   let caught: unknown;
+   try {
+      await indexer.getCurrentRound('health');
+   } catch (error) {
+      caught = error;
+   }
+
+   assert.ok(caught instanceof IndexerHttpError);
+   assert.equal(caught.code, 'provider_server_error');
+   assert.equal(caught.retryDisposition, 'transient');
+   assert.equal(caught.capturedBodyBytes, MAX_INDEXER_ERROR_BODY_BYTES);
+   assert.equal(caught.bodyTruncated, true);
+   assert.equal(caught.bodyReadFailed, false);
+   assert.equal(cancelled, true);
 });
 
 test('Indexer rejects responses that violate requested filters and disables redirects', async () => {
