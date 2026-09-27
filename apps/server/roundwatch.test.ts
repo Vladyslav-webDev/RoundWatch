@@ -1128,18 +1128,20 @@ test('store readiness is cached, writable, and fails after close', () => {
    assert.equal(store.readinessCheck(), false);
 });
 
-test('worker health requires successful work, accepts live progress, and rejects all-failed cycles', () => {
+test('worker health isolates contained failures but keeps provider failures sticky through cooldown', () => {
    let now = 1_000;
    const tracker = new WorkerHealthTracker(() => now);
 
    tracker.markStarted();
    assert.equal(tracker.snapshot(1_000).ready, false);
 
+   // An idle healthy worker may establish readiness when there is no work.
    tracker.markCycleStarted();
    now = 1_100;
    tracker.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
    assert.equal(tracker.snapshot(1_000).ready, true);
 
+   // Live progress keeps a long-running cycle healthy.
    now = 1_200;
    tracker.markCycleStarted();
    now = 1_900;
@@ -1153,12 +1155,37 @@ test('worker health requires successful work, accepts live progress, and rejects
    now = 3_001;
    assert.equal(tracker.snapshot(1_000).ready, false);
 
+   // A provider/systemic all-failed cycle makes readiness fail.
    now = 3_100;
    tracker.markCycleCompleted({ attempted: 2, succeeded: 0, failed: 2 });
    const failed = tracker.snapshot(1_000);
    assert.equal(failed.ready, false);
    assert.equal(failed.consecutiveFailures, 1);
 
+   // Backoff can make the next cycle empty. That must not magically heal the
+   // provider failure and reopen paid admission.
+   now = 3_150;
+   tracker.markCycleStarted();
+   tracker.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
+   const coolingDown = tracker.snapshot(1_000);
+   assert.equal(coolingDown.ready, false);
+   assert.equal(coolingDown.consecutiveFailures, 1);
+
+   // A later isolated permanent watch error also cannot erase the earlier
+   // systemic failure. It is contained, but it is not evidence of recovery.
+   now = 3_175;
+   tracker.markCycleStarted();
+   tracker.markCycleCompleted({
+      attempted: 1,
+      succeeded: 0,
+      failed: 1,
+      isolatedFailures: 1,
+   });
+   const stillFailed = tracker.snapshot(1_000);
+   assert.equal(stillFailed.ready, false);
+   assert.equal(stillFailed.consecutiveFailures, 1);
+
+   // Real successful work proves recovery.
    tracker.markCycleStarted();
    now = 3_200;
    tracker.markCycleProgress();
@@ -1167,6 +1194,32 @@ test('worker health requires successful work, accepts live progress, and rejects
    assert.equal(recovered.ready, true);
    assert.equal(recovered.consecutiveFailures, 0);
    assert.equal(recovered.lastErrorAtMs, 3_200);
+
+   // From a healthy baseline, a fully isolated fail-closed obligation must
+   // not poison readiness for unrelated customers.
+   tracker.markCycleStarted();
+   now = 3_250;
+   tracker.markCycleCompleted({
+      attempted: 1,
+      succeeded: 0,
+      failed: 1,
+      isolatedFailures: 1,
+   });
+   const isolated = tracker.snapshot(1_000);
+   assert.equal(isolated.ready, true);
+   assert.equal(isolated.consecutiveFailures, 0);
+   assert.equal(isolated.lastErrorAtMs, 3_250);
+
+   assert.throws(
+      () =>
+         tracker.markCycleCompleted({
+            attempted: 1,
+            succeeded: 0,
+            failed: 1,
+            isolatedFailures: 2,
+         }),
+      /isolatedFailures cannot exceed failed/,
+   );
 
    tracker.markCycleStarted();
    tracker.markCycleFailed();
@@ -4173,7 +4226,12 @@ test('permanent Indexer rejection consumes one turn, persists fail-closed termin
       );
 
       const first = await poller.runOnce();
-      assert.deepEqual(first, { attempted: 1, succeeded: 0, failed: 1 });
+      assert.deepEqual(first, {
+         attempted: 1,
+         succeeded: 0,
+         failed: 1,
+         isolatedFailures: 1,
+      });
 
       const terminal = store.getWatch(prepared.id);
       assert.equal(terminal?.state, 'indeterminate');
@@ -4223,6 +4281,95 @@ test('permanent Indexer rejection consumes one turn, persists fail-closed termin
       ]) {
          assert.equal(body.watch?.[internal], undefined);
       }
+   } finally {
+      store.close();
+   }
+});
+
+test('provider-wide permanent HTTP error stays active and readiness-impacting instead of being isolated to one watch', async () => {
+   let now = new Date('2026-09-27T12:05:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 5,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'provider-auth-readiness',
+         },
+         intent('PROVIDER_AUTH_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'PROVIDER_AUTH_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async () =>
+            Response.json(
+               { message: 'synthetic provider auth failure' },
+               { status: 401 },
+            ),
+         1_000,
+         undefined,
+         'C',
+      );
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      );
+
+      const first = await poller.runOnce();
+      assert.deepEqual(first, {
+         attempted: 1,
+         succeeded: 0,
+         failed: 1,
+      });
+
+      const deferred = store.getWatch(prepared.id);
+      assert.equal(deferred?.state, 'active');
+      assert.equal(deferred?.terminalReason, undefined);
+      assert.equal(deferred?.pollingFailureCode, 'provider_unauthorized');
+      assert.equal(deferred?.pollingFailureDisposition, 'unknown');
+      assert.equal(deferred?.pollingFailureCount, 1);
+      assert.equal(deferred?.workUnitsUsed, 1);
+      assert.equal(deferred?.scanAfterRound, 100);
+      assert.ok(deferred?.pollingRetryAt);
+
+      const tracker = new WorkerHealthTracker(() => now.getTime());
+      tracker.markStarted();
+      tracker.markCycleStarted();
+      tracker.markCycleCompleted(first);
+      assert.equal(tracker.snapshot(60_000).ready, false);
+
+      // The persisted cooldown produces no provider request, but that no-op
+      // cycle cannot turn readiness green while provider recovery is unproven.
+      const coolingDown = await poller.runOnce();
+      assert.deepEqual(coolingDown, {
+         attempted: 0,
+         succeeded: 0,
+         failed: 0,
+      });
+      tracker.markCycleStarted();
+      tracker.markCycleCompleted(coolingDown);
+      assert.equal(tracker.snapshot(60_000).ready, false);
+      assert.equal(store.getWatch(prepared.id)?.workUnitsUsed, 1);
    } finally {
       store.close();
    }

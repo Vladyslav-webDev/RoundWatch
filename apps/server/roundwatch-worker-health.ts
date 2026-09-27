@@ -2,6 +2,7 @@ export interface WorkerCycleOutcome {
    attempted: number;
    succeeded: number;
    failed: number;
+   isolatedFailures?: number;
 }
 
 export interface WorkerHealthSnapshot {
@@ -49,21 +50,44 @@ export class WorkerHealthTracker {
       validateOutcome(outcome);
       this.running = false;
 
+      const isolatedFailures = outcome.isolatedFailures ?? 0;
+      const readinessFailures = outcome.failed - isolatedFailures;
+      const completedAt = this.now();
+
       if (outcome.failed > 0) {
-         this.lastErrorAtMs = this.now();
+         this.lastErrorAtMs = completedAt;
       }
 
-      if (
-         outcome.attempted > 0 &&
-         outcome.succeeded === 0 &&
-         outcome.failed > 0
-      ) {
+      // A no-op cycle is healthy only if the worker was already healthy.
+      // After an availability-impacting failure, backoff can legitimately
+      // produce cycles with no due work. Those empty cooldown cycles must not
+      // erase the failure and reopen paid admission before a real recovery.
+      if (outcome.attempted === 0) {
+         if (this.consecutiveFailures === 0) {
+            this.lastSuccessAtMs = completedAt;
+         }
+         return;
+      }
+
+      if (outcome.succeeded === 0 && readinessFailures > 0) {
          this.consecutiveFailures += 1;
          return;
       }
 
+      if (outcome.succeeded === 0) {
+         // An isolated-only cycle proves the worker contained this obligation,
+         // but it does not prove recovery from an earlier provider-wide
+         // failure. Preserve any pre-existing unhealthy state.
+         if (this.consecutiveFailures === 0) {
+            this.lastSuccessAtMs = completedAt;
+         }
+         return;
+      }
+
+      // At least one real obligation made progress, so an earlier transient
+      // worker/provider failure has demonstrated recovery.
       this.consecutiveFailures = 0;
-      this.lastSuccessAtMs = this.now();
+      this.lastSuccessAtMs = completedAt;
    }
 
    markCycleSucceeded(): void {
@@ -145,6 +169,13 @@ function validateOutcome(outcome: WorkerCycleOutcome): void {
    if (outcome.succeeded + outcome.failed !== outcome.attempted) {
       throw new Error(
          'worker cycle attempted must equal succeeded plus failed',
+      );
+   }
+
+   const isolatedFailures = outcome.isolatedFailures ?? 0;
+   if (isolatedFailures > outcome.failed) {
+      throw new Error(
+         'worker cycle isolatedFailures cannot exceed failed',
       );
    }
 }
