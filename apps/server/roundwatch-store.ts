@@ -103,7 +103,7 @@ export interface WatchRecord extends WatchSpec {
    pollingFailureCode?: string;
    pollingFailureStatus?: number;
    pollingFailureDisposition?: PollingFailureDisposition;
-   pollingFailureCount: number;
+   pollingFailureCount?: number;
    pollingLastFailureAt?: string;
    pollingRetryAt?: string;
 }
