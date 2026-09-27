@@ -234,7 +234,7 @@ export class RoundWatchPoller {
          return updated;
       }
 
-      const failureNumber = Math.max(1, watch.pollingFailureCount + 1);
+      const failureNumber = Math.max(1, (watch.pollingFailureCount ?? 0) + 1);
       const retryDelay = pollingRetryDelayMilliseconds(
          watch.id,
          failureNumber,
