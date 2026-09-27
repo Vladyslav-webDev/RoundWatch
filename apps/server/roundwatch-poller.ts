@@ -520,10 +520,21 @@ interface ClassifiedPollingFailure {
 
 function classifyPollingFailure(error: unknown): ClassifiedPollingFailure {
    if (error instanceof IndexerHttpError) {
+      // "Permanent" at the HTTP/provider layer does not automatically mean a
+      // single paid watch is permanently invalid. Authentication, forbidden,
+      // missing-route and similar failures are service/provider conditions and
+      // must keep global readiness unhealthy rather than terminalizing one
+      // customer obligation at a time.
+      const disposition =
+         error.retryDisposition === 'permanent' &&
+         !isWatchScopedPermanentIndexerFailure(error)
+            ? 'unknown'
+            : error.retryDisposition;
+
       return {
          code: error.code,
          status: error.status,
-         disposition: error.retryDisposition,
+         disposition,
          ...(error.retryAfterMilliseconds === undefined
             ? {}
             : { retryAfterMilliseconds: error.retryAfterMilliseconds }),
@@ -548,6 +559,15 @@ function classifyPollingFailure(error: unknown): ClassifiedPollingFailure {
       code: 'indexer_protocol_failure',
       disposition: 'unknown',
    };
+}
+
+function isWatchScopedPermanentIndexerFailure(
+   error: IndexerHttpError,
+): boolean {
+   return (
+      error.purpose === 'scan-page' &&
+      error.code === 'zero_address_sender_unsupported'
+   );
 }
 
 function pollingRetryDelayMilliseconds(
