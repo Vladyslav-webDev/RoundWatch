@@ -171,7 +171,7 @@ export function buildOpenApiDocument(
                         example: {
                            idempotencyKey: 'invoice-2026-09-22-001',
                            expectedSender:
-                              'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ',
+                              'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4',
                            expectedReceiver:
                               'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
                            atomicAmount: '1000000',
@@ -482,7 +482,7 @@ export function buildOpenApiDocument(
                      minLength: 58,
                      maxLength: 58,
                      description:
-                        'Checksum-valid Algorand address expected to send the future USDC payment.',
+                        'Checksum-valid nonzero Algorand address expected to send the future USDC payment. The zero address is rejected for new watch creation; exact legacy recovery remains supported.',
                   },
                   expectedReceiver: {
                      type: 'string',
@@ -822,6 +822,6 @@ The MCP server exposes read-only discovery and status tools plus preparation too
 
 ## Core behavior
 
-A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. Unsigned create requests receive HTTP 402 with PAYMENT-REQUIRED and Bazaar input metadata before semantic body validation. Treat that 402 as service/discovery metadata, not as approval of the submitted body. On a retry carrying PAYMENT-SIGNATURE, RoundWatch admits the signed-body read through bounded rate/concurrency control and a read deadline, then parses and validates the watch specification before facilitator verification or settlement. Invalid watch specifications return HTTP 400; oversized bodies return HTTP 413; body-read timeouts return HTTP 408. These pre-verification failures cannot spend. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Persist that ID immediately. If the paid create may have succeeded but its response was lost, do not repay: POST the exact original watch specification plus servicePayer to ${watchPath}/recover. Recovery is free and exact-match only. Once RoundWatch confirmed the service settlement, recovery remains available even after the watch becomes expired or post-activation indeterminate; unsettled or settlement-ambiguous obligations remain hidden. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
+A watch exact-matches sender, receiver, server-selected USDC ASA, atomic amount, and optional exact note for one top-level direct asset transfer. New watch creation requires a nonzero expectedSender; the checksum-valid Algorand zero address is unsupported for monitored senders. Unsigned create requests receive HTTP 402 with PAYMENT-REQUIRED and Bazaar input metadata before semantic body validation. Treat that 402 as service/discovery metadata, not as approval of the submitted body. On a retry carrying PAYMENT-SIGNATURE, RoundWatch admits the signed-body read through bounded rate/concurrency control and a read deadline, then parses and validates the watch specification before facilitator verification or settlement. Invalid watch specifications return HTTP 400; oversized bodies return HTTP 413; body-read timeouts return HTTP 408. These pre-verification failures cannot spend. Inner transactions, clawback transfers, and asset close-out transfers are outside the current matching contract and do not count as payments. ${eligibilityBoundarySummary(watchTtlMilliseconds)} A successful create call returns a durable watch ID only after x402 settlement and durable activation are confirmed. Persist that ID immediately. If the paid create may have succeeded but its response was lost, do not repay: POST the exact original watch specification plus servicePayer to ${watchPath}/recover. Recovery is free and exact-match only. Once RoundWatch confirmed the service settlement, recovery remains available even after the watch becomes expired or post-activation indeterminate; unsettled or settlement-ambiguous obligations remain hidden. Status retrieval is free and marked no-store. Terminal matched evidence includes the matching Algorand transaction ID and confirmed round. A terminal settlement-reconciliation outcome is explicitly surfaced on the watch record. Expiry is proof-based after complete indexed coverage; work-budget exhaustion returns indeterminate rather than claiming absence.
 `;
 }
