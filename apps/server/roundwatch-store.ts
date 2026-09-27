@@ -568,6 +568,97 @@ export class RoundWatchStore {
       return 'inactive';
    }
 
+   recordPollingFailure(
+      id: string,
+      failure: PollingFailure,
+   ): WatchRecord | undefined {
+      if (!/^[a-z0-9_]{1,64}$/.test(failure.code)) {
+         throw new Error(
+            'polling failure code must be a stable lowercase identifier',
+         );
+      }
+
+      if (
+         failure.status !== undefined &&
+         (!Number.isSafeInteger(failure.status) ||
+            failure.status < 100 ||
+            failure.status > 599)
+      ) {
+         throw new Error(
+            'polling failure status must be a valid HTTP status',
+         );
+      }
+
+      if (
+         failure.disposition !== 'permanent' &&
+         failure.disposition !== 'transient' &&
+         failure.disposition !== 'unknown'
+      ) {
+         throw new Error('polling failure disposition is invalid');
+      }
+
+      const failedAt = this.currentTime();
+      let retryAt: string | null = null;
+
+      if (failure.disposition !== 'permanent') {
+         if (
+            !(failure.retryAt instanceof Date) ||
+            !Number.isFinite(failure.retryAt.getTime()) ||
+            failure.retryAt.getTime() <= failedAt.getTime()
+         ) {
+            throw new Error(
+               'non-permanent polling failure requires a future retryAt',
+            );
+         }
+         retryAt = failure.retryAt.toISOString();
+      }
+
+      const result = this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET
+            polling_failure_code = ?,
+            polling_failure_status = ?,
+            polling_failure_disposition = ?,
+            polling_failure_count = polling_failure_count + 1,
+            polling_last_failure_at = ?,
+            polling_retry_at = ?,
+            state = CASE
+               WHEN ? = 'permanent' THEN 'indeterminate'
+               ELSE state
+            END,
+            terminal_reason = CASE
+               WHEN ? = 'permanent' THEN 'indexer_permanent_failure'
+               ELSE terminal_reason
+            END
+         WHERE id = ? AND state = 'active'
+      `).run(
+         failure.code,
+         failure.status ?? null,
+         failure.disposition,
+         failedAt.toISOString(),
+         retryAt,
+         failure.disposition,
+         failure.disposition,
+         id,
+      );
+
+      return result.changes === 1 ? this.getWatch(id) : undefined;
+   }
+
+   clearPollingFailure(id: string): void {
+      this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET
+            polling_failure_code = NULL,
+            polling_failure_status = NULL,
+            polling_failure_disposition = NULL,
+            polling_failure_count = 0,
+            polling_last_failure_at = NULL,
+            polling_retry_at = NULL
+         WHERE id = ? AND state = 'active'
+      `).run(id);
+   }
+
    markMatched(
       id: string,
       transaction: string,
@@ -617,6 +708,18 @@ export class RoundWatchStore {
          WHERE state = 'active'
          ORDER BY created_at ASC
       `).all() as unknown as WatchRow[];
+
+      return rows.map(mapRow);
+   }
+
+   listPollingCandidates(): WatchRecord[] {
+      const now = this.currentTime().toISOString();
+      const rows = this.database.prepare(`
+         SELECT * FROM roundwatch_watches
+         WHERE state = 'active'
+           AND (polling_retry_at IS NULL OR polling_retry_at <= ?)
+         ORDER BY created_at ASC
+      `).all(now) as unknown as WatchRow[];
 
       return rows.map(mapRow);
    }
