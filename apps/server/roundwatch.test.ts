@@ -4109,6 +4109,347 @@ test('Indexer error-body capture is byte-bounded and cancels the remainder', asy
    assert.equal(cancelled, true);
 });
 
+
+test('permanent Indexer rejection consumes one turn, persists fail-closed terminal state, and never hot-retries', async () => {
+   let now = new Date('2026-09-27T12:00:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 5,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'permanent-indexer-rejection',
+         },
+         intent('PERMANENT_INDEXER_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'PERMANENT_INDEXER_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const providerMessage =
+         'invalid input: searching transactions by zero address with asset sender role is not supported';
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async input => {
+            const url = new URL(String(input));
+            if (url.pathname === '/health') {
+               return Response.json({ round: 101 });
+            }
+            if (
+               url.pathname ===
+               `/v2/assets/${TESTNET_USDC_ASSET_ID}/transactions`
+            ) {
+               return Response.json(
+                  { message: providerMessage },
+                  { status: 400 },
+               );
+            }
+            throw new Error(`unexpected Indexer path ${url.pathname}`);
+         },
+         1_000,
+         undefined,
+         'C',
+      );
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      );
+
+      const first = await poller.runOnce();
+      assert.deepEqual(first, { attempted: 1, succeeded: 0, failed: 1 });
+
+      const terminal = store.getWatch(prepared.id);
+      assert.equal(terminal?.state, 'indeterminate');
+      assert.equal(terminal?.terminalReason, 'indexer_permanent_failure');
+      assert.equal(terminal?.pollingFailureCode, 'zero_address_sender_unsupported');
+      assert.equal(terminal?.pollingFailureStatus, 400);
+      assert.equal(terminal?.pollingFailureDisposition, 'permanent');
+      assert.equal(terminal?.pollingFailureCount, 1);
+      assert.equal(terminal?.pollingRetryAt, undefined);
+      assert.equal(terminal?.workUnitsUsed, 1);
+      assert.equal(terminal?.scanAfterRound, 100);
+
+      now = new Date(now.getTime() + 60_000);
+      const second = await poller.runOnce();
+      assert.deepEqual(second, { attempted: 0, succeeded: 0, failed: 0 });
+      assert.equal(store.getWatch(prepared.id)?.workUnitsUsed, 1);
+
+      const app = createApp({
+         avmAddress: RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [],
+               extensions: [],
+               signers: {},
+            }),
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new FakeIndexer(101),
+         syncFacilitatorOnStart: false,
+      });
+      const status = await app.request(`/spike/watch/${prepared.id}`);
+      assert.equal(status.status, 200);
+      const body = await status.json() as {
+         watch?: Record<string, unknown>;
+      };
+      assert.equal(
+         body.watch?.terminalReason,
+         'indexer_permanent_failure',
+      );
+      for (const internal of [
+         'pollingFailureCode',
+         'pollingFailureStatus',
+         'pollingFailureDisposition',
+         'pollingFailureCount',
+         'pollingLastFailureAt',
+         'pollingRetryAt',
+      ]) {
+         assert.equal(body.watch?.[internal], undefined);
+      }
+   } finally {
+      store.close();
+   }
+});
+
+test('429 polling failure persists cooldown across restart without spending work while waiting', async () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-poll-backoff-'));
+   const databasePath = join(directory, 'roundwatch.sqlite');
+   let now = new Date('2026-09-27T12:10:00.000Z');
+   let mode: 'rate-limit' | 'success' = 'rate-limit';
+   let watchId = '';
+
+   const createIndexer = () =>
+      new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async input => {
+            const url = new URL(String(input));
+            if (url.pathname === '/health') {
+               return Response.json({ round: 101 });
+            }
+            if (
+               url.pathname ===
+               `/v2/assets/${TESTNET_USDC_ASSET_ID}/transactions`
+            ) {
+               if (mode === 'rate-limit') {
+                  return Response.json(
+                     { message: 'slow down' },
+                     {
+                        status: 429,
+                        headers: { 'retry-after': '12' },
+                     },
+                  );
+               }
+               return Response.json({
+                  transactions: [],
+                  'current-round': 101,
+               });
+            }
+            throw new Error(`unexpected Indexer path ${url.pathname}`);
+         },
+         1_000,
+         undefined,
+         'C',
+      );
+
+   try {
+      {
+         const store = new RoundWatchStore(databasePath, {
+            workUnitBudget: 5,
+            now: () => now,
+         });
+         try {
+            const prepared = store.prepareWatch(
+               {
+                  ...SPEC,
+                  idempotencyKey: 'persisted-rate-limit',
+               },
+               intent('PERSISTED_RATE_LIMIT_SERVICE_TX'),
+            ).watch;
+            watchId = prepared.id;
+            store.activateWatch(
+               prepared.id,
+               {
+                  transaction: 'PERSISTED_RATE_LIMIT_SERVICE_TX',
+                  network: ALGORAND_TESTNET,
+                  payer: PAYER,
+               },
+               100,
+            );
+
+            const poller = new RoundWatchPoller(
+               store,
+               createIndexer(),
+               5_000,
+               100,
+               () => now,
+            );
+            const failed = await poller.runOnce();
+            assert.deepEqual(
+               failed,
+               { attempted: 1, succeeded: 0, failed: 1 },
+            );
+
+            const deferred = store.getWatch(prepared.id);
+            assert.equal(deferred?.state, 'active');
+            assert.equal(deferred?.workUnitsUsed, 1);
+            assert.equal(deferred?.scanAfterRound, 100);
+            assert.equal(deferred?.pollingFailureCode, 'rate_limited');
+            assert.equal(deferred?.pollingFailureDisposition, 'transient');
+            assert.equal(deferred?.pollingFailureCount, 1);
+            assert.ok(deferred?.pollingRetryAt);
+            assert.ok(
+               Date.parse(deferred!.pollingRetryAt!) - now.getTime() >= 12_000,
+            );
+
+            const waiting = await poller.runOnce();
+            assert.deepEqual(
+               waiting,
+               { attempted: 0, succeeded: 0, failed: 0 },
+            );
+            assert.equal(store.getWatch(prepared.id)?.workUnitsUsed, 1);
+         } finally {
+            store.close();
+         }
+      }
+
+      const restarted = new RoundWatchStore(databasePath, {
+         workUnitBudget: 5,
+         now: () => now,
+      });
+      try {
+         const persisted = restarted.getWatch(watchId);
+         assert.ok(persisted?.pollingRetryAt);
+         assert.equal(restarted.listPollingCandidates().length, 0);
+         assert.equal(persisted?.workUnitsUsed, 1);
+
+         now = new Date(Date.parse(persisted!.pollingRetryAt!) + 1);
+         assert.equal(restarted.listPollingCandidates().length, 1);
+
+         mode = 'success';
+         const recoveredPoller = new RoundWatchPoller(
+            restarted,
+            createIndexer(),
+            5_000,
+            100,
+            () => now,
+         );
+         const recovered = await recoveredPoller.runOnce();
+         assert.deepEqual(
+            recovered,
+            { attempted: 1, succeeded: 1, failed: 0 },
+         );
+
+         const after = restarted.getWatch(watchId);
+         assert.equal(after?.state, 'active');
+         assert.equal(after?.scanAfterRound, 101);
+         assert.equal(after?.workUnitsUsed, 2);
+         assert.equal(after?.pollingFailureCount, 0);
+         assert.equal(after?.pollingFailureCode, undefined);
+         assert.equal(after?.pollingRetryAt, undefined);
+      } finally {
+         restarted.close();
+      }
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
+
+test('malformed successful Indexer response is deferred as protocol uncertainty without advancing coverage', async () => {
+   let now = new Date('2026-09-27T12:20:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 5,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'protocol-failure-backoff',
+         },
+         intent('PROTOCOL_FAILURE_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'PROTOCOL_FAILURE_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async input => {
+            const url = new URL(String(input));
+            if (url.pathname === '/health') {
+               return Response.json({ round: 101 });
+            }
+            return new Response('{', {
+               status: 200,
+               headers: { 'content-type': 'application/json' },
+            });
+         },
+         1_000,
+         undefined,
+         'C',
+      );
+      const poller = new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      );
+
+      const result = await poller.runOnce();
+      assert.deepEqual(result, { attempted: 1, succeeded: 0, failed: 1 });
+
+      const after = store.getWatch(prepared.id);
+      assert.equal(after?.state, 'active');
+      assert.equal(after?.scanAfterRound, 100);
+      assert.equal(after?.workUnitsUsed, 1);
+      assert.equal(after?.pollingFailureCode, 'indexer_protocol_failure');
+      assert.equal(after?.pollingFailureDisposition, 'unknown');
+      assert.equal(after?.pollingFailureCount, 1);
+      assert.ok(after?.pollingRetryAt);
+
+      const waiting = await poller.runOnce();
+      assert.deepEqual(waiting, { attempted: 0, succeeded: 0, failed: 0 });
+      assert.equal(store.getWatch(prepared.id)?.workUnitsUsed, 1);
+   } finally {
+      store.close();
+   }
+});
+
 test('Indexer rejects responses that violate requested filters and disables redirects', async () => {
    const wrongSender = {
       ...rawTx(11),
