@@ -399,13 +399,7 @@ export class RoundWatchStore {
                evidence_version,
                work_unit_budget,
                work_units_used,
-               terminal_reason,
-               polling_failure_code,
-               polling_failure_status,
-               polling_failure_disposition,
-               polling_failure_count,
-               polling_last_failure_at,
-               polling_retry_at
+               terminal_reason
             ) VALUES (?, ?, 'settlement_pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
          `).run(
             id,
@@ -933,7 +927,13 @@ export class RoundWatchStore {
                reconciliation_next_attempt_at,
                work_unit_budget,
                work_units_used,
-               terminal_reason
+               terminal_reason,
+               polling_failure_code,
+               polling_failure_status,
+               polling_failure_disposition,
+               polling_failure_count,
+               polling_last_failure_at,
+               polling_retry_at
             )
             SELECT
                id,
