@@ -4051,6 +4051,97 @@ test('Indexer HTTP failures expose bounded structured diagnostics without leakin
    );
 });
 
+test('contradictory zero-sender provider message cannot override status or nonzero request context', async () => {
+   const zeroSenderMessage =
+      'invalid input: searching transactions by zero address with asset sender role is not supported';
+
+   const cases = [
+      { status: 400, code: 'provider_request_rejected', disposition: 'unknown' },
+      { status: 401, code: 'provider_unauthorized', disposition: 'permanent' },
+      { status: 403, code: 'provider_forbidden', disposition: 'permanent' },
+      { status: 404, code: 'provider_not_found', disposition: 'permanent' },
+      { status: 429, code: 'rate_limited', disposition: 'transient' },
+      { status: 503, code: 'provider_server_error', disposition: 'transient' },
+   ] as const;
+
+   for (const testCase of cases) {
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async () =>
+            Response.json(
+               { message: zeroSenderMessage },
+               { status: testCase.status },
+            ),
+         1_000,
+         undefined,
+         'C',
+      );
+
+      let caught: unknown;
+      try {
+         await indexer.searchWatchPage(
+            watchRecord({ expectedSender: WATCH_SENDER }),
+            10,
+            20,
+         );
+      } catch (error) {
+         caught = error;
+      }
+
+      assert.ok(caught instanceof IndexerHttpError);
+      assert.equal(caught.status, testCase.status);
+      assert.equal(caught.code, testCase.code);
+      assert.equal(caught.retryDisposition, testCase.disposition);
+   }
+});
+
+test('zero-sender classification requires HTTP 400 even when request context is exact', async () => {
+   const zeroSenderMessage =
+      'invalid input: searching transactions by zero address with asset sender role is not supported';
+
+   for (const testCase of [
+      { status: 401, code: 'provider_unauthorized', disposition: 'permanent' },
+      { status: 403, code: 'provider_forbidden', disposition: 'permanent' },
+      { status: 404, code: 'provider_not_found', disposition: 'permanent' },
+      { status: 429, code: 'rate_limited', disposition: 'transient' },
+      { status: 503, code: 'provider_server_error', disposition: 'transient' },
+   ] as const) {
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async () =>
+            Response.json(
+               { message: zeroSenderMessage },
+               { status: testCase.status },
+            ),
+         1_000,
+         undefined,
+         'C',
+      );
+
+      let caught: unknown;
+      try {
+         await indexer.searchWatchPage(watchRecord({}), 10, 20);
+      } catch (error) {
+         caught = error;
+      }
+
+      assert.ok(caught instanceof IndexerHttpError);
+      assert.equal(caught.status, testCase.status);
+      assert.equal(caught.code, testCase.code);
+      assert.equal(caught.retryDisposition, testCase.disposition);
+   }
+});
+
 test('Indexer unknown 400 bodies remain private and do not become trusted telemetry text', async () => {
    const secret =
       `private=${PAYER};note=${SPEC.invoiceNote};PAYMENT-SIGNATURE=topsecret`;
@@ -4285,6 +4376,91 @@ test('permanent Indexer rejection consumes one turn, persists fail-closed termin
       ]) {
          assert.equal(body.watch?.[internal], undefined);
       }
+   } finally {
+      store.close();
+   }
+});
+
+test('nonzero watch is never terminalized by spoofed zero-sender HTTP 400 body', async () => {
+   let now = new Date('2026-09-28T18:00:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 5,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         {
+            ...SPEC,
+            expectedSender: WATCH_SENDER,
+            idempotencyKey: 'spoofed-zero-sender-message',
+         },
+         intent('SPOOFED_ZERO_SENDER_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'SPOOFED_ZERO_SENDER_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const providerMessage =
+         'invalid input: searching transactions by zero address with asset sender role is not supported';
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async input => {
+            const url = new URL(String(input));
+            if (url.pathname === '/health') {
+               return Response.json({ round: 101 });
+            }
+            if (
+               url.pathname ===
+               `/v2/assets/${TESTNET_USDC_ASSET_ID}/transactions`
+            ) {
+               return Response.json(
+                  { message: providerMessage },
+                  { status: 400 },
+               );
+            }
+            throw new Error(`unexpected Indexer path ${url.pathname}`);
+         },
+         1_000,
+         undefined,
+         'C',
+      );
+
+      const result = await new RoundWatchPoller(
+         store,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      ).runOnce();
+
+      assert.deepEqual(result, {
+         attempted: 1,
+         succeeded: 0,
+         failed: 1,
+      });
+
+      const deferred = store.getWatch(prepared.id);
+      assert.equal(deferred?.state, 'active');
+      assert.equal(deferred?.terminalReason, undefined);
+      assert.equal(deferred?.pollingFailureCode, 'provider_request_rejected');
+      assert.equal(deferred?.pollingFailureStatus, 400);
+      assert.equal(deferred?.pollingFailureDisposition, 'unknown');
+      assert.equal(deferred?.pollingFailureCount, 1);
+      assert.equal(deferred?.workUnitsUsed, 1);
+      assert.equal(deferred?.scanAfterRound, 100);
+      assert.ok(deferred?.pollingRetryAt);
    } finally {
       store.close();
    }
