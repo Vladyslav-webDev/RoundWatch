@@ -584,7 +584,10 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
                request?: {
                   method?: unknown;
                   url?: unknown;
-                  body?: { servicePayer?: unknown };
+                  body?: {
+                     servicePayer?: unknown;
+                     expectedSender?: unknown;
+                  };
                };
             };
          };
