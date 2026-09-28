@@ -611,9 +611,12 @@ function pollingRetryDelayMilliseconds(
       DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS * 2 ** exponent,
       MAX_POLL_FAILURE_BACKOFF_MILLISECONDS,
    );
-   const jittered = Math.max(
-      DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS,
-      Math.floor(base * deterministicJitterFactor(watchId, failureNumber)),
+   const jittered = Math.floor(
+      base * deterministicJitterFactor(watchId, failureNumber),
+   );
+   const boundedBackoff = Math.min(
+      MAX_POLL_FAILURE_BACKOFF_MILLISECONDS,
+      Math.max(DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS, jittered),
    );
    const boundedRetryAfter =
       retryAfterMilliseconds === undefined
@@ -622,7 +625,7 @@ function pollingRetryDelayMilliseconds(
               Math.max(0, retryAfterMilliseconds),
               MAX_POLL_RETRY_AFTER_MILLISECONDS,
            );
-   return Math.max(jittered, boundedRetryAfter);
+   return Math.max(boundedBackoff, boundedRetryAfter);
 }
 
 function deterministicJitterFactor(
