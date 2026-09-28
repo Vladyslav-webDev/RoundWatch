@@ -183,6 +183,9 @@ interface IndexerTransaction {
 }
 
 export class AlgorandIndexerClient implements RoundWatchIndexer {
+   private static readonly PROBE_ADDRESS =
+      'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
+   private static readonly PROBE_TRANSACTION_ID = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
    constructor(
       private readonly baseUrl: string,
       private readonly dispatcher: IndexerRequestDispatcher,
@@ -279,6 +282,16 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       maxRound: number,
       nextToken?: string,
    ): Promise<TransactionPage> {
+      return this.searchWatchPageFor(watch, minRound, maxRound, nextToken, watch.id);
+   }
+
+   private async searchWatchPageFor(
+      watch: WatchRecord,
+      minRound: number,
+      maxRound: number,
+      nextToken?: string,
+      watchId?: string,
+   ): Promise<TransactionPage> {
       const plan = buildScanQueryPlan(watch, this.scanQueryVariant);
       const url = this.buildWatchSearchUrl(
          watch,
@@ -317,8 +330,52 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
             ...optionalToken(body),
          }),
          false,
-         watch.id,
+         watchId,
       ))!;
+   }
+
+   // At most five read-only requests: tip, representative configured scan,
+   // checkpoint block, transaction lookup, and transaction search.
+   // No watch ID is attributed.
+   async probeReadinessCapabilities(assetId: number): Promise<{
+      polling: boolean;
+      reconciliation: boolean;
+   }> {
+      let tip: number;
+      try {
+         tip = await this.getCurrentRound('health');
+      } catch {
+         return { polling: false, reconciliation: false };
+      }
+
+      const address = AlgorandIndexerClient.PROBE_ADDRESS;
+      const syntheticWatch = {
+         id: 'indexer-health-probe',
+         assetId,
+         expectedSender: address,
+         expectedReceiver: address,
+         atomicAmount: '1',
+         invoiceNote: 'roundwatch:health-probe',
+      } as WatchRecord;
+
+      let polling = false;
+      try {
+         const page = await this.searchWatchPageFor(syntheticWatch, tip, tip);
+         if (page.currentRound >= tip) {
+            await this.getBlock(tip);
+            polling = true;
+         }
+      } catch { /* The scan and checkpoint routes must both be validated. */ }
+
+      let reconciliation = false;
+      try {
+         const transactionId = AlgorandIndexerClient.PROBE_TRANSACTION_ID;
+         await this.lookupAssetTransfer(transactionId, 'reconciliation');
+         const page = await this.searchTransactionPage(transactionId);
+         reconciliation = page.currentRound >= tip;
+      } catch { /* Both reconciliation routes must succeed. */ }
+
+      return { polling, reconciliation };
    }
 
    private buildWatchSearchUrl(

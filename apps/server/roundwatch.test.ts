@@ -1135,10 +1135,12 @@ test('worker health isolates contained failures but keeps provider failures stic
    tracker.markStarted();
    assert.equal(tracker.snapshot(1_000).ready, false);
 
-   // An idle healthy worker may establish readiness when there is no work.
+   // An empty cycle cannot establish provider health.
    tracker.markCycleStarted();
    now = 1_100;
    tracker.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
+   assert.equal(tracker.snapshot(1_000).ready, false);
+   tracker.markProbeResult(true);
    assert.equal(tracker.snapshot(1_000).ready, true);
 
    // Live progress keeps a long-running cycle healthy.
@@ -1147,16 +1149,16 @@ test('worker health isolates contained failures but keeps provider failures stic
    now = 1_900;
    tracker.markCycleProgress();
    now = 2_600;
-   const progressing = tracker.snapshot(1_000);
+   const progressing = tracker.snapshot(2_000);
    assert.equal(progressing.ready, true);
    assert.equal(progressing.running, true);
    assert.equal(progressing.lastProgressAtMs, 1_900);
 
-   now = 3_001;
+   now = 3_101;
    assert.equal(tracker.snapshot(1_000).ready, false);
 
    // A provider/systemic all-failed cycle makes readiness fail.
-   now = 3_100;
+   now = 3_200;
    tracker.markCycleCompleted({ attempted: 2, succeeded: 0, failed: 2 });
    const failed = tracker.snapshot(1_000);
    assert.equal(failed.ready, false);
@@ -1164,7 +1166,7 @@ test('worker health isolates contained failures but keeps provider failures stic
 
    // Backoff can make the next cycle empty. That must not magically heal the
    // provider failure and reopen paid admission.
-   now = 3_150;
+   now = 3_250;
    tracker.markCycleStarted();
    tracker.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
    const coolingDown = tracker.snapshot(1_000);
@@ -1173,7 +1175,7 @@ test('worker health isolates contained failures but keeps provider failures stic
 
    // A later isolated permanent watch error also cannot erase the earlier
    // systemic failure. It is contained, but it is not evidence of recovery.
-   now = 3_175;
+   now = 3_275;
    tracker.markCycleStarted();
    tracker.markCycleCompleted({
       attempted: 1,
@@ -1185,20 +1187,22 @@ test('worker health isolates contained failures but keeps provider failures stic
    assert.equal(stillFailed.ready, false);
    assert.equal(stillFailed.consecutiveFailures, 1);
 
-   // Real successful work proves recovery.
+   // A mixed real success and systemic failure remains unhealthy.
    tracker.markCycleStarted();
-   now = 3_200;
+   now = 3_300;
    tracker.markCycleProgress();
-   tracker.markCycleCompleted({ attempted: 2, succeeded: 1, failed: 1 });
+   tracker.markCycleCompleted({ attempted: 2, succeeded: 1, failed: 1, providerEvidence: 1 });
+   assert.equal(tracker.snapshot(1_000).ready, false);
+   tracker.markProbeResult(true);
    const recovered = tracker.snapshot(1_000);
    assert.equal(recovered.ready, true);
    assert.equal(recovered.consecutiveFailures, 0);
-   assert.equal(recovered.lastErrorAtMs, 3_200);
+   assert.equal(recovered.lastErrorAtMs, 3_300);
 
    // From a healthy baseline, a fully isolated fail-closed obligation must
    // not poison readiness for unrelated customers.
    tracker.markCycleStarted();
-   now = 3_250;
+   now = 3_350;
    tracker.markCycleCompleted({
       attempted: 1,
       succeeded: 0,
@@ -1208,7 +1212,7 @@ test('worker health isolates contained failures but keeps provider failures stic
    const isolated = tracker.snapshot(1_000);
    assert.equal(isolated.ready, true);
    assert.equal(isolated.consecutiveFailures, 0);
-   assert.equal(isolated.lastErrorAtMs, 3_250);
+   assert.equal(isolated.lastErrorAtMs, 3_350);
 
    assert.throws(
       () =>
@@ -4505,7 +4509,7 @@ test('429 polling failure persists cooldown across restart without spending work
          const recovered = await recoveredPoller.runOnce();
          assert.deepEqual(
             recovered,
-            { attempted: 1, succeeded: 1, failed: 0 },
+            { attempted: 1, succeeded: 1, failed: 0, providerEvidence: 1 },
          );
 
          const after = restarted.getWatch(watchId);

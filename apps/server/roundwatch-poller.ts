@@ -5,6 +5,7 @@ import {
    type TransactionPage,
 } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
 import type {
    PollingFailureDisposition,
    RoundWatchStore,
@@ -17,6 +18,7 @@ import {
 } from './roundwatch-work-budget.js';
 import {
    WorkerHealthTracker,
+   type CustomerTurnOutcome,
    type WorkerCycleOutcome,
    type WorkerHealthSnapshot,
 } from './roundwatch-worker-health.js';
@@ -44,11 +46,13 @@ export class RoundWatchPoller {
    private timer?: NodeJS.Timeout;
    private running = false;
    private started = false;
+   private generation = 0;
    private nextWatchIndex = 0;
    private readonly sessions = new Map<string, ScanSession>();
    private readonly historicalPageCache = new Map<string, CachedHistoricalPage>();
    private historicalPageCacheBytes = 0;
    private readonly workerHealth = new WorkerHealthTracker();
+   private lastObservedProbeRevision = 0;
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -61,6 +65,7 @@ export class RoundWatchPoller {
          DEFAULT_SCAN_PAGE_CACHE_ENTRIES,
       private readonly historicalPageCacheByteBudget =
          DEFAULT_SCAN_PAGE_CACHE_BYTES,
+      private readonly healthProbe?: IndexerHealthProbe,
    ) {
       if (!Number.isSafeInteger(roundWindow) || roundWindow <= 0) {
          throw new Error('roundWindow must be a finite positive integer');
@@ -86,12 +91,15 @@ export class RoundWatchPoller {
    start(): void {
       if (this.started) return;
       this.started = true;
+      this.generation += 1;
+      this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
       this.workerHealth.markStarted();
       void this.tick();
    }
 
    stop(): void {
       this.started = false;
+      this.generation += 1;
       this.workerHealth.markStopped();
       if (this.timer) clearTimeout(this.timer);
       this.timer = undefined;
@@ -99,7 +107,7 @@ export class RoundWatchPoller {
 
    healthSnapshot(): WorkerHealthSnapshot {
       return this.workerHealth.snapshot(
-         Math.max(this.intervalMilliseconds * 3, 15_000),
+         Math.max(this.intervalMilliseconds * 3, 45_000),
       );
    }
 
@@ -159,12 +167,12 @@ export class RoundWatchPoller {
                minRound,
                maxRound,
                nextToken,
-            );
+            ).then(page => ({ page, fresh: true }));
          }
 
          const cached = this.getCachedHistoricalPage(queryKey);
          if (cached) {
-            return Promise.resolve(cached);
+            return Promise.resolve({ page: cached, fresh: false });
          }
 
          let pending = sharedPages.get(queryKey);
@@ -182,15 +190,20 @@ export class RoundWatchPoller {
             });
             sharedPages.set(queryKey, pending);
          }
-         return pending;
+         return pending.then(page => ({ page, fresh: true }));
       };
 
       for (const watch of ordered) {
          outcome.attempted += 1;
          try {
-            await this.serviceWatch(watch, getSweepTip, getSweepPage);
-            this.store.clearPollingFailure(watch.id);
-            outcome.succeeded += 1;
+            const turn = await this.serviceWatch(watch, getSweepTip, getSweepPage);
+            if (turn.kind !== 'noOp') this.store.clearPollingFailure(watch.id);
+            if (turn.kind === 'progressed') outcome.succeeded += 1;
+            else if (turn.kind === 'providerEvidenceOnly') outcome.providerEvidenceOnly =
+               (outcome.providerEvidenceOnly ?? 0) + 1;
+            else outcome.noOp = (outcome.noOp ?? 0) + 1;
+            if (turn.providerEvidence) outcome.providerEvidence =
+               (outcome.providerEvidence ?? 0) + 1;
             onProgress?.();
          } catch (error) {
             outcome.failed += 1;
@@ -265,11 +278,11 @@ export class RoundWatchPoller {
          minRound: number,
          maxRound: number,
          nextToken?: string,
-      ) => Promise<TransactionPage>,
-   ): Promise<void> {
+      ) => Promise<{ page: TransactionPage; fresh: boolean }>,
+   ): Promise<CustomerTurnOutcome> {
       if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
          console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
-         return;
+         return { kind: 'noOp', providerEvidence: false };
       }
 
       const workClaim = this.store.claimWorkUnit(initial.id);
@@ -279,9 +292,9 @@ export class RoundWatchPoller {
          console.warn(
             `RoundWatch work budget exhausted watch=${initial.id}; terminal state=indeterminate`,
          );
-         return;
+         return { kind: 'noOp', providerEvidence: false };
       }
-      if (workClaim !== 'claimed') return;
+      if (workClaim !== 'claimed') return { kind: 'noOp', providerEvidence: false };
 
       this.recordMetric(() =>
          this.economicsMetrics?.recordWorkUnit(initial.id),
@@ -311,7 +324,7 @@ export class RoundWatchPoller {
       if (watch.closingRound !== undefined && watch.scanAfterRound >= watch.closingRound) {
          this.store.markExpired(watch.id, watch.scanAfterRound, watch.closingRound);
          this.finishMetric(watch, 'expired');
-         return;
+         return { kind: 'noOp', providerEvidence: false };
       }
 
       let session = this.sessions.get(watch.id);
@@ -326,7 +339,7 @@ export class RoundWatchPoller {
             tip,
             watch.closingRound ?? Number.MAX_SAFE_INTEGER,
          );
-         if (maxRound <= watch.scanAfterRound) return;
+         if (maxRound <= watch.scanAfterRound) return { kind: 'noOp', providerEvidence: false };
          session = {
             minRound: watch.scanAfterRound + 1,
             maxRound,
@@ -335,7 +348,7 @@ export class RoundWatchPoller {
          this.sessions.set(watch.id, session);
       }
 
-      const page = await requestBudget.run(() =>
+      const { page, fresh } = await requestBudget.run(() =>
          getSweepPage(
             watch,
             session.minRound,
@@ -361,7 +374,7 @@ export class RoundWatchPoller {
          this.sessions.delete(watch.id);
          this.finishMetric(watch, 'matched');
          console.log(`RoundWatch matched watch ${watch.id} in round ${match.round}`);
-         return;
+         return { kind: 'progressed', providerEvidence: fresh };
       }
       if (page.nextToken) {
          if (page.nextToken === session.nextToken || session.seenTokens.has(page.nextToken)) {
@@ -369,12 +382,16 @@ export class RoundWatchPoller {
          }
          session.seenTokens.add(page.nextToken);
          session.nextToken = page.nextToken;
-         return;
+         return fresh
+            ? { kind: 'providerEvidenceOnly', providerEvidence: true }
+            : { kind: 'noOp', providerEvidence: false };
       }
 
       const advanced = this.store.advanceScanRound(watch.id, watch.scanAfterRound, session.maxRound);
       this.sessions.delete(watch.id);
-      if (!advanced) return;
+      if (!advanced) return fresh
+         ? { kind: 'providerEvidenceOnly', providerEvidence: true }
+         : { kind: 'noOp', providerEvidence: false };
       this.recordMetric(() => this.economicsMetrics?.recordCoverage(
          watch.id,
          session.maxRound - watch.scanAfterRound,
@@ -386,6 +403,7 @@ export class RoundWatchPoller {
          this.finishMetric(updated, 'expired');
          console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`);
       }
+      return { kind: 'progressed', providerEvidence: fresh };
    }
 
    private getCachedHistoricalPage(
@@ -489,14 +507,27 @@ export class RoundWatchPoller {
    private async tick(): Promise<void> {
       if (this.running) return;
       this.running = true;
+      const generation = this.generation;
       this.workerHealth.markCycleStarted();
       try {
          const outcome = await this.runOnce(() =>
-            this.workerHealth.markCycleProgress(),
+            { if (generation === this.generation) this.workerHealth.markCycleProgress(); },
          );
+         if (generation !== this.generation) return;
+         if (outcome.failed > (outcome.isolatedFailures ?? 0)) {
+            this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
+         }
+         if (this.healthProbe && outcome.failed === (outcome.isolatedFailures ?? 0)) {
+            const sample = await this.healthProbe.runIfDue();
+            if (generation !== this.generation) return;
+            if (sample.revision > this.lastObservedProbeRevision) {
+               this.lastObservedProbeRevision = sample.revision;
+               this.workerHealth.markProbeResult(sample.evidence.polling);
+            }
+         }
          this.workerHealth.markCycleCompleted(outcome);
       } catch (error) {
-         this.workerHealth.markCycleFailed();
+         if (generation === this.generation) this.workerHealth.markCycleFailed();
          console.error('RoundWatch poll failed:', safeErrorMessage(error));
       } finally {
          this.running = false;

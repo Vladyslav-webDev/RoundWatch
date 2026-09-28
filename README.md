@@ -278,7 +278,7 @@ curl -i -X POST http://localhost:4021/spike/watch \
   --data '{"idempotencyKey":"local-invoice-001","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-The readiness request must return HTTP `200` before a paid watch can be admitted. It is backed by a cached SQLite write/rollback probe, poller and reconciler progress/error freshness in production, and a filesystem free-space floor. A non-ready service returns HTTP `503` from watch creation before x402 verification. The final request should return HTTP `402` before any payment. The server's default local route is `/spike/watch`, not the production `/v1/watch` route.
+The readiness request must return HTTP `200` before a paid watch can be admitted. It is backed by a cached SQLite write/rollback probe, fresh functional Indexer evidence for the poller and reconciler, worker stall detection, and a filesystem free-space floor. Startup is unready until bounded read-only Indexer probes establish health; empty customer cycles cannot do so. A non-ready service returns HTTP `503` from watch creation before x402 verification. The final request should return HTTP `402` before any payment. The server's default local route is `/spike/watch`, not the production `/v1/watch` route.
 
 Paid TestNet utilities use `apps/client/.env` and keep signing in the client process. Never use a funded MainNet mnemonic for local development and never commit an `.env` file. The automated test suite does not require a wallet or make payments.
 
