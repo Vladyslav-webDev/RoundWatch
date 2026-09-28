@@ -50,6 +50,7 @@ import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
 import {
    buildWatchEligibilityContract,
    eligibilityBoundarySummary,
+   newWatchSenderAdmissionError,
 } from './roundwatch-contract.js';
 import { handleMcpHttpRequest } from './mcp.js';
 import {
@@ -77,7 +78,6 @@ const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 const DEFAULT_SIGNED_WATCH_BODY_READ_TIMEOUT_MILLISECONDS = 5_000;
 const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
-const ALGORAND_ZERO_ADDRESS = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
 const EXAMPLE_MONITORED_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
 const ROUNDWATCH_DISCOVERY_TAGS = [
@@ -1379,15 +1379,10 @@ function extractSettlementIntent(
 function validateNewWatchAdmission(
    spec: WatchSpec,
 ): { error: string; code: string } | undefined {
-   if (spec.expectedSender === ALGORAND_ZERO_ADDRESS) {
-      return {
-         error:
-            'expectedSender must not be the Algorand zero address for new watches',
-         code: 'unsupported_expected_sender',
-      };
-   }
-
-   return undefined;
+   const error = newWatchSenderAdmissionError(spec.expectedSender);
+   return error
+      ? { error, code: 'unsupported_expected_sender' }
+      : undefined;
 }
 
 function parseWatchSpec(
