@@ -416,7 +416,7 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
                name: 'roundwatch.prepare_watch',
                arguments: {
                   idempotencyKey: 'mcp-invoice-001',
-                  expectedSender: PAYER,
+                  expectedSender: WATCH_SENDER,
                   expectedReceiver: RECEIVER,
                   atomicAmount: '1000000',
                   invoiceNote: 'roundwatch:mcp-invoice-001',
@@ -500,6 +500,51 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
             ?.exactDeadlineEligible,
          false,
       );
+      const rejectedZeroSender = await app.request('/mcp', {
+         method: 'POST',
+         headers: {
+            ...modernHeaders,
+            'mcp-method': 'tools/call',
+            'mcp-name': 'roundwatch.prepare_watch',
+         },
+         body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 30,
+            method: 'tools/call',
+            params: {
+               name: 'roundwatch.prepare_watch',
+               arguments: {
+                  idempotencyKey: 'mcp-zero-sender',
+                  expectedSender: PAYER,
+                  expectedReceiver: RECEIVER,
+                  atomicAmount: '1000000',
+               },
+               _meta: {
+                  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                  'io.modelcontextprotocol/clientCapabilities': {},
+               },
+            },
+         }),
+      });
+      assert.equal(rejectedZeroSender.status, 200);
+      assert.equal(rejectedZeroSender.headers.get('payment-required'), null);
+      const rejectedZeroSenderBody = await rejectedZeroSender.json() as {
+         result?: {
+            isError?: unknown;
+            content?: Array<{ text?: unknown }>;
+            structuredContent?: unknown;
+         };
+      };
+      assert.equal(rejectedZeroSenderBody.result?.isError, true);
+      assert.match(
+         String(rejectedZeroSenderBody.result?.content?.[0]?.text ?? ''),
+         /zero address/i,
+      );
+      assert.equal(
+         rejectedZeroSenderBody.result?.structuredContent,
+         undefined,
+      );
+
       const recovery = await app.request('/mcp', {
          method: 'POST',
          headers: {
@@ -558,6 +603,11 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
       assert.equal(
          recoveryBody.result?.structuredContent?.request?.body?.servicePayer,
          PAYER,
+      );
+      assert.equal(
+         recoveryBody.result?.structuredContent?.request?.body?.expectedSender,
+         PAYER,
+         'exact recovery must remain permissive for legacy zero-sender watches',
       );
 
       assert.equal(
