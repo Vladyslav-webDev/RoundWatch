@@ -39,6 +39,7 @@ import {
    type TransactionPage,
 } from './roundwatch-indexer.js';
 import {
+   DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS,
    MAX_POLL_FAILURE_BACKOFF_MILLISECONDS,
    RoundWatchPoller,
 } from './roundwatch-poller.js';
