@@ -38,7 +38,10 @@ import {
    type TransactionIdPage,
    type TransactionPage,
 } from './roundwatch-indexer.js';
-import { RoundWatchPoller } from './roundwatch-poller.js';
+import {
+   MAX_POLL_FAILURE_BACKOFF_MILLISECONDS,
+   RoundWatchPoller,
+} from './roundwatch-poller.js';
 import { hasDatabaseDiskHeadroom } from './roundwatch-readiness.js';
 import { WorkerHealthTracker } from './roundwatch-worker-health.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
@@ -4552,6 +4555,128 @@ test('provider-wide permanent HTTP error stays active and readiness-impacting in
       assert.equal(store.getWatch(prepared.id)?.workUnitsUsed, 1);
    } finally {
       store.close();
+   }
+});
+
+test('polling jitter respects the configured hard cap while Retry-After may extend it', async () => {
+   let now = new Date('2026-09-28T18:30:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      workUnitBudget: 20,
+      now: () => now,
+   });
+
+   try {
+      const prepared = store.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'hard-backoff-cap',
+         },
+         intent('HARD_BACKOFF_CAP_SERVICE_TX'),
+      ).watch;
+      store.activateWatch(
+         prepared.id,
+         {
+            transaction: 'HARD_BACKOFF_CAP_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const database = (
+         store as unknown as { database: DatabaseSync }
+      ).database;
+      database.prepare(
+         'UPDATE roundwatch_watches SET id=?, polling_failure_count=8 WHERE id=?',
+      ).run('deterministic-review-watch', prepared.id);
+
+      const offlineIndexer = new FakeIndexer(101);
+      offlineIndexer.getCurrentRound = async () => {
+         throw new TypeError('offline');
+      };
+
+      await new RoundWatchPoller(
+         store,
+         offlineIndexer,
+         5_000,
+         100,
+         () => now,
+      ).runOnce();
+
+      const failed = store.getWatch('deterministic-review-watch');
+      assert.ok(failed?.pollingRetryAt);
+      const delay =
+         Date.parse(failed.pollingRetryAt) - now.getTime();
+      assert.equal(failed.pollingFailureCount, 9);
+      assert.ok(delay >= DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS);
+      assert.ok(delay <= MAX_POLL_FAILURE_BACKOFF_MILLISECONDS);
+   } finally {
+      store.close();
+   }
+
+   const retryAfterStore = new RoundWatchStore(':memory:', {
+      workUnitBudget: 5,
+      now: () => now,
+   });
+   try {
+      const prepared = retryAfterStore.prepareWatch(
+         {
+            ...SPEC,
+            idempotencyKey: 'retry-after-over-backoff-cap',
+         },
+         intent('RETRY_AFTER_OVER_CAP_SERVICE_TX'),
+      ).watch;
+      retryAfterStore.activateWatch(
+         prepared.id,
+         {
+            transaction: 'RETRY_AFTER_OVER_CAP_SERVICE_TX',
+            network: ALGORAND_TESTNET,
+            payer: PAYER,
+         },
+         100,
+      );
+
+      const indexer = new AlgorandIndexerClient(
+         'https://indexer.invalid',
+         new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000,
+            burst: 10,
+            concurrency: 1,
+         }),
+         async input => {
+            const url = new URL(String(input));
+            if (url.pathname === '/health') {
+               return Response.json({ round: 101 });
+            }
+            return Response.json(
+               { message: 'slow down' },
+               {
+                  status: 429,
+                  headers: { 'retry-after': '600' },
+               },
+            );
+         },
+         1_000,
+         undefined,
+         'C',
+      );
+
+      await new RoundWatchPoller(
+         retryAfterStore,
+         indexer,
+         5_000,
+         100,
+         () => now,
+      ).runOnce();
+
+      const failed = retryAfterStore.getWatch(prepared.id);
+      assert.ok(failed?.pollingRetryAt);
+      assert.equal(
+         Date.parse(failed.pollingRetryAt) - now.getTime(),
+         600_000,
+      );
+   } finally {
+      retryAfterStore.close();
    }
 });
 
