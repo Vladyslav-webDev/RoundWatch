@@ -1,3 +1,14 @@
+export const ALGORAND_ZERO_ADDRESS =
+   'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+
+export function newWatchSenderAdmissionError(
+   expectedSender: string,
+): string | undefined {
+   return expectedSender === ALGORAND_ZERO_ADDRESS
+      ? 'expectedSender must not be the Algorand zero address for new watches'
+      : undefined;
+}
+
 export interface WatchEligibilityContract {
    ttlMs: number;
    startsAt: 'durable_watch_preparation_before_x402_settlement';

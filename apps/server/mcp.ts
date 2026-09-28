@@ -5,6 +5,7 @@ import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
    buildWatchEligibilityContract,
    eligibilityBoundarySummary,
+   newWatchSenderAdmissionError,
 } from './roundwatch-contract.js';
 import {
    MAX_MCP_REQUEST_BODY_BYTES,
@@ -105,7 +106,7 @@ const tools = [
                minLength: 58,
                maxLength: 58,
                description:
-                  'Checksum-valid Algorand address expected to send the future payment.',
+                  'Checksum-valid nonzero Algorand address expected to send the future payment. The Algorand zero address is rejected for new watch creation.',
             },
             expectedReceiver: {
                type: 'string',
@@ -646,6 +647,7 @@ function serviceInfo(dependencies: McpDependencies) {
          eligibilityBoundarySummary(
             dependencies.watchTtlMilliseconds,
          ),
+         'New watch preparation requires a nonzero expectedSender; exact recovery deliberately accepts the original sender for legacy watches.',
          'RoundWatch is not a webhook delivery service.',
          'The MCP preparation tools do not sign or settle x402 payments.',
          'If a paid create response is lost, use free exact recovery instead of paying again.',
@@ -653,19 +655,18 @@ function serviceInfo(dependencies: McpDependencies) {
    };
 }
 
-function validatePrepareArguments(
+interface PreparedWatchArguments {
+   idempotencyKey: string;
+   expectedSender: string;
+   expectedReceiver: string;
+   atomicAmount: string;
+   invoiceNote?: string;
+}
+
+function validateWatchArguments(
    args: Record<string, unknown>,
-):
-   | {
-        value: {
-           idempotencyKey: string;
-           expectedSender: string;
-           expectedReceiver: string;
-           atomicAmount: string;
-           invoiceNote?: string;
-        };
-     }
-   | { error: string } {
+   allowLegacyZeroSender: boolean,
+): { value: PreparedWatchArguments } | { error: string } {
    const allowed = new Set([
       'idempotencyKey',
       'expectedSender',
@@ -699,6 +700,11 @@ function validatePrepareArguments(
       !isValidAlgorandAddress(expectedSender)
    ) {
       return { error: 'expectedSender must be a valid Algorand address' };
+   }
+
+   if (!allowLegacyZeroSender) {
+      const admissionError = newWatchSenderAdmissionError(expectedSender);
+      if (admissionError) return { error: admissionError };
    }
 
    if (
@@ -742,19 +748,16 @@ function validatePrepareArguments(
    };
 }
 
+function validatePrepareArguments(
+   args: Record<string, unknown>,
+): { value: PreparedWatchArguments } | { error: string } {
+   return validateWatchArguments(args, false);
+}
+
 function validateRecoveryArguments(
    args: Record<string, unknown>,
 ):
-   | {
-        value: {
-           idempotencyKey: string;
-           expectedSender: string;
-           expectedReceiver: string;
-           atomicAmount: string;
-           invoiceNote?: string;
-           servicePayer: string;
-        };
-     }
+   | { value: PreparedWatchArguments & { servicePayer: string } }
    | { error: string } {
    const allowed = new Set([
       'idempotencyKey',
@@ -779,9 +782,9 @@ function validateRecoveryArguments(
       return { error: 'servicePayer must be a valid Algorand address' };
    }
 
-   const prepareArgs = { ...args };
-   delete prepareArgs.servicePayer;
-   const prepared = validatePrepareArguments(prepareArgs);
+   const recoveryWatchArgs = { ...args };
+   delete recoveryWatchArgs.servicePayer;
+   const prepared = validateWatchArguments(recoveryWatchArgs, true);
    if ('error' in prepared) {
       return prepared;
    }
