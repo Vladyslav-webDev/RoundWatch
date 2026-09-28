@@ -334,17 +334,18 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       ))!;
    }
 
-   // At most four read-only requests: tip, representative configured scan,
-   // transaction lookup, and transaction search. No watch ID is attributed.
+   // At most five read-only requests: tip, representative configured scan,
+   // checkpoint block, transaction lookup, and transaction search.
+   // No watch ID is attributed.
    async probeReadinessCapabilities(assetId: number): Promise<{
-      scan: boolean;
+      polling: boolean;
       reconciliation: boolean;
    }> {
       let tip: number;
       try {
          tip = await this.getCurrentRound('health');
       } catch {
-         return { scan: false, reconciliation: false };
+         return { polling: false, reconciliation: false };
       }
 
       const address = AlgorandIndexerClient.PROBE_ADDRESS;
@@ -357,11 +358,14 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          invoiceNote: 'roundwatch:health-probe',
       } as WatchRecord;
 
-      let scan = false;
+      let polling = false;
       try {
          const page = await this.searchWatchPageFor(syntheticWatch, tip, tip);
-         scan = page.currentRound >= tip;
-      } catch { /* The functional scan route remains unproven. */ }
+         if (page.currentRound >= tip) {
+            await this.getBlock(tip);
+            polling = true;
+         }
+      } catch { /* The scan and checkpoint routes must both be validated. */ }
 
       let reconciliation = false;
       try {
@@ -371,7 +375,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          reconciliation = page.currentRound >= tip;
       } catch { /* Both reconciliation routes must succeed. */ }
 
-      return { scan, reconciliation };
+      return { polling, reconciliation };
    }
 
    private buildWatchSearchUrl(

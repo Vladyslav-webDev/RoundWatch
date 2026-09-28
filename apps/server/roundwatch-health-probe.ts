@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
 
 export interface IndexerCapabilityEvidence {
-   scan: boolean;
+   polling: boolean;
    reconciliation: boolean;
 }
 
@@ -44,7 +44,7 @@ export class IndexerHealthProbe {
       this.lastAttemptAtMs = at;
       const revision = ++this.revision;
       const pending = this.source.probeReadinessCapabilities(this.assetId)
-         .catch(() => ({ scan: false, reconciliation: false }))
+         .catch(() => ({ polling: false, reconciliation: false }))
          .then(evidence => {
             const sample = { revision, evidence };
             this.latest = sample;

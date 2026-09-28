@@ -93,7 +93,7 @@ test('R02: restart in durable cooldown starts unknown and probes without chargin
       let healthy = false;
       let probeCalls = 0;
       const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
-         probeCalls += 1; return { scan: healthy, reconciliation: healthy };
+         probeCalls += 1; return { polling: healthy, reconciliation: healthy };
       } }, ASSET, () => probeNow);
       const indexer = fakeIndexer();
       const poller = new RoundWatchPoller(restarted, indexer, 5, 100, () => now,
@@ -120,7 +120,7 @@ test('R02: restart in durable cooldown starts unknown and probes without chargin
 test('empty startup shares one bounded probe and stop/start requires fresh evidence', async () => {
    const store = new RoundWatchStore(':memory:');
    let probeNow = 1_000;
-   let evidence: IndexerCapabilityEvidence = { scan: false, reconciliation: false };
+   let evidence: IndexerCapabilityEvidence = { polling: false, reconciliation: false };
    let calls = 0;
    const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
       calls += 1; return evidence;
@@ -138,7 +138,7 @@ test('empty startup shares one bounded probe and stop/start requires fresh evide
       assert.equal(calls, 1);
       assert.equal(store.listPollingCandidates().length, 0);
       assert.equal(store.listSettlementReconciliationCandidates().length, 0);
-      evidence = { scan: true, reconciliation: true };
+      evidence = { polling: true, reconciliation: true };
       probeNow += 15_000;
       await until(() => poller.readinessCheck() && reconciler.readinessCheck());
       assert.equal(calls, 2);
@@ -166,7 +166,7 @@ test('R03: terminal final polling watch leaves a bounded recovery path', async (
    let recovered = false;
    let probeCalls = 0;
    const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
-      probeCalls += 1; return { scan: recovered, reconciliation: recovered };
+      probeCalls += 1; return { polling: recovered, reconciliation: recovered };
    } }, ASSET, () => probeNow);
    const indexer = fakeIndexer({ async searchWatchPage() { throw new Error('scan outage'); } });
    const poller = new RoundWatchPoller(store, indexer, 5, 100, undefined,
@@ -193,7 +193,7 @@ test('R05: final reconciliation candidate can activate and idle reconciler can r
    let recovered = false;
    let probeCalls = 0;
    const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
-      probeCalls += 1; return { scan: recovered, reconciliation: recovered };
+      probeCalls += 1; return { polling: recovered, reconciliation: recovered };
    } }, ASSET, () => probeNow);
    const indexer = fakeIndexer({ async lookupAssetTransfer() { throw new Error('lookup outage'); } });
    const reconciler = new SettlementReconciler(store, indexer,
@@ -236,8 +236,8 @@ test('R06: tip-only watch cannot mask another watch scan failure', async () => {
    } finally { store.close(); }
 });
 
-test('functional probe rejects health-only success and failed reconciliation routes', async () => {
-   for (const failedRoute of ['scan', 'lookup', 'absence'] as const) {
+test('functional probe requires scan, checkpoint block, and both reconciliation routes', async () => {
+   for (const failedRoute of ['scan', 'block', 'lookup', 'absence', 'none'] as const) {
       const paths: string[] = [];
       const client = new AlgorandIndexerClient('https://indexer.invalid',
          new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
@@ -247,6 +247,9 @@ test('functional probe rejects health-only success and failed reconciliation rou
             if (url.pathname.includes('/assets/')) return failedRoute === 'scan'
                ? Response.json({}, { status: 503 })
                : Response.json({ transactions: [], 'current-round': 101 });
+            if (url.pathname.startsWith('/v2/blocks/')) return failedRoute === 'block'
+               ? Response.json({}, { status: 503 })
+               : Response.json({ round: 101, timestamp: 1_000 });
             if (url.pathname.startsWith('/v2/transactions/')) return failedRoute === 'lookup'
                ? Response.json({}, { status: 503 })
                : Response.json({}, { status: 404 });
@@ -256,12 +259,51 @@ test('functional probe rejects health-only success and failed reconciliation rou
             throw new Error('unexpected path');
          });
       const result = await client.probeReadinessCapabilities(ASSET);
-      assert.equal(result.scan, failedRoute !== 'scan');
-      assert.equal(result.reconciliation, failedRoute === 'scan');
+      assert.equal(result.polling, failedRoute !== 'scan' && failedRoute !== 'block');
+      assert.equal(result.reconciliation, failedRoute !== 'lookup' && failedRoute !== 'absence');
       assert.ok(paths.includes('/health'));
       assert.ok(paths.some(path => path.includes('/assets/')));
-      assert.ok(paths.length <= 4);
+      if (failedRoute !== 'scan') assert.ok(paths.includes('/v2/blocks/101'));
+      assert.ok(paths.length <= 5);
    }
+});
+
+test('checkpoint 503 keeps an idle poller unready until that route recovers', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let blockHealthy = false;
+   let probeNow = 1_000;
+   let blockCalls = 0;
+   const client = new AlgorandIndexerClient('https://indexer.invalid',
+      new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+      async input => {
+         const path = new URL(String(input)).pathname;
+         if (path === '/health') return Response.json({ round: 101 });
+         if (path.startsWith('/v2/assets/')) return Response.json({ transactions: [], 'current-round': 101 });
+         if (path === '/v2/blocks/101') {
+            blockCalls += 1;
+            return blockHealthy
+               ? Response.json({ round: 101, timestamp: 1_000 })
+               : Response.json({}, { status: 503 });
+         }
+         if (path.startsWith('/v2/transactions/')) return Response.json({}, { status: 404 });
+         if (path === '/v2/transactions') return Response.json({ transactions: [], 'current-round': 101 });
+         throw new Error(`unexpected path ${path}`);
+      });
+   const probe = new IndexerHealthProbe(client, ASSET, () => probeNow);
+   const poller = new RoundWatchPoller(store, client, 5, 100, undefined,
+      undefined, undefined, undefined, probe);
+   try {
+      poller.start();
+      await until(() => poller.healthSnapshot().providerHealth === 'unhealthy');
+      assert.equal(poller.readinessCheck(), false);
+      assert.equal(blockCalls, 1);
+      assert.equal(store.listActiveWatches().length, 0);
+      blockHealthy = true;
+      probeNow += 15_000;
+      await until(() => poller.readinessCheck());
+      assert.equal(blockCalls, 2);
+      assert.equal(store.listActiveWatches().length, 0);
+   } finally { poller.stop(); store.close(); }
 });
 
 test('health evidence ages out; empty, no-op, and isolated cycles cannot renew it', () => {

@@ -522,7 +522,7 @@ export class RoundWatchPoller {
             if (generation !== this.generation) return;
             if (sample.revision > this.lastObservedProbeRevision) {
                this.lastObservedProbeRevision = sample.revision;
-               this.workerHealth.markProbeResult(sample.evidence.scan);
+               this.workerHealth.markProbeResult(sample.evidence.polling);
             }
          }
          this.workerHealth.markCycleCompleted(outcome);

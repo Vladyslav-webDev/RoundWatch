@@ -20,9 +20,10 @@ Use the endpoints for different purposes:
 
 On startup, provider health is unknown until a fresh read-only probe succeeds.
 The workers share one probe, attempted at most once per 15 seconds, with at
-most four Indexer requests through the normal dispatcher. It checks the
-Indexer tip, a representative configured asset scan, transaction lookup, and
-transaction-ID search. Probes never claim customer work or change watch rows;
+most five Indexer requests through the normal dispatcher. It checks the
+Indexer tip, a representative configured asset scan, the checkpoint block,
+transaction lookup, and transaction-ID search. Probes never claim customer
+work or change watch rows;
 provider evidence expires after 45 seconds by default (or three configured
 worker intervals, if longer). A failing functional route keeps readiness red
 even when `/health` answers. An expected 404 for a synthetic transaction ID
