@@ -507,6 +507,8 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                   const classification = classifyIndexerHttpFailure(
                      response.status,
                      diagnostic.safeProviderMessage,
+                     purpose,
+                     url,
                   );
                   const retryAfterMilliseconds =
                      readRetryAfterMilliseconds(response);
@@ -1232,6 +1234,9 @@ function isCanonicalBase64(value: string): boolean {
    return Buffer.from(value, 'base64').toString('base64') === value;
 }
 
+const ALGORAND_ZERO_ADDRESS =
+   'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+
 const ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE =
    'invalid input: searching transactions by zero address with asset sender role is not supported';
 
@@ -1246,11 +1251,24 @@ interface IndexerErrorDiagnostic {
 function classifyIndexerHttpFailure(
    status: number,
    safeProviderMessage: string | undefined,
+   purpose: IndexerRequestPurpose,
+   url: URL,
 ): {
    code: IndexerHttpErrorCode;
    retryDisposition: IndexerRetryDisposition;
 } {
-   if (safeProviderMessage === ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE) {
+   // Provider status has precedence over body text. The known zero-sender
+   // rejection is trusted only for the exact request shape that can produce it:
+   // a scan-page HTTP 400 whose actual query filters by Algorand zero address
+   // in sender role. This prevents a contradictory or spoofed body from
+   // terminalizing an unrelated nonzero watch.
+   if (
+      status === 400 &&
+      safeProviderMessage === ZERO_ADDRESS_SENDER_PROVIDER_MESSAGE &&
+      purpose === 'scan-page' &&
+      url.searchParams.get('address') === ALGORAND_ZERO_ADDRESS &&
+      url.searchParams.get('address-role') === 'sender'
+   ) {
       return {
          code: 'zero_address_sender_unsupported',
          retryDisposition: 'permanent',
