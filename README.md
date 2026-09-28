@@ -156,7 +156,7 @@ Request fields:
 | Field | Required | Rules |
 | --- | --- | --- |
 | `idempotencyKey` | Yes | String, 8–128 characters. It is globally unique in the service database. Reuse returns HTTP `409` with the existing public watch record and does not activate a second watch. |
-| `expectedSender` | Yes | Checksum-valid 58-character Algorand address. |
+| `expectedSender` | Yes | Checksum-valid nonzero 58-character Algorand address for new watch creation. The Algorand zero address is rejected for new watches; exact recovery remains deliberately permissive for legacy paid records. |
 | `expectedReceiver` | Yes | Checksum-valid 58-character Algorand address. It is the receiver of the future invoice payment, not necessarily the RoundWatch service receiver. |
 | `atomicAmount` | Yes | Positive integer string, at most JavaScript's maximum safe integer (`9007199254740991`). For six-decimal USDC, `1000` means `0.001 USDC`. |
 | `invoiceNote` | No | Exact UTF-8 note to match, 1–128 bytes when present. |
@@ -202,7 +202,7 @@ Unknown IDs return HTTP `404`.
 | `matched` | An exact matching future asset transfer was found. The matching transaction ID and confirmed round are stored. |
 | `settlement_unknown` | Settlement did not produce an immediately usable activation. `settlementReconciliationTerminal=false` means exact reconciliation may still recover it; `true` means reconciliation reached a final fail-closed outcome and will not retry. |
 | `expired` | The deadline's complete eligible chain range was scanned through a fixed closing checkpoint with no exact match. The terminal record remains readable. |
-| `indeterminate` | The durable per-watch work budget was exhausted before a positive match or complete expiry proof. The record is terminal and does not claim absence. |
+| `indeterminate` | RoundWatch stopped without a positive match or complete expiry proof. `terminalReason=work_budget_exhausted` means the durable per-watch work budget was exhausted; `terminalReason=indexer_permanent_failure` means polling hit a classified non-retryable watch-specific Indexer rejection. Neither outcome claims the watched payment was absent. |
 
 ### Exact matching
 
