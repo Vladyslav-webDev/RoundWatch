@@ -175,7 +175,7 @@ Readiness:
 curl -i https://roundwatch-api.onrender.com/ready
 ```
 
-Expected result is HTTP 200 with `status: "ready"`, `storage: true`, `poller: true`, `reconciler: true`, `backgroundWorkers: true`, and `diskHeadroom: true`. `storage` represents a cached real SQLite write/rollback probe. Worker checks require recent successful cycles and go red after an error until a later successful cycle, or when a cycle becomes stale. HTTP 200 from `/health` is not sufficient to accept paid traffic.
+Expected result is HTTP 200 with `status: "ready"`, `storage: true`, `poller: true`, `reconciler: true`, `backgroundWorkers: true`, and `diskHeadroom: true`. `storage` represents a cached real SQLite write/rollback probe. Worker readiness starts unproven after restart and requires fresh functional Indexer evidence. A shared, rate-bounded read-only probe can establish recovery without a customer watch; idle or no-op cycles cannot. A systemic error, stale evidence, or stalled cycle makes readiness red. HTTP 200 from `/health` is not sufficient to accept paid traffic.
 
 Unpaid x402 preflight:
 

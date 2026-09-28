@@ -130,7 +130,7 @@ This runner is for explicitly authorized evidence collection, not routine health
 
 ## Availability and privacy assumptions
 
-- `GET /health` is a liveness signal only. `GET /ready` is the paid-traffic readiness signal. Storage readiness is a cached real SQLite write/rollback probe rather than a read-only schema query; production readiness also requires fresh successful poller/reconciler cycles and a configured database-filesystem free-space floor. New paid watch creation fails with HTTP 503 before x402 verification while readiness is red.
+- `GET /health` is a liveness signal only. `GET /ready` is the paid-traffic readiness signal. Storage readiness is a cached real SQLite write/rollback probe rather than a read-only schema query; production readiness also requires fresh functional Indexer evidence for poller/reconciler, non-stalled worker cycles, and a configured database-filesystem free-space floor. Empty cycles do not establish recovery after a failure or restart. New paid watch creation fails with HTTP 503 before x402 verification while readiness is red.
 - Watch-specific HTTP responses use `Cache-Control: no-store` so intermediary/browser caches are not asked to retain evolving payment metadata.
 - The current service is a single instance with in-process workers and local SQLite. It has no multi-instance leader election or distributed queue.
 - Availability depends on Render, its persistent disk, GoPlausible, the configured AlgoNode Indexer, and Algorand MainNet.

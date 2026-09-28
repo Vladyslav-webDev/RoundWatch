@@ -1,5 +1,6 @@
 import type { TransactionIdPage } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
    IndexerRequestTurnBudget,
@@ -7,6 +8,7 @@ import {
 } from './roundwatch-work-budget.js';
 import {
    WorkerHealthTracker,
+   type CustomerTurnOutcome,
    type WorkerCycleOutcome,
    type WorkerHealthSnapshot,
 } from './roundwatch-worker-health.js';
@@ -54,17 +56,21 @@ interface AbsenceProofSession {
 export class SettlementReconciler {
    private timer: NodeJS.Timeout | undefined;
    private running = false;
+   private scheduledRunning = false;
+   private generation = 0;
    private readonly absenceProofSessions = new Map<string, AbsenceProofSession>();
    private readonly now: () => Date;
    private readonly baseBackoffMilliseconds: number;
    private readonly maxBackoffMilliseconds: number;
    private readonly workerHealth = new WorkerHealthTracker();
+   private lastObservedProbeRevision = 0;
 
    constructor(
       private readonly store: RoundWatchStore,
       private readonly indexer: SettlementLookupIndexer,
       private readonly config: SettlementReconcilerConfig,
       private readonly economicsMetrics?: RoundWatchEconomicsMetrics,
+      private readonly healthProbe?: IndexerHealthProbe,
    ) {
       this.now = config.now ?? (() => new Date());
       this.baseBackoffMilliseconds = config.baseBackoffMilliseconds ?? 1_000;
@@ -73,24 +79,41 @@ export class SettlementReconciler {
 
    start(): void {
       if (this.timer) return;
+      this.generation += 1;
+      this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
       this.workerHealth.markStarted();
       const run = () => {
-         if (this.running) return;
+         if (this.scheduledRunning) return;
+         this.scheduledRunning = true;
+         const generation = this.generation;
 
          this.workerHealth.markCycleStarted();
          void this.reconcileOnce(() =>
-            this.workerHealth.markCycleProgress(),
+            { if (generation === this.generation) this.workerHealth.markCycleProgress(); },
          )
-            .then(outcome => {
+            .then(async outcome => {
+               if (generation !== this.generation) return;
+               if (outcome.failed > 0) {
+                  this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
+               }
+               if (this.healthProbe && outcome.failed === 0) {
+                  const sample = await this.healthProbe.runIfDue();
+                  if (generation !== this.generation) return;
+                  if (sample.revision > this.lastObservedProbeRevision) {
+                     this.lastObservedProbeRevision = sample.revision;
+                     this.workerHealth.markProbeResult(sample.evidence.reconciliation);
+                  }
+               }
                this.workerHealth.markCycleCompleted(outcome);
             })
             .catch(error => {
-               this.workerHealth.markCycleFailed();
+               if (generation === this.generation) this.workerHealth.markCycleFailed();
                console.error(
                   'RoundWatch settlement reconciliation failed:',
                   safeErrorMessage(error),
                );
-            });
+            })
+            .finally(() => { this.scheduledRunning = false; });
       };
       run();
       this.timer = setInterval(run, this.config.intervalMilliseconds);
@@ -98,6 +121,7 @@ export class SettlementReconciler {
    }
 
    stop(): void {
+      this.generation += 1;
       this.workerHealth.markStopped();
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
@@ -105,7 +129,7 @@ export class SettlementReconciler {
 
    healthSnapshot(): WorkerHealthSnapshot {
       return this.workerHealth.snapshot(
-         Math.max(this.config.intervalMilliseconds * 3, 15_000),
+         Math.max(this.config.intervalMilliseconds * 3, 45_000),
       );
    }
 
@@ -127,8 +151,13 @@ export class SettlementReconciler {
          for (const watch of this.store.listSettlementReconciliationCandidates()) {
             outcome.attempted += 1;
             try {
-               await this.reconcileWatch(watch);
-               outcome.succeeded += 1;
+               const turn = await this.reconcileWatch(watch);
+               if (turn.kind === 'progressed') outcome.succeeded += 1;
+               else if (turn.kind === 'providerEvidenceOnly') outcome.providerEvidenceOnly =
+                  (outcome.providerEvidenceOnly ?? 0) + 1;
+               else outcome.noOp = (outcome.noOp ?? 0) + 1;
+               if (turn.providerEvidence) outcome.providerEvidence =
+                  (outcome.providerEvidence ?? 0) + 1;
                onProgress?.();
             } catch (error) {
                outcome.failed += 1;
@@ -143,7 +172,7 @@ export class SettlementReconciler {
       return outcome;
    }
 
-   private async reconcileWatch(watch: WatchRecord): Promise<void> {
+   private async reconcileWatch(watch: WatchRecord): Promise<CustomerTurnOutcome> {
       const workClaim = this.store.claimWorkUnit(watch.id);
       if (workClaim === 'exhausted') {
          this.absenceProofSessions.delete(watch.id);
@@ -151,9 +180,9 @@ export class SettlementReconciler {
          console.warn(
             `RoundWatch work budget exhausted during settlement reconciliation watch=${watch.id}; terminal state=indeterminate`,
          );
-         return;
+         return { kind: 'noOp', providerEvidence: false };
       }
-      if (workClaim !== 'claimed') return;
+      if (workClaim !== 'claimed') return { kind: 'noOp', providerEvidence: false };
 
       this.recordMetric(() => {
          this.economicsMetrics?.recordWorkUnit(watch.id);
@@ -166,11 +195,11 @@ export class SettlementReconciler {
       );
 
       const expectedTransaction = watch.expectedServiceTransaction;
-      if (!expectedTransaction) return;
+      if (!expectedTransaction) return { kind: 'noOp', providerEvidence: false };
       if (!hasImmutableTerms(watch)) {
          // Legacy rows cannot receive fabricated purchase terms or a terminal proof.
          this.defer(watch);
-         return;
+         return { kind: 'noOp', providerEvidence: false };
       }
 
       let session = this.absenceProofSessions.get(watch.id);
@@ -186,7 +215,7 @@ export class SettlementReconciler {
          if (transfer) {
             this.absenceProofSessions.delete(watch.id);
             this.applyConfirmed(watch, transfer);
-            return;
+            return { kind: 'progressed', providerEvidence: true };
          }
 
          const currentRound = await requestBudget.run(() =>
@@ -197,7 +226,7 @@ export class SettlementReconciler {
          );
          if (currentRound <= watch.serviceLastValid) {
             this.defer(watch);
-            return;
+            return { kind: 'providerEvidenceOnly', providerEvidence: true };
          }
 
          session = {
@@ -224,7 +253,7 @@ export class SettlementReconciler {
       if (found) {
          this.absenceProofSessions.delete(watch.id);
          this.applyConfirmed(watch, found);
-         return;
+         return { kind: 'progressed', providerEvidence: true };
       }
 
       if (page.nextToken) {
@@ -240,7 +269,7 @@ export class SettlementReconciler {
          session.seenTokens.add(page.nextToken);
          session.nextToken = page.nextToken;
          this.defer(watch);
-         return;
+         return { kind: 'providerEvidenceOnly', providerEvidence: true };
       }
 
       this.absenceProofSessions.delete(watch.id);
@@ -258,6 +287,7 @@ export class SettlementReconciler {
       console.error(
          `RoundWatch service transaction remained absent after LastValid for watch ${watch.id}`,
       );
+      return { kind: 'progressed', providerEvidence: true };
    }
 
    private applyConfirmed(watch: WatchRecord, transfer: IndexedAssetTransfer): void {

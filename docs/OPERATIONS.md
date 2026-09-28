@@ -11,11 +11,23 @@ Use the endpoints for different purposes:
 
 - `GET /health` is liveness only. It proves that the HTTP process can answer.
 - `GET /ready` is the paid-traffic readiness signal. It uses a cached real
-  SQLite write/rollback probe, requires healthy poller and reconciler work,
-  treats a cycle where every attempted obligation fails as unready, accepts
-  live successful per-obligation progress as a heartbeat during long bounded
-  sweeps, and requires the configured minimum free space on the database
-  filesystem.
+  SQLite write/rollback probe, fresh functional Indexer evidence for both the
+  scan and reconciliation routes, non-stalled poller and reconciler cycles,
+  and the configured minimum free space on the database filesystem. Empty,
+  no-op, exhausted, and isolated-terminal customer turns do not establish
+  provider recovery. A systemic failure closes readiness even if another
+  watch succeeds in the same cycle.
+
+On startup, provider health is unknown until a fresh read-only probe succeeds.
+The workers share one probe, attempted at most once per 15 seconds, with at
+most four Indexer requests through the normal dispatcher. It checks the
+Indexer tip, a representative configured asset scan, transaction lookup, and
+transaction-ID search. Probes never claim customer work or change watch rows;
+provider evidence expires after 45 seconds by default (or three configured
+worker intervals, if longer). A failing functional route keeps readiness red
+even when `/health` answers. An expected 404 for a synthetic transaction ID
+shows lookup route availability but cannot prove every historical lookup
+semantic; investigate persistent readiness failures against the actual route.
 
 After every deployment, require `/ready` to return HTTP 200 before directing
 new paid watch creation traffic. The application also refuses new paid watch

@@ -15,6 +15,7 @@ import {
    resolveScanQueryVariant,
 } from './roundwatch-indexer.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import { IndexerHealthProbe } from './roundwatch-health-probe.js';
 import {
    DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
    RoundWatchRuntimeSampler,
@@ -273,6 +274,10 @@ const indexer = new AlgorandIndexerClient(
    economicsMetrics,
    scanQueryVariant,
 );
+const healthProbe = new IndexerHealthProbe(
+   indexer,
+   networkConfig.usdcAssetIdNumber,
+);
 const poller = new RoundWatchPoller(
    store,
    indexer,
@@ -282,6 +287,7 @@ const poller = new RoundWatchPoller(
    economicsMetrics,
    scanPageCacheEntries,
    scanPageCacheBytes,
+   healthProbe,
 );
 const reconciler = new SettlementReconciler(
    store,
@@ -291,6 +297,7 @@ const reconciler = new SettlementReconciler(
       intervalMilliseconds: reconciliationIntervalMilliseconds,
    },
    economicsMetrics,
+   healthProbe,
 );
 const app = createApp({
    avmAddress,
