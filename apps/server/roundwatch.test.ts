@@ -199,7 +199,7 @@ test('machine-readable OpenAPI describes the live MainNet RoundWatch contract wi
          create?.['x-x402']?.asset,
          MAINNET_NETWORK_CONFIG.usdcAssetId,
       );
-      assert.equal(create?.['x-x402']?.servicePriceAtomicAmount, '20000');
+      assert.equal(create?.['x-x402']?.servicePriceAtomicAmount, '100000');
       assert.equal(create?.['x-x402']?.payTo, RECEIVER);
       assert.equal(
          create?.['x-x402']?.watchEligibility?.roundBoundary?.operator,
@@ -290,7 +290,7 @@ test('llms.txt explains when agents should and should not use RoundWatch', async
          body,
          /https:\/\/roundwatch-api\.onrender\.com\/openapi\.json/,
       );
-      assert.match(body, /0\.02 USDC \(20000 atomic units\)/);
+      assert.match(body, /0\.10 USDC \(100000 atomic units\)/);
       assert.match(body, /before semantic body validation/i);
       assert.match(body, /invalid watch specifications return HTTP 400/i);
       assert.match(body, /oversized bodies return HTTP 413/i);
@@ -469,7 +469,7 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
       );
       assert.equal(
          prepareBody.result?.structuredContent?.x402?.servicePriceAtomicAmount,
-         '20000',
+         '100000',
       );
       assert.equal(
          prepareBody.result?.structuredContent?.x402?.network,
@@ -2255,7 +2255,7 @@ test('TestNet remains the default and the x402 requirement preserves network, as
       const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
       assert.equal(required.network, ALGORAND_TESTNET);
       assert.equal(required.payTo, RECEIVER);
-      assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '20000');
+      assert.equal(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, '100000');
       assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
       assert.equal(required.extra?.asset, String(TESTNET_USDC_ASSET_ID));
       const description = String(
