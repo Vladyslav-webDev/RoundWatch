@@ -2,7 +2,7 @@ import { BrandMark, Icon } from "./graphics";
 
 const API_BASE = "https://roundwatch-api.onrender.com";
 const REPOSITORY = "https://github.com/Vladyslav-webDev/RoundWatch";
-const EXAMPLE_SENDER = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ";
+const EXAMPLE_SENDER = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4";
 const EXAMPLE_RECEIVER = "AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI";
 
 function QuickstartBrand() {
@@ -35,6 +35,13 @@ export default function QuickstartPage() {
   -H "content-type: application/json" \\
   --data '{"idempotencyKey":"invoice-2026-09-17-001","expectedSender":"${EXAMPLE_SENDER}","expectedReceiver":"${EXAMPLE_RECEIVER}","atomicAmount":"1","invoiceNote":"roundwatch:invoice-2026-09-17-001"}'`;
 
+  const expectedServiceContract = `x402Version: 2
+scheme: exact
+network: algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=
+asset: 31566704
+amount: 100000
+payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
+
   const statusRequest = `curl -sS ${API_BASE}/v1/watch/YOUR_WATCH_ID`;
 
   return (
@@ -54,7 +61,7 @@ export default function QuickstartPage() {
         <section className="quickstart-hero">
           <p className="eyebrow">Quickstart / MainNet</p>
           <h1>
-            Start in 60 seconds.
+            Integrate in 5 minutes.
             <br />
             <span>Create the watch. Let RoundWatch own the wait.</span>
           </h1>
@@ -102,9 +109,15 @@ export default function QuickstartPage() {
               </p>
               <CodeBlock>{unpaidRequest}</CodeBlock>
               <p className="quickstart-note">
+                The first request is unpaid. For the current production contract,
+                the approved payment requirement is:
+              </p>
+              <CodeBlock>{expectedServiceContract}</CodeBlock>
+              <p className="quickstart-note">
                 Before a paid MainNet retry, verify the advertised network, asset,
-                amount, receiver, and resource URL. The guarded reference client in
-                this repository performs those checks before it can spend.
+                amount, receiver, and resource URL. The current service payment is
+                exactly 0.10 USDC. The guarded reference client in this repository
+                performs these checks before it can spend.
               </p>
             </div>
           </article>
