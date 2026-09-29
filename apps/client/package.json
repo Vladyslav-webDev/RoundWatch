@@ -16,7 +16,12 @@
     "probe:black-box": "tsx black-box-qualification.ts",
     "probe:bazaar-recatalog": "tsx bazaar-recatalog.ts",
     "probe:bazaar-payload": "tsx bazaar-payload-echo.ts",
-    "probe:bazaar-forensics": "tsx bazaar-catalog-forensics.ts"
+    "probe:bazaar-forensics": "tsx bazaar-catalog-forensics.ts",
+    "mainnet:preflight": "tsx mainnet-e2e.ts preflight",
+    "mainnet:start": "tsx mainnet-e2e.ts start --confirm-mainnet",
+    "mainnet:recover": "tsx mainnet-e2e.ts recover",
+    "mainnet:status": "tsx mainnet-e2e.ts status",
+    "mainnet:pay": "tsx mainnet-e2e.ts pay --confirm-mainnet"
   },
   "dependencies": {
     "@x402/avm": "2.25.0",
