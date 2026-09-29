@@ -71,8 +71,8 @@ test('MainNet runtime accepts only the approved production server and HTTPS Algo
    );
 });
 
-test('MainNet service safety amount is the repriced 0.02 USDC contract', () => {
-   assert.equal(SERVICE_ATOMIC_AMOUNT, '20000');
+test('MainNet service safety amount is the repriced 0.10 USDC contract', () => {
+   assert.equal(SERVICE_ATOMIC_AMOUNT, '100000');
 });
 
 test('valid MainNet checkpoint and matching watch pass hard safety validation', () => {

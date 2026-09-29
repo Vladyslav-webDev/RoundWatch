@@ -8,7 +8,7 @@ test('summarizes an exact RoundWatch discovery item', () => {
       resource: 'https://roundwatch-api.onrender.com/v1/watch',
       accepts: [
          {
-            amount: '20000',
+            amount: '100000',
             payTo: 'EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY',
             extra: {
                tag: 'x402-global-challenge',
@@ -34,7 +34,7 @@ test('summarizes an exact RoundWatch discovery item', () => {
    assert.ok(result.signals.includes('service_receiver'));
    assert.ok(result.signals.includes('challenge_tag'));
    assert.ok(result.signals.includes('roundwatch_text'));
-   assert.deepEqual(result.amounts, ['20000']);
+   assert.deepEqual(result.amounts, ['100000']);
 });
 
 test('finds a mutated resource that still carries RoundWatch identity signals', () => {

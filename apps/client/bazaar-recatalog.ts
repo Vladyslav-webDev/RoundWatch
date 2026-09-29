@@ -123,7 +123,7 @@ async function main(): Promise<void> {
 
    if (!process.argv.includes(CONFIRM_FLAG)) {
       throw new Error(
-         `This command settles one real MainNet RoundWatch service payment of 0.02 USDC plus the Algorand network fee. Re-run with ${CONFIRM_FLAG} only after explicit human authorization for this exact spend.`,
+         `This command settles one real MainNet RoundWatch service payment of 0.10 USDC plus the Algorand network fee. Re-run with ${CONFIRM_FLAG} only after explicit human authorization for this exact spend.`,
       );
    }
 
@@ -280,7 +280,7 @@ function printUsage(): void {
       '  tsx bazaar-recatalog.ts preflight              # free/read-only; never signs or pays',
    );
    console.log(
-      '  tsx bazaar-recatalog.ts settle --confirm-mainnet # spends exactly one 0.02 USDC service payment + network fee',
+      '  tsx bazaar-recatalog.ts settle --confirm-mainnet # spends exactly one 0.10 USDC service payment + network fee',
    );
 }
 

@@ -10,7 +10,7 @@ Prove the current production sequence:
 
 1. production readiness is healthy;
 2. an unpaid `POST /v1/watch` returns the approved MainNet x402 requirement;
-3. the paid retry settles exactly `0.02 USDC` to the approved RoundWatch receiver;
+3. the paid retry settles exactly `0.10 USDC` to the approved RoundWatch receiver;
 4. a durable watch is returned in `active` state with a nonzero exact sender;
 5. a separate `0.000001 USDC` MainNet transfer confirms after activation;
 6. RoundWatch exact-matches sender, receiver, USDC ASA 31566704, amount, and note;
@@ -27,7 +27,7 @@ The runner is pinned to:
 - network: Algorand MainNet
 - asset: Circle USDC ASA `31566704`
 - service receiver: `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`
-- service payment: exactly `0.02 USDC`
+- service payment: exactly `0.10 USDC`
 - watched invoice: exactly one USDC atomic unit (`0.000001 USDC`)
 
 `start` and `pay` require the explicit `--confirm-mainnet` path embedded in
@@ -64,7 +64,7 @@ apps/client/data/roundwatch-mainnet-live.json
 ```
 
 Also verify in Pera Wallet that the payer account has enough MainNet USDC and
-ALGO for `0.020001 USDC` plus network fees.
+ALGO for `0.100001 USDC` plus network fees.
 
 ## Paid phase 1: create the durable watch
 

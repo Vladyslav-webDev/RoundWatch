@@ -1,6 +1,6 @@
 # RoundWatch MainNet readiness
 
-Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-economics production deployment are proven. The exact RoundWatch resource is present in GoPlausible Bazaar, but its stored payment/discovery metadata is stale at the original 0.001 USDC contract while live production charges 0.02 USDC.
+Status: production API, paid MainNet E2E, durable invoice match, Bazaar discovery, challenge attribution, correctness/resource hardening, bounded-work economics controls, and the post-remediation MainNet canary are proven. The live service contract is now 0.10 USDC (`100000` atomic units). GoPlausible catalog freshness must be requalified after this repricing because the resource previously retained stale 0.001 USDC discovery terms.
 
 This is a dated evidence record, not an availability or performance guarantee.
 
@@ -14,7 +14,7 @@ This is a dated evidence record, not an availability or performance guarantee.
 | Circle USDC | ASA `31566704` |
 | Watch route | `POST /v1/watch` |
 | Status route | `GET /v1/watch/:id` |
-| Service price | `0.02 USDC` (`20000` atomic units) |
+| Service price | `0.10 USDC` (`100000` atomic units) |
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
 | Facilitator | `https://facilitator.goplausible.xyz` |
 | Hosting | Render with persistent SQLite disk mounted at `/data` |
@@ -23,7 +23,7 @@ This is a dated evidence record, not an availability or performance guarantee.
 
 The production server has no mnemonic or private key. The dedicated payer signs locally.
 
-Economics v1 is live at `0.02 USDC` (`20000` atomic units). On 2026-09-20, an external unsigned production `POST /v1/watch` received HTTP `402` and verified the exact MainNet resource contract: `exact` scheme, ASA `31566704`, amount `20000`, approved service receiver, and `x402-global-challenge` tag. The historical paid E2E below remains evidence of the earlier `1000`-atomic contract and is intentionally unchanged.
+Economics v1 was deployed at `0.02 USDC` (`20000` atomic units). On 2026-09-20, an external unsigned production `POST /v1/watch` verified that then-live contract. The service was repriced on 2026-09-29 to `0.10 USDC` (`100000` atomic units) without changing the watch duration or durable work budget. The historical paid E2E below remains evidence of the earlier `1000`-atomic contract and is intentionally unchanged.
 
 ## Production hardening and current release
 
@@ -172,7 +172,7 @@ The GoPlausible merchant leaderboard also contained RoundWatch with `bazaar: tru
 
 On **2026-09-24**, read-only qualification decoded a valid live `402` with the expected Bazaar metadata and completed the full GoPlausible catalog. The first parser incorrectly reported the resource absent because it did not recognize GoPlausible's top-level `resourceUrl` field. Raw catalog forensics later found the exact production URL and receiver.
 
-The catalog entry is stale: `accepts[0].amount` remains `1000` atomic (0.001 USDC) from 2026-09-16, while live production advertises `20000` atomic (0.02 USDC). After an explicitly authorized fresh 0.02 USDC settlement, the same record advanced to `settleCount: 3` and `lastSeen: 2026-09-24T12:07:27.130Z` without refreshing the stored price/discovery metadata. This is a distribution/catalog freshness defect, not a payment-runtime failure.
+The catalog entry was observed stale: `accepts[0].amount` remained `1000` atomic (0.001 USDC) from 2026-09-16 while production then advertised `20000` atomic (0.02 USDC). After an explicitly authorized 0.02 USDC settlement, the same record advanced to `settleCount: 3` and `lastSeen: 2026-09-24T12:07:27.130Z` without refreshing the stored price/discovery metadata. The 2026-09-29 repricing to `100000` atomic (0.10 USDC) therefore requires a fresh catalog qualification rather than assuming automatic refresh. This is a distribution/catalog freshness defect, not a payment-runtime failure.
 
 The merchant directory independently contains the RoundWatch receiver and reports three resources and six total settlements. The observed GoPlausible `payTo` query parameter did not narrow the resource list: both filtered and unfiltered requests returned 2,232 resources.
 
@@ -201,7 +201,7 @@ The merchant directory independently contains the RoundWatch receiver and report
 | Paid MainNet service purchase | Passed | Settlement transaction and active watch recorded below |
 | Later exact invoice match | Passed | Same invoice txid and round recorded by Indexer and RoundWatch |
 | Persistence through redeploy | Passed | Existing matched watch unchanged after multiple redeploys |
-| Bazaar discovery metadata | Partial: exact resource present, catalog terms stale | Live `402` metadata is current at 0.02 USDC, but GoPlausible still stores the 2026-09-16 0.001 USDC payment/discovery terms despite observing the fresh 2026-09-24 settlement |
+| Bazaar discovery metadata | Requalification required after repricing | Live `402` metadata is generated from the 0.10 USDC contract; GoPlausible previously retained stale 2026-09-16 terms after a fresh settlement, so the catalog must be checked again rather than assumed current |
 | Challenge attribution | Passed | Merchant entry reported `challenge: true` |
 
 ## Current release state

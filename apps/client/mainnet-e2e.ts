@@ -199,7 +199,7 @@ async function runPreflight(sender: string): Promise<void> {
    console.log('Unpaid create-watch challenge: HTTP 402 and approved x402 requirement');
    console.log('No transaction was constructed, signed, or broadcast.');
    console.log(`Existing checkpoint: ${existsSync(statePath) ? statePath : 'none'}`);
-   console.log('Authorized paid canary cost after explicit confirmation: 0.02 USDC service payment + 0.000001 USDC watched invoice + Algorand network fees.');
+   console.log('Authorized paid canary cost after explicit confirmation: 0.10 USDC service payment + 0.000001 USDC watched invoice + Algorand network fees.');
 }
 
 async function startWatch(
@@ -461,7 +461,7 @@ function watchRequestBody(state: MainnetCheckpoint): Record<string, string> {
 function printUsage(): void {
    console.log('Usage:');
    console.log('  tsx mainnet-e2e.ts preflight                 # read-only; validates readiness, Algod, and HTTP 402 contract');
-   console.log('  tsx mainnet-e2e.ts start --confirm-mainnet   # spends 0.02 USDC service payment');
+   console.log('  tsx mainnet-e2e.ts start --confirm-mainnet   # spends 0.10 USDC service payment');
    console.log('  tsx mainnet-e2e.ts recover                   # read-only recovery; cannot sign or settle');
    console.log('  tsx mainnet-e2e.ts status                    # read-only');
    console.log('  tsx mainnet-e2e.ts pay --confirm-mainnet     # spends 0.000001 USDC invoice payment + network fee');
