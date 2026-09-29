@@ -44,12 +44,18 @@ const statePath = resolve('data/roundwatch-mainnet-live.json');
 async function main(): Promise<void> {
    const mode = process.argv[2];
 
-   if (!['start', 'recover', 'status', 'pay'].includes(mode ?? '')) {
+   if (!['preflight', 'start', 'recover', 'status', 'pay'].includes(mode ?? '')) {
       printUsage();
       process.exit(2);
    }
 
    assertStaticSafety();
+
+   if (mode === 'preflight') {
+      const account = getPayerAccount();
+      await runPreflight(account.addr.toString());
+      return;
+   }
 
    if (mode === 'status') {
       const state = validateMainnetCheckpoint(readState(), {
@@ -130,6 +136,69 @@ function getPayerAccount(): algosdk.Account {
    }
 
    return algosdk.mnemonicToSecretKey(mnemonic);
+}
+
+async function runPreflight(sender: string): Promise<void> {
+   const readiness = await fetch(`${serverUrl}/ready`);
+   const readinessBody = await readiness.json() as {
+      status?: string;
+      network?: string;
+   };
+
+   if (
+      !readiness.ok ||
+      readinessBody.status !== 'ready' ||
+      readinessBody.network !== 'mainnet'
+   ) {
+      throw new Error(
+         `Production readiness preflight failed: HTTP ${readiness.status}; network=${readinessBody.network ?? 'unknown'}`,
+      );
+   }
+
+   // Verify the configured Algod endpoint is reachable without constructing,
+   // signing, or broadcasting a transaction.
+   const algod = new algosdk.Algodv2('', algodUrl, '');
+   await algod.getTransactionParams().do();
+
+   const nonce = randomUUID();
+   const requestBody: MainnetCheckpoint = {
+      network: ALGORAND_MAINNET,
+      assetId: USDC_MAINNET_ASA_ID,
+      serverUrl: DEFAULT_SERVER_URL,
+      idempotencyKey: `mainnet-${nonce}`,
+      expectedSender: sender,
+      expectedReceiver: EXPECTED_RECEIVER,
+      atomicAmount: INVOICE_ATOMIC_AMOUNT,
+      invoiceNote: `roundwatch:mainnet:${nonce}`,
+   };
+
+   const watchUrl = `${serverUrl}/v1/watch`;
+   const unpaid = await fetch(watchUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(watchRequestBody(requestBody)),
+   });
+
+   if (unpaid.status !== 402) {
+      throw new Error(`Expected unpaid HTTP 402, received ${unpaid.status}`);
+   }
+
+   const paymentRequiredHeader = unpaid.headers.get('payment-required');
+   if (!paymentRequiredHeader) {
+      throw new Error('HTTP 402 did not contain PAYMENT-REQUIRED');
+   }
+
+   const paymentRequired = decodePaymentRequiredHeader(paymentRequiredHeader);
+   assertApprovedRoundWatchPayment(paymentRequired, watchUrl);
+
+   console.log('ROUNDWATCH MAINNET PREFLIGHT PASSED');
+   console.log(`Payer address: ${sender}`);
+   console.log('Production readiness: ready');
+   console.log('Algod connectivity: ok');
+   console.log('Unpaid create-watch challenge: HTTP 402 and approved x402 requirement');
+   console.log('No transaction was constructed, signed, or broadcast.');
+   console.log(`Existing checkpoint: ${existsSync(statePath) ? statePath : 'none'}`);
+   console.log('Authorized paid canary cost after explicit confirmation: 0.02 USDC service payment + 0.000001 USDC watched invoice + Algorand network fees.');
 }
 
 async function startWatch(
@@ -390,6 +459,7 @@ function watchRequestBody(state: MainnetCheckpoint): Record<string, string> {
 
 function printUsage(): void {
    console.log('Usage:');
+   console.log('  tsx mainnet-e2e.ts preflight                 # read-only; validates readiness, Algod, and HTTP 402 contract');
    console.log('  tsx mainnet-e2e.ts start --confirm-mainnet   # spends 0.02 USDC service payment');
    console.log('  tsx mainnet-e2e.ts recover                   # read-only recovery; cannot sign or settle');
    console.log('  tsx mainnet-e2e.ts status                    # read-only');
