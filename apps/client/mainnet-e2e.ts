@@ -70,6 +70,7 @@ async function main(): Promise<void> {
       validateMainnetCheckpoint(state, {
          runtimeServerUrl: serverUrl,
          requireWatchId: true,
+         requirePayableWatch: false,
          watch,
       });
       console.log(JSON.stringify({ checkpoint: state, watch }, null, 2));
@@ -469,5 +470,7 @@ function printUsage(): void {
 main().catch(error => {
    console.error('ROUNDWATCH MAINNET E2E ERROR');
    console.error(error instanceof Error ? error.message : error);
-   process.exit(1);
+   // Let Node drain open async handles naturally. Calling process.exit() while
+   // fetch/undici handles are closing can trigger a libuv assertion on Windows.
+   process.exitCode = 1;
 });

@@ -87,6 +87,32 @@ test('valid MainNet checkpoint and matching watch pass hard safety validation', 
    );
 });
 
+test('status inspection can validate an expired watch without making it payable', () => {
+   const expired = { ...WATCH, state: 'expired' };
+
+   assert.deepEqual(
+      validateMainnetCheckpoint(CHECKPOINT, {
+         runtimeServerUrl: DEFAULT_SERVER_URL,
+         payerAddress: PAYER,
+         requireWatchId: true,
+         requirePayableWatch: false,
+         watch: expired,
+      }),
+      CHECKPOINT,
+   );
+
+   assert.throws(
+      () =>
+         validateMainnetCheckpoint(CHECKPOINT, {
+            runtimeServerUrl: DEFAULT_SERVER_URL,
+            payerAddress: PAYER,
+            requireWatchId: true,
+            watch: expired,
+         }),
+      /state is not payable: expired/,
+   );
+});
+
 test('MainNet checkpoint validation fails closed on payment-critical mismatches', () => {
    const invalidCases: Array<[string, Record<string, unknown>]> = [
       ['network', { ...CHECKPOINT, network: 'algorand:testnet' }],

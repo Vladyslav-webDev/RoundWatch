@@ -46,6 +46,7 @@ export interface CheckpointValidationOptions {
    runtimeServerUrl: string;
    payerAddress?: string;
    requireWatchId?: boolean;
+   requirePayableWatch?: boolean;
    watch?: MainnetWatchSnapshot;
 }
 
@@ -284,7 +285,11 @@ export function validateMainnetCheckpoint(
    }
 
    if (options.watch) {
-      validateWatchSnapshot(checkpoint, options.watch);
+      validateWatchSnapshot(
+         checkpoint,
+         options.watch,
+         options.requirePayableWatch ?? true,
+      );
    }
 
    return checkpoint as unknown as MainnetCheckpoint;
@@ -293,12 +298,17 @@ export function validateMainnetCheckpoint(
 function validateWatchSnapshot(
    checkpoint: Record<string, unknown>,
    watch: MainnetWatchSnapshot,
+   requirePayableWatch: boolean,
 ): void {
    if (!checkpoint.watchId || watch.id !== checkpoint.watchId) {
       throw new Error('MainNet watch response does not match the checkpoint watchId');
    }
 
-   if (watch.state !== 'active' && watch.state !== 'matched') {
+   if (
+      requirePayableWatch &&
+      watch.state !== 'active' &&
+      watch.state !== 'matched'
+   ) {
       throw new Error(`MainNet watch state is not payable: ${watch.state}`);
    }
 
