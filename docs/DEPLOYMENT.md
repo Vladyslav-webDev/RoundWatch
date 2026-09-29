@@ -105,7 +105,7 @@ GET  /v1/watch/:id
 GET  /demo
 ```
 
-Production `/v1/watch` is priced at `0.10 USDC` (`100000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`. This contract was externally confirmed after the 2026-09-20 Economics v1 deployment with an unsigned HTTP `402` preflight.
+Production `/v1/watch` is priced at `0.10 USDC` (`100000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`. The predecessor `0.02 USDC` contract was externally confirmed after the 2026-09-20 Economics v1 deployment; after this repricing, the `100000`-atomic contract must be re-confirmed with the free unsigned HTTP `402` preflight before any paid price canary.
 
 The challenge-release policy gives each accepted watch a chain-time eligibility deadline 30 minutes from durable creation and an immutable 500-turn durable background work budget, with at most 50 unfinished obligations globally and 5 per verified service payer. A watched invoice is eligible only when `confirmed-round > activationRound` and `round-time < expiresAt`; same-round and exact-deadline payments are excluded. Wall time alone does not expire it; validated chain coverage through a fixed closing checkpoint does. Work-budget exhaustion terminates as `indeterminate`, never as a fabricated `expired`. Capacity exhaustion returns HTTP `429` before x402 settlement. These values are operational safeguards, not a commercial SLA.
 
