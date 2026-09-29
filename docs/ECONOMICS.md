@@ -1,6 +1,6 @@
 # RoundWatch Economics Audit v1
 
-Status: Economics v1 is deployed on production `main`; the live RoundWatch contract is `0.02 USDC` (`20000` atomic units) with an immutable 500-turn background work budget. Measurements below were collected during the `feat/economics-instrumentation-v1` audit and remain benchmark evidence rather than a hosting SLA.
+Status: Economics v1 controls remain deployed on production `main`; as of 2026-09-29 the live RoundWatch contract is `0.10 USDC` (`100000` atomic units) for one 30-minute watch with an immutable 500-turn background work budget. Measurements below were collected during the `feat/economics-instrumentation-v1` audit and remain benchmark evidence rather than a hosting SLA.
 
 ## Objective
 
@@ -107,24 +107,24 @@ Because fixed infrastructure dominates the currently measured cash cost, there i
 
 These are break-even counts for fixed infrastructure only. They are not profit forecasts and do not include future paid Indexer/facilitator plans, taxes, operator time, or payment-network costs borne by buyers.
 
-At the hard 2,000-background-request ceiling, a $0.02 watch could absorb an Indexer price of $10 per million requests before Indexer requests alone consume the full service revenue; a 50% pre-fixed-cost contribution margin would require an effective Indexer price no higher than $5 per million at that absolute ceiling. Normal watches should consume far less than the ceiling.
+At the hard 2,000-background-request ceiling, a $0.10 watch could absorb an Indexer price of $50 per million requests before Indexer requests alone consume the full service revenue; a 50% pre-fixed-cost contribution margin would require an effective Indexer price no higher than $25 per million at that absolute ceiling. Normal watches should consume far less than the ceiling.
 
 ## Launch pricing decision
 
-The original `$0.001` price is a challenge/proof-of-payment placeholder, not an economically justified commercial price.
+The original `$0.001` price was a challenge/proof-of-payment placeholder. Economics v1 first moved production to `$0.02` on 2026-09-20 so the service was no longer priced as a symbolic payment.
 
-Live production price: **$0.02 USDC per 30-minute watch** (`20000` atomic units). The Economics v1 release was deployed on 2026-09-20, and an external unsigned MainNet `POST /v1/watch` received HTTP `402` with the advertised amount `20000`, confirming the production contract without spending funds.
+On 2026-09-29 the service was repriced once more to **$0.10 USDC per 30-minute watch** (`100000` atomic units), without changing the 30-minute eligibility window or 500-turn durable work budget.
 
 Rationale:
 
-- $0.01 still requires about 725 watches/month merely to cover the present fixed hosting assumption.
-- $0.02 lowers fixed-cost break-even to about 363 watches/month while remaining a two-cent machine payment.
-- The 500-turn budget now prevents one purchased watch from becoming an unlimited service obligation.
-- Free signed-payment amplification is bounded before settlement.
-- Storage is negligible at current scale, so no retention surcharge is justified.
-- $0.02 leaves materially more room for a future metered Indexer than $0.005-$0.01 without introducing pricing tiers before demand exists.
+- one purchase buys a durable background obligation, not one short-lived JSON response;
+- the 500-turn budget prevents one purchased watch from becoming an unlimited service obligation;
+- at the present $7.25/month fixed-hosting assumption, $0.10 lowers fixed-cost break-even to about 73 watches/month before future variable provider charges;
+- free signed-payment amplification remains bounded before settlement;
+- storage remains negligible at current scale, so no retention surcharge is justified;
+- the higher price leaves materially more headroom for future metered Indexer/facilitator costs while staying a micro-payment.
 
-This is the current launch price, not proof that 363 monthly purchases will occur. At very low demand the service will still operate below cash break-even. Price must be revisited with real independent payer, repeat-buyer, completion, indeterminate-rate, and provider-cost data.
+The price is intentionally frozen during the current Challenge measurement window after this repricing unless a production safety defect requires a contract change. It is not proof that 73 monthly purchases will occur. Price should next be revisited using independent payer conversion, repeat-buyer usage, completion/indeterminate rates, and measured provider costs.
 
 ## Repricing triggers
 
