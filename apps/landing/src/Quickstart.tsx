@@ -67,7 +67,7 @@ export default function QuickstartPage() {
           <div className="quickstart-facts mono">
             <span>Algorand MainNet</span>
             <span>USDC ASA 31566704</span>
-            <span>0.02 USDC service fee</span>
+            <span>0.10 USDC service fee</span>
             <span>30 minute eligibility deadline</span>
           </div>
         </section>
@@ -199,7 +199,7 @@ export default function QuickstartPage() {
             </div>
             <div>
               <dt>Service fee</dt>
-              <dd>0.02 USDC</dd>
+              <dd>0.10 USDC</dd>
             </div>
             <div>
               <dt>Eligibility deadline</dt>
