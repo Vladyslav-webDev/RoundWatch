@@ -75,7 +75,7 @@ If the process stops or the round lookup fails, the watch remains non-active and
 - configured network;
 - service receiver;
 - network-selected USDC ASA;
-- exact `20000` atomic-unit service amount; and
+- exact `100000` atomic-unit service amount; and
 - prepared payer, when available.
 
 An absent transaction remains an ambiguous, retryable outcome. A found on-chain transfer with a definitive mismatch is marked terminal and remains fail-closed in public state `settlement_unknown`. Public watch records expose `settlementReconciliationTerminal`, so callers can distinguish a retryable unknown from a final reconciliation outcome without relying on a private database flag.
@@ -121,7 +121,7 @@ The repository's MainNet runner is deliberately narrow:
 - it accepts only the approved production base URL and HTTPS Algod URL;
 - it validates checkpoint network, asset, receiver, sender, amount, invoice note, UUIDs, and watch response;
 - it checks the unpaid x402 preflight and independently revalidates the fresh challenge selected at the actual payment-creation boundary for resource URL, exact scheme, MainNet CAIP-2, amount, asset, payee, challenge tag, and authorization flow before signing;
-- it caps the x402 client itself at the approved `0.02 USDC` service spend;
+- it caps the x402 client itself at the approved `0.10 USDC` service spend;
 - it refuses to start a second paid watch while its checkpoint exists;
 - `recover` uses a free existing-watch lookup, does not load a wallet signer, and cannot create or settle a new watch; exact unresolved matches return explicit retryable/terminal reconciliation metadata without disclosing a watch ID; and
 - only modes that can spend (`start` and `pay`) require `--confirm-mainnet`. `status` and `recover` are non-spending.
