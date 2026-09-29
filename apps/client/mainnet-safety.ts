@@ -8,7 +8,7 @@ import type {
 export const ALGORAND_MAINNET =
    'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=' as const;
 export const USDC_MAINNET_ASA_ID = 31_566_704;
-export const SERVICE_ATOMIC_AMOUNT = '20000';
+export const SERVICE_ATOMIC_AMOUNT = '100000';
 export const INVOICE_ATOMIC_AMOUNT = '1';
 export const MAX_INVOICE_ATOMIC_AMOUNT = 1n;
 export const EXPECTED_RECEIVER =
@@ -103,7 +103,7 @@ export function installRoundWatchPaymentSafety(
    watchUrl: string,
 ): x402Client {
    client.setSpendControls({
-      maxAmountPerPayment: '$0.02',
+      maxAmountPerPayment: '$0.10',
    });
 
    client.registerPolicy((x402Version, requirements) => {
