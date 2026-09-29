@@ -69,7 +69,7 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 | Network | Algorand MainNet |
 | CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
 | Asset | Circle USDC, ASA `31566704` |
-| Service price | `0.02 USDC` (`20000` atomic units) |
+| Service price | `0.10 USDC` (`100000` atomic units) |
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
 | Facilitator | `https://facilitator.goplausible.xyz` |
 | Hosting | Render, with persistent SQLite storage mounted at `/data` |
@@ -79,7 +79,7 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 
 The production server does not contain or need a wallet mnemonic or private key.
 
-> Economics v1 is live in production as of 2026-09-20 at `80ed94c746f2eac4a784a3738c6dbe8306ecfa3e`. An external unsigned `POST /v1/watch` received HTTP `402` and verified MainNet, `exact`, ASA `31566704`, the approved receiver, challenge tag, and amount `20000`. The historical paid MainNet proof below remains evidence of the earlier `0.001 USDC` contract.
+> Economics v1 was deployed on 2026-09-20 at `80ed94c746f2eac4a784a3738c6dbe8306ecfa3e` with a `0.02 USDC` (`20000` atomic) price. On 2026-09-29 the public service contract was repriced to `0.10 USDC` (`100000` atomic units) without changing the 30-minute watch or 500-turn work budget. Historical paid proofs below retain the price that was live when each proof was collected.
 
 ## API
 
@@ -339,7 +339,7 @@ A follow-up production fix at `d05fabaea6124ed5658dd13cf06167a885aefeb0` replace
 
 GoPlausible Bazaar had discovered the production resource on 2026-09-16 with the correct URL, network, asset, amount, receiver, challenge tag, and `settleCount: 1`. The merchant leaderboard entry then showed `bazaar: true`, `challenge: true`, `settles: 1`, and `volume: 0.001`. That is historical evidence, not a permanent catalog guarantee.
 
-A fresh 2026-09-24 qualification initially reported the RoundWatch resource absent, but raw catalog forensics corrected that parser error: GoPlausible stores the exact production URL under a top-level `resourceUrl` field. The resource is present, but its stored payment/discovery terms are stale at the original `1000` atomic (0.001 USDC) contract. A fresh authorized 0.02 USDC settlement advanced the same catalog record's `lastSeen` / `settleCount` without refreshing its stored `accepts` amount to the live `20000` atomic price.
+A fresh 2026-09-24 qualification initially reported the RoundWatch resource absent, but raw catalog forensics corrected that parser error: GoPlausible stores the exact production URL under a top-level `resourceUrl` field. The resource is present, but its stored payment/discovery terms are stale at the original `1000` atomic (0.001 USDC) contract. A fresh authorized 0.02 USDC settlement on 2026-09-24 advanced the same catalog record's `lastSeen` / `settleCount` without refreshing its stored `accepts` amount to the then-live `20000` atomic price. The catalog therefore requires fresh qualification after the 2026-09-29 repricing.
 
 Detailed evidence is in [MainNet Readiness](docs/MAINNET_READINESS.md).
 
