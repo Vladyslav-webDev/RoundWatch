@@ -102,3 +102,57 @@ This run does not prove arbitrary provider availability, horizontal multi-worker
 safety, multi-chain behavior, or every possible watch specification. It is a
 production proof that the repriced 0.10 USDC RoundWatch purchase and durable
 matching path works end to end on Algorand MainNet.
+
+
+## Bazaar post-reprice qualification
+
+After the successful 0.10 USDC canary, the public discovery path was
+requalified without spending additional funds.
+
+The live RoundWatch `POST /v1/watch` challenge was current and valid:
+
+- x402 version: `2`
+- scheme: `exact`
+- network: Algorand MainNet
+- amount: `100000` atomic USDC (`0.10 USDC`)
+- asset: `31566704`
+- receiver: `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`
+- challenge tag: `x402-global-challenge`
+- Bazaar extension shape: HTTP POST + JSON input/output
+
+The GoPlausible catalog was read to completion and contained one exact
+RoundWatch resource / receiver match. That record was stale after the successful
+0.10 USDC settlement:
+
+- catalog amount: `20000` atomic USDC (`0.02 USDC`)
+- settle count: `7`
+- last seen: `2026-09-29T16:04:37.596Z`
+- live paid watch activation: `2026-09-29T16:04:37.758Z`
+
+The near-identical timestamps show that the facilitator observed the fresh
+settlement and advanced catalog activity while retaining the predecessor price.
+
+A full catalog forensics pass found no duplicate RoundWatch record with the new
+price. The exact resource URL, RoundWatch host, service receiver, and RoundWatch
+text each resolved to one resource candidate.
+
+A local payment-payload echo probe then verified, without submitting a paid
+retry, that the current server-side Bazaar extension is copied into the
+client-created PaymentPayload unchanged:
+
+```text
+serverDeclared: true
+payloadEchoed: true
+sameJsonShape: true
+networkSubmissionPerformed: false
+```
+
+Therefore the stale `20000` catalog amount is not explained by the current
+RoundWatch challenge, duplicate catalog records, or loss of the Bazaar
+extension during client payload construction. No additional paid recatalog
+settlement was attempted because the successful 0.10 USDC settlement had
+already updated `lastSeen` / `settleCount` without refreshing the stored
+terms.
+
+The discovery search endpoint returned HTTP 404 during this qualification, so
+search ranking was not evaluated.
