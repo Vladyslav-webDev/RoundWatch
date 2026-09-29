@@ -105,7 +105,7 @@ GET  /v1/watch/:id
 GET  /demo
 ```
 
-Production `/v1/watch` is priced at `0.02 USDC` (`20000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`. This contract was externally confirmed after the 2026-09-20 Economics v1 deployment with an unsigned HTTP `402` preflight.
+Production `/v1/watch` is priced at `0.10 USDC` (`100000` atomic units), advertises MainNet Circle USDC ASA `31566704`, and includes Bazaar discovery metadata with challenge tag `x402-global-challenge`. This contract was externally confirmed after the 2026-09-20 Economics v1 deployment with an unsigned HTTP `402` preflight.
 
 The challenge-release policy gives each accepted watch a chain-time eligibility deadline 30 minutes from durable creation and an immutable 500-turn durable background work budget, with at most 50 unfinished obligations globally and 5 per verified service payer. A watched invoice is eligible only when `confirmed-round > activationRound` and `round-time < expiresAt`; same-round and exact-deadline payments are excluded. Wall time alone does not expire it; validated chain coverage through a fixed closing checkpoint does. Work-budget exhaustion terminates as `indeterminate`, never as a fabricated `expired`. Capacity exhaustion returns HTTP `429` before x402 settlement. These values are operational safeguards, not a commercial SLA.
 
@@ -185,7 +185,7 @@ curl -i -X POST https://roundwatch-api.onrender.com/v1/watch \
   --data '{"idempotencyKey":"smoke-readonly-20260916","expectedSender":"3YFZ47IAKPB4H6B7U6MXI35HCAB5E6DA47UANIHOON53J7I5SMXUSYQXQQ","expectedReceiver":"EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY","atomicAmount":"1"}'
 ```
 
-Do not attach a payment signature. The expected production result is HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `20000`, approved service receiver, and `x402-global-challenge` tag. The challenge description/discovery metadata must also state the strict watched-payment boundaries: confirmed round strictly greater than `activationRound`, and block `round-time` strictly earlier than `expiresAt`. A response advertising a different amount is a production-contract regression and should block release acceptance.
+Do not attach a payment signature. The expected production result is HTTP `402` with requirements for the exact HTTPS resource URL, Algorand MainNet CAIP-2, `exact` scheme, ASA `31566704`, amount `100000`, approved service receiver, and `x402-global-challenge` tag. The challenge description/discovery metadata must also state the strict watched-payment boundaries: confirmed round strictly greater than `activationRound`, and block `round-time` strictly earlier than `expiresAt`. A response advertising a different amount is a production-contract regression and should block release acceptance.
 
 Also decode the `payment-required` header and inspect the Bazaar discovery example. Both `expectedSender` and `expectedReceiver` must be checksum-valid Algorand addresses. The current receiver example is `AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI`. Discovery examples are not payment authority, but malformed examples can break autonomous clients before they ever reach settlement.
 
