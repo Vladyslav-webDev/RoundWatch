@@ -141,7 +141,7 @@ pnpm -C apps/client probe:bazaar-recatalog settle --confirm-mainnet
 ```
 
 That paid command creates one normal RoundWatch obligation and spends exactly
-one current service payment of 0.02 USDC plus the Algorand network fee. It does
+one current service payment of 0.10 USDC plus the Algorand network fee. It does
 not send the watched invoice payment.
 
 ## Paid recatalog settlement
