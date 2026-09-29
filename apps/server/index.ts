@@ -315,24 +315,35 @@ const app = createApp({
    requestTelemetry: {},
    readinessCheck: () => {
       const storage = store.readinessCheck();
-      const pollerReady = poller.readinessCheck();
-      const reconcilerReady = reconciler.readinessCheck();
+      const pollerHealth = poller.healthSnapshot();
+      const reconcilerHealth = reconciler.healthSnapshot();
+      const pollerReady = pollerHealth.ready;
+      const reconcilerReady = reconcilerHealth.ready;
       const backgroundWorkers = pollerReady && reconcilerReady;
       const diskHeadroom = hasDatabaseDiskHeadroom(
          databasePath,
          minimumFreeDiskBytes,
       );
-
-      return {
-         ready: storage && backgroundWorkers && diskHeadroom,
-         checks: {
-            storage,
-            poller: pollerReady,
-            reconciler: reconcilerReady,
-            backgroundWorkers,
-            diskHeadroom,
-         },
+      const ready = storage && backgroundWorkers && diskHeadroom;
+      const checks = {
+         storage,
+         poller: pollerReady,
+         reconciler: reconcilerReady,
+         backgroundWorkers,
+         diskHeadroom,
       };
+
+      if (!ready) {
+         console.warn(JSON.stringify({
+            event: 'roundwatch_readiness_blocked',
+            timestamp: new Date().toISOString(),
+            checks,
+            poller: pollerHealth,
+            reconciler: reconcilerHealth,
+         }));
+      }
+
+      return { ready, checks };
    },
 });
 const runtimeSampler = economicsMetrics
