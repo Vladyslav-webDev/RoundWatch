@@ -33,6 +33,7 @@ export class WorkerHealthTracker {
    private started = false;
    private running = false;
    private consecutiveProbeFailures = 0;
+   private consecutiveCycleFailures = 0;
    private lastCycleStartedAtMs?: number;
    private lastProgressAtMs?: number;
    private lastErrorAtMs?: number;
@@ -47,6 +48,7 @@ export class WorkerHealthTracker {
       this.lastProviderEvidenceAtMs = undefined;
       this.lastProgressAtMs = undefined;
       this.consecutiveProbeFailures = 0;
+      this.consecutiveCycleFailures = 0;
    }
 
    markStopped(): void {
@@ -81,6 +83,7 @@ export class WorkerHealthTracker {
       // A systemic customer-turn failure is immediately unhealthy. Recovery
       // still requires the independent complete functional probe.
       if (readinessFailures > 0) {
+         this.consecutiveCycleFailures += 1;
          this.providerHealth = 'unhealthy';
          return;
       }
@@ -103,6 +106,7 @@ export class WorkerHealthTracker {
       if (healthy) {
          this.providerHealth = 'healthy';
          this.consecutiveProbeFailures = 0;
+         this.consecutiveCycleFailures = 0;
          this.lastProviderEvidenceAtMs = at;
          return;
       }
@@ -123,6 +127,7 @@ export class WorkerHealthTracker {
 
    markCycleFailed(): void {
       this.running = false;
+      this.consecutiveCycleFailures += 1;
       this.providerHealth = 'unhealthy';
       this.lastErrorAtMs = this.now();
    }
@@ -172,7 +177,10 @@ export class WorkerHealthTracker {
          ready,
          cycleNotStalled,
          providerHealth,
-         consecutiveFailures: this.consecutiveProbeFailures,
+         consecutiveFailures: Math.max(
+            this.consecutiveProbeFailures,
+            this.consecutiveCycleFailures,
+         ),
          ...(this.lastCycleStartedAtMs === undefined
             ? {}
             : { lastCycleStartedAtMs: this.lastCycleStartedAtMs }),
