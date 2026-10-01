@@ -13,6 +13,8 @@ export interface WorkerCycleOutcome {
    providerEvidence?: number;
 }
 
+export const PROVIDER_FAILURES_BEFORE_UNREADY = 2;
+
 export interface WorkerHealthSnapshot {
    started: boolean;
    running: boolean;
@@ -140,11 +142,13 @@ export class WorkerHealthTracker {
          !this.running ||
          (currentCycleHeartbeat !== undefined &&
             now - currentCycleHeartbeat <= maxSilenceMilliseconds);
+      const failureThresholdReached =
+         this.consecutiveFailures >= PROVIDER_FAILURES_BEFORE_UNREADY;
       const ready =
          this.started &&
          successFresh &&
          cycleNotStalled &&
-         providerHealth === 'healthy';
+         !failureThresholdReached;
 
       return {
          started: this.started,

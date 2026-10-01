@@ -5,7 +5,10 @@ import {
    type TransactionPage,
 } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
-import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
+import {
+   DEFAULT_INDEXER_HEALTH_EVIDENCE_FRESHNESS_MS,
+   type IndexerHealthProbe,
+} from './roundwatch-health-probe.js';
 import type {
    PollingFailureDisposition,
    RoundWatchStore,
@@ -107,7 +110,10 @@ export class RoundWatchPoller {
 
    healthSnapshot(): WorkerHealthSnapshot {
       return this.workerHealth.snapshot(
-         Math.max(this.intervalMilliseconds * 3, 45_000),
+         Math.max(
+            this.intervalMilliseconds * 3,
+            DEFAULT_INDEXER_HEALTH_EVIDENCE_FRESHNESS_MS,
+         ),
       );
    }
 
