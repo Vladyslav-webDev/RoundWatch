@@ -5890,6 +5890,66 @@ test('concurrent admission attempts cannot exceed the transactional global limit
    } finally { store.close(); }
 });
 
+test('refund audit evidence persists separately and never rewrites the watch lifecycle state', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-refund-audit-'));
+   const path = join(directory, 'refund.sqlite');
+
+   try {
+      let store = new RoundWatchStore(path, { workUnitBudget: 1 });
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'refund-audit-watch' },
+         intent('REFUND_AUDIT_SERVICE_TX'),
+      ).watch;
+      assert.equal(store.claimWorkUnit(watch.id), 'claimed');
+      assert.equal(store.claimWorkUnit(watch.id), 'exhausted');
+      assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
+
+      const first = store.recordRefundEvidence(watch.id, {
+         transaction: 'REFUND_TX_001',
+         network: ALGORAND_TESTNET,
+         atomicAmount: '20000',
+         reason: 'service failure refund',
+      });
+      const replay = store.recordRefundEvidence(watch.id, {
+         transaction: 'REFUND_TX_001',
+         network: ALGORAND_TESTNET,
+         atomicAmount: '20000',
+         reason: 'service failure refund',
+      });
+
+      assert.equal(first.id, replay.id);
+      assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
+      assert.equal(store.listRefundEvidence(watch.id).length, 1);
+      store.close();
+
+      store = new RoundWatchStore(path);
+      const persisted = store.listRefundEvidence(watch.id);
+      assert.equal(persisted.length, 1);
+      assert.equal(persisted[0]?.transaction, 'REFUND_TX_001');
+      assert.equal(persisted[0]?.atomicAmount, '20000');
+      assert.equal(persisted[0]?.reason, 'service failure refund');
+      assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
+
+      const other = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'refund-audit-other' },
+         intent('REFUND_AUDIT_OTHER_SERVICE_TX'),
+      ).watch;
+      assert.throws(
+         () => store.recordRefundEvidence(other.id, {
+            transaction: 'REFUND_TX_001',
+            network: ALGORAND_TESTNET,
+            atomicAmount: '20000',
+            reason: 'service failure refund',
+         }),
+         /different audit evidence/,
+      );
+      store.close();
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
+
+
 test('legacy migration is idempotent and does not fabricate proof or alter matched state', () => {
    const directory = mkdtempSync(join(tmpdir(), 'roundwatch-legacy-'));
    const path = join(directory, 'legacy.sqlite');
