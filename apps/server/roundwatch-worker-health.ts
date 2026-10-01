@@ -19,7 +19,10 @@ export interface WorkerHealthSnapshot {
    ready: boolean;
    cycleNotStalled: boolean;
    providerHealth: 'unknown' | 'healthy' | 'unhealthy';
+   // Kept for telemetry compatibility. This now specifically counts
+   // consecutive failures of the complete functional capability probe.
    consecutiveFailures: number;
+   generation?: number;
    lastCycleStartedAtMs?: number;
    lastProgressAtMs?: number;
    lastProviderEvidenceAtMs?: number;
@@ -29,7 +32,8 @@ export interface WorkerHealthSnapshot {
 export class WorkerHealthTracker {
    private started = false;
    private running = false;
-   private consecutiveFailures = 0;
+   private consecutiveProbeFailures = 0;
+   private consecutiveCycleFailures = 0;
    private lastCycleStartedAtMs?: number;
    private lastProgressAtMs?: number;
    private lastErrorAtMs?: number;
@@ -43,7 +47,8 @@ export class WorkerHealthTracker {
       this.providerHealth = 'unknown';
       this.lastProviderEvidenceAtMs = undefined;
       this.lastProgressAtMs = undefined;
-      this.consecutiveFailures = 0;
+      this.consecutiveProbeFailures = 0;
+      this.consecutiveCycleFailures = 0;
    }
 
    markStopped(): void {
@@ -75,48 +80,54 @@ export class WorkerHealthTracker {
          this.lastErrorAtMs = completedAt;
       }
 
-      // A failure wins over evidence from another watch in the same sweep.
+      // A systemic customer-turn failure is immediately unhealthy. Recovery
+      // still requires the independent complete functional probe.
       if (readinessFailures > 0) {
-         this.consecutiveFailures += 1;
+         this.consecutiveCycleFailures += 1;
          this.providerHealth = 'unhealthy';
          return;
       }
-      // Customer evidence refreshes an already established healthy state.
-      // Recovery from unknown/unhealthy requires the independent functional probe.
-      if (this.providerHealth === 'healthy' && (outcome.providerEvidence ?? 0) > 0) {
+
+      // Successful customer work proves only the routes it exercised. It may
+      // refresh freshness for a previously healthy worker, but it cannot erase
+      // failures of the complete capability probe.
+      if (
+         this.providerHealth === 'healthy' &&
+         (outcome.providerEvidence ?? 0) > 0
+      ) {
          this.lastProviderEvidenceAtMs = completedAt;
-         this.consecutiveFailures = 0;
       }
    }
 
    markProbeResult(healthy: boolean): void {
       if (!this.started) return;
       const at = this.now();
+
       if (healthy) {
          this.providerHealth = 'healthy';
-         this.consecutiveFailures = 0;
+         this.consecutiveProbeFailures = 0;
+         this.consecutiveCycleFailures = 0;
          this.lastProviderEvidenceAtMs = at;
-      } else {
-         this.consecutiveFailures += 1;
-         this.lastErrorAtMs = at;
+         return;
+      }
 
-         // Public readiness uses one-sample hysteresis once health has been
-         // established. A single transient functional-probe failure records
-         // degradation but does not immediately flap /ready. Startup/unknown
-         // state remains fail-closed, and a second consecutive probe failure
-         // marks the provider unhealthy.
-         if (
-            this.providerHealth !== 'healthy' ||
-            this.consecutiveFailures >= 2
-         ) {
-            this.providerHealth = 'unhealthy';
-         }
+      this.consecutiveProbeFailures += 1;
+      this.lastErrorAtMs = at;
+
+      // Public readiness uses one-sample hysteresis once health has been
+      // established. Startup/unknown stays fail-closed. Only a successful full
+      // probe resets this counter; partial customer success does not.
+      if (
+         this.providerHealth !== 'healthy' ||
+         this.consecutiveProbeFailures >= 2
+      ) {
+         this.providerHealth = 'unhealthy';
       }
    }
 
    markCycleFailed(): void {
       this.running = false;
-      this.consecutiveFailures += 1;
+      this.consecutiveCycleFailures += 1;
       this.providerHealth = 'unhealthy';
       this.lastErrorAtMs = this.now();
    }
@@ -135,9 +146,10 @@ export class WorkerHealthTracker {
       const successFresh =
          this.lastProviderEvidenceAtMs !== undefined &&
          now - this.lastProviderEvidenceAtMs <= maxSilenceMilliseconds;
-      const providerHealth = this.providerHealth === 'healthy' && !successFresh
-         ? 'unknown'
-         : this.providerHealth;
+      const providerHealth =
+         this.providerHealth === 'healthy' && !successFresh
+            ? 'unknown'
+            : this.providerHealth;
 
       const currentCycleHeartbeat =
          this.running && this.lastCycleStartedAtMs !== undefined
@@ -165,7 +177,10 @@ export class WorkerHealthTracker {
          ready,
          cycleNotStalled,
          providerHealth,
-         consecutiveFailures: this.consecutiveFailures,
+         consecutiveFailures: Math.max(
+            this.consecutiveProbeFailures,
+            this.consecutiveCycleFailures,
+         ),
          ...(this.lastCycleStartedAtMs === undefined
             ? {}
             : { lastCycleStartedAtMs: this.lastCycleStartedAtMs }),
@@ -185,17 +200,29 @@ export class WorkerHealthTracker {
 function validateOutcome(outcome: WorkerCycleOutcome): void {
    for (const [label, value] of Object.entries(outcome)) {
       if (!Number.isSafeInteger(value) || value < 0) {
-         throw new Error(`worker cycle ${label} must be a non-negative safe integer`);
+         throw new Error(
+            `worker cycle ${label} must be a non-negative safe integer`,
+         );
       }
    }
-   if (outcome.succeeded + outcome.failed + (outcome.noOp ?? 0) +
-      (outcome.providerEvidenceOnly ?? 0) !== outcome.attempted) {
+   if (
+      outcome.succeeded +
+         outcome.failed +
+         (outcome.noOp ?? 0) +
+         (outcome.providerEvidenceOnly ?? 0) !==
+      outcome.attempted
+   ) {
       throw new Error(
          'worker cycle attempted must equal progressed, evidence-only, no-op and failed turns',
       );
    }
-   if ((outcome.providerEvidence ?? 0) > outcome.succeeded + (outcome.providerEvidenceOnly ?? 0)) {
-      throw new Error('worker cycle providerEvidence exceeds successful provider turns');
+   if (
+      (outcome.providerEvidence ?? 0) >
+      outcome.succeeded + (outcome.providerEvidenceOnly ?? 0)
+   ) {
+      throw new Error(
+         'worker cycle providerEvidence exceeds successful provider turns',
+      );
    }
 
    const isolatedFailures = outcome.isolatedFailures ?? 0;

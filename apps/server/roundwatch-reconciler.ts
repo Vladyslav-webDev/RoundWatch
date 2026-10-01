@@ -94,6 +94,7 @@ export class SettlementReconciler {
             .then(async outcome => {
                if (generation !== this.generation) return;
                if (outcome.failed > 0) {
+                  this.healthProbe?.invalidateForProviderFailure();
                   this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
                }
                if (this.healthProbe && outcome.failed === 0) {
@@ -111,7 +112,10 @@ export class SettlementReconciler {
                this.workerHealth.markCycleCompleted(outcome);
             })
             .catch(error => {
-               if (generation === this.generation) this.workerHealth.markCycleFailed();
+               if (generation === this.generation) {
+                  this.healthProbe?.invalidateForProviderFailure();
+                  this.workerHealth.markCycleFailed();
+               }
                console.error(
                   'RoundWatch settlement reconciliation failed:',
                   safeErrorMessage(error),
@@ -132,12 +136,15 @@ export class SettlementReconciler {
    }
 
    healthSnapshot(): WorkerHealthSnapshot {
-      return this.workerHealth.snapshot(
-         Math.max(
-            this.config.intervalMilliseconds * 3,
-            this.healthProbe?.readinessFreshnessMilliseconds() ?? 45_000,
+      return {
+         ...this.workerHealth.snapshot(
+            Math.max(
+               this.config.intervalMilliseconds * 3,
+               this.healthProbe?.readinessFreshnessMilliseconds() ?? 45_000,
+            ),
          ),
-      );
+         generation: this.generation,
+      };
    }
 
    readinessCheck(): boolean {

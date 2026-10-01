@@ -27,6 +27,7 @@ import {
 } from './roundwatch-runtime-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
+import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
 import {
    DEFAULT_SIGNED_PAYMENT_BURST,
    DEFAULT_SIGNED_PAYMENT_CONCURRENCY,
@@ -368,52 +369,15 @@ const currentReadinessSnapshot = () => {
    return { ready, checks };
 };
 
-const paidAdmissionReadinessCheck = async () => {
-   const storage = store.readinessCheck();
-   const diskHeadroom = hasDatabaseDiskHeadroom(
-      databasePath,
-      minimumFreeDiskBytes,
-   );
-   const pollerHealth = poller.healthSnapshot();
-   const reconcilerHealth = reconciler.healthSnapshot();
-   const workersOperational =
-      pollerHealth.started &&
-      pollerHealth.cycleNotStalled &&
-      reconcilerHealth.started &&
-      reconcilerHealth.cycleNotStalled;
-
-   if (!storage || !diskHeadroom || !workersOperational) {
-      return {
-         ready: false,
-         checks: {
-            storage,
-            poller: pollerHealth.started && pollerHealth.cycleNotStalled,
-            reconciler:
-               reconcilerHealth.started && reconcilerHealth.cycleNotStalled,
-            backgroundWorkers: workersOperational,
-            diskHeadroom,
-         },
-      };
-   }
-
-   const sample = await healthProbe.runIfDue(
-      paidAdmissionProbeMaxAgeMilliseconds,
-   );
-   const pollerReady = sample.evidence.polling;
-   const reconcilerReady = sample.evidence.reconciliation;
-   const backgroundWorkers = pollerReady && reconcilerReady;
-
-   return {
-      ready: storage && diskHeadroom && backgroundWorkers,
-      checks: {
-         storage,
-         poller: pollerReady,
-         reconciler: reconcilerReady,
-         backgroundWorkers,
-         diskHeadroom,
-      },
-   };
-};
+const paidAdmissionReadinessCheck = createPaidAdmissionReadinessCheck({
+   storageReady: () => store.readinessCheck(),
+   diskHeadroom: () =>
+      hasDatabaseDiskHeadroom(databasePath, minimumFreeDiskBytes),
+   poller,
+   reconciler,
+   healthProbe,
+   maximumEvidenceAgeMilliseconds: paidAdmissionProbeMaxAgeMilliseconds,
+});
 
 const app = createApp({
    avmAddress,

@@ -7,6 +7,7 @@ import test from 'node:test';
 import { AlgorandIndexerClient, type RoundWatchIndexer, type TransactionPage } from './roundwatch-indexer.js';
 import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
+import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
 import { SettlementReconciler, type SettlementLookupIndexer } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 import { RoundWatchStore, type WatchRecord } from './roundwatch-store.js';
@@ -387,6 +388,292 @@ test('idle capability evidence is cached longer, unhealthy evidence accelerates 
    const recovered = await probe.runIfDue(probe.idleIntervalMilliseconds());
    assert.equal(calls, 3);
    assert.equal(recovered.evidence.polling, true);
+});
+
+test('systemic poller and reconciler failures invalidate the shared provider epoch', async () => {
+   for (const worker of ['poller', 'reconciler'] as const) {
+      const store = new RoundWatchStore(':memory:');
+      let probeNow = 1_000;
+      const probe = new IndexerHealthProbe(
+         {
+            async probeReadinessCapabilities() {
+               return { polling: true, reconciliation: true };
+            },
+         },
+         ASSET,
+         () => probeNow,
+         1_000,
+         1_000,
+      );
+      const before = probe.currentFailureEpoch();
+
+      try {
+         if (worker === 'poller') {
+            active(store, 'failure-epoch-poller');
+            const failing = fakeIndexer({
+               async getCurrentRound() {
+                  throw new Error('systemic poller outage');
+               },
+            });
+            const poller = new RoundWatchPoller(
+               store,
+               failing,
+               5,
+               100,
+               undefined,
+               undefined,
+               undefined,
+               undefined,
+               probe,
+            );
+            poller.start();
+            try {
+               await until(() => probe.currentFailureEpoch() > before);
+            } finally {
+               poller.stop();
+            }
+         } else {
+            store.prepareWatch(
+               {
+                  idempotencyKey: 'failure-epoch-reconciler',
+                  expectedSender: ADDRESS,
+                  expectedReceiver: OTHER,
+                  assetId: ASSET,
+                  atomicAmount: '1',
+               },
+               service('failure-epoch-reconciler'),
+            );
+            const failing = fakeIndexer({
+               async lookupAssetTransfer() {
+                  throw new Error('systemic reconciler outage');
+               },
+            });
+            const reconciler = new SettlementReconciler(
+               store,
+               failing,
+               { network: NETWORK, intervalMilliseconds: 5 },
+               undefined,
+               probe,
+            );
+            reconciler.start();
+            try {
+               await until(() => probe.currentFailureEpoch() > before);
+            } finally {
+               reconciler.stop();
+            }
+         }
+
+         assert.ok(probe.currentFailureEpoch() > before);
+         probeNow += 1_000;
+      } finally {
+         store.close();
+      }
+   }
+});
+
+test('paid readiness refreshes after a newer provider-failure epoch instead of reusing cached success', async () => {
+   let now = 0;
+   let healthy = true;
+   let probeCalls = 0;
+   const probe = new IndexerHealthProbe(
+      {
+         async probeReadinessCapabilities() {
+            probeCalls += 1;
+            return { polling: healthy, reconciliation: healthy };
+         },
+      },
+      ASSET,
+      () => now,
+      15_000,
+      120_000,
+   );
+
+   const workerHealth = {
+      healthSnapshot: () => ({
+         started: true,
+         running: false,
+         ready: true,
+         cycleNotStalled: true,
+         providerHealth: 'healthy' as const,
+         consecutiveFailures: 0,
+         generation: 1,
+      }),
+   };
+   const paid = createPaidAdmissionReadinessCheck({
+      storageReady: () => true,
+      diskHeadroom: () => true,
+      poller: workerHealth,
+      reconciler: workerHealth,
+      healthProbe: probe,
+      maximumEvidenceAgeMilliseconds: 30_000,
+   });
+
+   assert.equal((await paid()).ready, true);
+   assert.equal(probeCalls, 1);
+
+   now = 1_000;
+   healthy = false;
+   probe.invalidateForProviderFailure();
+
+   const degraded = await paid();
+   assert.equal(degraded.ready, false);
+   assert.equal(degraded.checks.capabilityEvidenceFresh, true);
+   assert.equal(probeCalls, 2, 'newer failure epoch must force a fresh probe');
+});
+
+test('provider failure during an in-flight probe invalidates that sample and the next caller refreshes', async () => {
+   let now = 0;
+   let resolveFirst!: (value: IndexerCapabilityEvidence) => void;
+   let calls = 0;
+   const probe = new IndexerHealthProbe(
+      {
+         probeReadinessCapabilities() {
+            calls += 1;
+            if (calls === 1) {
+               return new Promise<IndexerCapabilityEvidence>(resolve => {
+                  resolveFirst = resolve;
+               });
+            }
+            return Promise.resolve({ polling: true, reconciliation: true });
+         },
+      },
+      ASSET,
+      () => now,
+      15_000,
+      120_000,
+   );
+
+   const first = probe.runIfDue(30_000);
+   probe.invalidateForProviderFailure();
+   resolveFirst({ polling: true, reconciliation: true });
+   const stale = await first;
+
+   assert.equal(probe.isSampleFreshForAdmission(stale, 30_000), false);
+   const recovered = await probe.runIfDue(30_000);
+   assert.equal(calls, 2);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+});
+
+test('paid readiness rejects a probe whose aggregate duration exceeds its evidence-age policy', async () => {
+   let now = 0;
+   let release!: () => void;
+   const gate = new Promise<void>(resolve => { release = resolve; });
+   const probe = new IndexerHealthProbe(
+      {
+         async probeReadinessCapabilities() {
+            await gate;
+            return { polling: true, reconciliation: true };
+         },
+      },
+      ASSET,
+      () => now,
+      15_000,
+      120_000,
+   );
+   const workerHealth = {
+      healthSnapshot: () => ({
+         started: true,
+         running: false,
+         ready: true,
+         cycleNotStalled: true,
+         providerHealth: 'healthy' as const,
+         consecutiveFailures: 0,
+         generation: 1,
+      }),
+   };
+   const paid = createPaidAdmissionReadinessCheck({
+      storageReady: () => true,
+      diskHeadroom: () => true,
+      poller: workerHealth,
+      reconciler: workerHealth,
+      healthProbe: probe,
+      maximumEvidenceAgeMilliseconds: 30_000,
+   });
+
+   const decision = paid();
+   now = 40_000;
+   release();
+   const result = await decision;
+
+   assert.equal(result.ready, false);
+   assert.equal(result.checks.capabilityEvidenceFresh, false);
+});
+
+test('paid readiness resamples storage, disk and worker generation after awaiting provider evidence', async () => {
+   let now = 0;
+   let storage = true;
+   let disk = true;
+   let generation = 1;
+   let release!: () => void;
+   const gate = new Promise<void>(resolve => { release = resolve; });
+   const probe = new IndexerHealthProbe(
+      {
+         async probeReadinessCapabilities() {
+            await gate;
+            return { polling: true, reconciliation: true };
+         },
+      },
+      ASSET,
+      () => now,
+      15_000,
+      120_000,
+   );
+   const workerHealth = {
+      healthSnapshot: () => ({
+         started: true,
+         running: false,
+         ready: true,
+         cycleNotStalled: true,
+         providerHealth: 'healthy' as const,
+         consecutiveFailures: 0,
+         generation,
+      }),
+   };
+   const paid = createPaidAdmissionReadinessCheck({
+      storageReady: () => storage,
+      diskHeadroom: () => disk,
+      poller: workerHealth,
+      reconciler: workerHealth,
+      healthProbe: probe,
+      maximumEvidenceAgeMilliseconds: 30_000,
+   });
+
+   const decision = paid();
+   storage = false;
+   disk = false;
+   generation += 1;
+   release();
+
+   const result = await decision;
+   assert.equal(result.ready, false);
+   assert.equal(result.checks.storage, false);
+   assert.equal(result.checks.diskHeadroom, false);
+});
+
+test('customer success cannot reset consecutive complete-probe failures', () => {
+   let now = 1_000;
+   const tracker = new WorkerHealthTracker(() => now);
+   tracker.markStarted();
+   tracker.markProbeResult(true);
+
+   now += 1_000;
+   tracker.markProbeResult(false);
+   tracker.markCycleStarted();
+   tracker.markCycleCompleted({
+      attempted: 1,
+      succeeded: 1,
+      failed: 0,
+      providerEvidence: 1,
+   });
+   assert.equal(tracker.snapshot(45_000).consecutiveFailures, 1);
+   assert.equal(tracker.snapshot(45_000).ready, true);
+
+   now += 1_000;
+   tracker.markProbeResult(false);
+   const snapshot = tracker.snapshot(45_000);
+   assert.equal(snapshot.consecutiveFailures, 2);
+   assert.equal(snapshot.providerHealth, 'unhealthy');
+   assert.equal(snapshot.ready, false);
 });
 
 test('health evidence ages out; empty, no-op, and isolated cycles cannot renew it', () => {
