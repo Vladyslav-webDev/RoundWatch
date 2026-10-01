@@ -270,7 +270,10 @@ test('R06: tip-only watch cannot mask another watch scan failure', async () => {
       assert.equal(outcome.noOp, 1);
       assert.equal(outcome.succeeded, 0);
       assert.equal(indexer.calls.filter(call => call.startsWith('scan:')).length, 1);
-      assert.equal(tracker.snapshot(45_000).ready, false);
+      const degraded = tracker.snapshot(45_000);
+      assert.equal(degraded.ready, true);
+      assert.equal(degraded.providerHealth, 'unhealthy');
+      assert.equal(degraded.consecutiveFailures, 1);
    } finally { store.close(); }
 });
 
