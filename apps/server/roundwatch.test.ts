@@ -6294,12 +6294,10 @@ test('refund CLI refuses a nonexistent or unrelated database without creating or
       const rejected = run(unrelatedPath);
       assert.notEqual(rejected.status, 0);
       const check = new DatabaseSync(unrelatedPath, { readOnly: true });
-      assert.equal(
-         check.prepare(
-            "SELECT count(*) AS n FROM sqlite_master WHERE name = 'roundwatch_watches'",
-         ).get() as unknown as { n: number },
-         { n: 0 },
-      );
+      const watchTableCount = check.prepare(
+         "SELECT count(*) AS n FROM sqlite_master WHERE name = 'roundwatch_watches'",
+      ).get() as unknown as { n: number };
+      assert.equal(watchTableCount.n, 0);
       check.close();
 
       // An explicit separator is tolerated by the script itself. The database
@@ -6309,6 +6307,72 @@ test('refund CLI refuses a nonexistent or unrelated database without creating or
       assert.notEqual(separator.status, 0);
       assert.equal(existsSync(missingPath), false);
       assert.doesNotMatch(separator.stderr, /Watch not found: --/);
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
+
+test('refund CLI appends evidence to an existing current store without changing watch lifecycle', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-refund-cli-success-'));
+   const path = join(directory, 'roundwatch.sqlite');
+   const tsxCli = fileURLToPath(
+      new URL('./node_modules/tsx/dist/cli.mjs', import.meta.url),
+   );
+   const script = fileURLToPath(new URL('./record-refund.ts', import.meta.url));
+
+   try {
+      let store = new RoundWatchStore(path, { workUnitBudget: 1 });
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'refund-cli-success-watch' },
+         intent('REFUND_CLI_SUCCESS_SERVICE_TX'),
+      ).watch;
+      assert.equal(store.claimWorkUnit(watch.id), 'claimed');
+      assert.equal(store.claimWorkUnit(watch.id), 'exhausted');
+      const before = store.getWatch(watch.id)!;
+      assert.equal(before.state, 'indeterminate');
+      store.close();
+
+      const result = spawnSync(
+         process.execPath,
+         [
+            tsxCli,
+            script,
+            '--',
+            watch.id,
+            SIGNED_SERVICE_TX_ID,
+            ALGORAND_TESTNET,
+            '20000',
+            'service failure refund',
+         ],
+         {
+            env: {
+               ...process.env,
+               ROUNDWATCH_DB_PATH: path,
+            },
+            encoding: 'utf8',
+         },
+      );
+      assert.equal(result.status, 0, result.stderr);
+
+      const output = JSON.parse(result.stdout) as {
+         watchState?: string;
+         refund?: {
+            transaction?: string;
+            atomicAmount?: string;
+         };
+      };
+      assert.equal(output.watchState, 'indeterminate');
+      assert.equal(output.refund?.transaction, SIGNED_SERVICE_TX_ID);
+      assert.equal(output.refund?.atomicAmount, '20000');
+
+      store = new RoundWatchStore(path, {
+         schemaMode: 'existing-refund-audit',
+      });
+      assert.deepEqual(store.getWatch(watch.id), before);
+      const refunds = store.listRefundEvidence(watch.id);
+      assert.equal(refunds.length, 1);
+      assert.equal(refunds[0]?.transaction, SIGNED_SERVICE_TX_ID);
+      store.close();
    } finally {
       rmSync(directory, { recursive: true, force: true });
    }
