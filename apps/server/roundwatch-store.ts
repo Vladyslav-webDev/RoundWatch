@@ -1466,7 +1466,7 @@ function assertExistingRefundAuditSchema(
 }
 
 const MAX_UINT64 = (1n << 64n) - 1n;
-const ALGorandTransactionIdPattern = /^[A-Z2-7]{52}$/;
+const ALGORAND_TRANSACTION_ID_PATTERN = /^[A-Z2-7]{52}$/;
 const SUPPORTED_REFUND_NETWORKS = new Set<string>([
    ALGORAND_TESTNET_CAIP2,
    ALGORAND_MAINNET_CAIP2,
@@ -1475,7 +1475,7 @@ const SUPPORTED_REFUND_NETWORKS = new Set<string>([
 function assertRefundEvidence(evidence: RefundEvidence): void {
    if (
       typeof evidence.transaction !== 'string' ||
-      !ALGorandTransactionIdPattern.test(evidence.transaction)
+      !ALGORAND_TRANSACTION_ID_PATTERN.test(evidence.transaction)
    ) {
       throw new Error(
          'refund transaction must be a canonical 52-character Algorand transaction ID',
