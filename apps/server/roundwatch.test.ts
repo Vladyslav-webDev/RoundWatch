@@ -53,6 +53,7 @@ import {
    MAX_WATCH_REQUEST_BODY_BYTES,
 } from './request-body.js';
 import {
+   IdempotencyConflictError,
    probeSqliteWriteReadiness,
    RoundWatchStore,
    WatchCapacityError,
@@ -2387,6 +2388,74 @@ test('Bazaar discovery watch example uses checksum-valid Algorand addresses', as
    }
 });
 
+test('signed discovery idempotency placeholder is rejected before facilitator verification or settlement', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let verifyCalls = 0;
+   let settleCalls = 0;
+
+   try {
+      const facilitator = {
+         getSupported: async () => ({
+            kinds: [
+               {
+                  x402Version: 2,
+                  scheme: 'exact',
+                  network: ALGORAND_TESTNET,
+               },
+            ],
+            extensions: [],
+            signers: {},
+         }),
+         verify: async () => {
+            verifyCalls += 1;
+            throw new Error('discovery placeholder must not reach verification');
+         },
+         settle: async () => {
+            settleCalls += 1;
+            throw new Error('discovery placeholder must not settle');
+         },
+      } as unknown as FacilitatorClient;
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: facilitator,
+         store,
+         indexer: new MiddlewareIndexer(),
+         requireSettlementIntent: true,
+      });
+
+      const spec = {
+         ...SPEC,
+         idempotencyKey: 'replace-with-unique-idempotency-key',
+         expectedSender: WATCH_SENDER,
+      };
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body,
+      });
+
+      assert.equal(response.status, 400);
+      const rejected = await response.json() as {
+         code?: string;
+         error?: string;
+      };
+      assert.equal(rejected.code, 'example_idempotency_key');
+      assert.match(rejected.error ?? '', /caller-generated/i);
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
+      assert.equal(
+         store.getByIdempotencyKey(spec.idempotencyKey),
+         undefined,
+      );
+   } finally {
+      store.close();
+   }
+});
+
 test('paid x402 middleware persists signed purchase terms and activates from the exact service round', async () => {
    const store = new RoundWatchStore(':memory:');
    const indexer = new MiddlewareIndexer();
@@ -2442,6 +2511,8 @@ test('paid x402 middleware persists signed purchase terms and activates from the
       });
 
       assert.equal(duplicate.status, 409);
+      const duplicateBody = await duplicate.json() as { code?: string };
+      assert.equal(duplicateBody.code, 'idempotency_replay');
       assert.equal(facilitator.settleCalls, 1, 'duplicate must not settle again');
    } finally {
       store.close();
@@ -5608,6 +5679,81 @@ test('one watch page failure does not block later watches in the same fair sweep
    } finally { store.close(); }
 });
 
+test('idempotency keys are scoped by service payer and exact replays stay within one payer scope', () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 10,
+      maxOpenWatchesPerPayer: 10,
+   });
+
+   try {
+      const sharedKey = 'shared-across-payers';
+      const firstIntent = intent('PAYER_A_SERVICE_TX');
+      const secondIntent = {
+         ...intent('PAYER_B_SERVICE_TX'),
+         payer: WATCH_SENDER,
+      };
+
+      const first = store.prepareWatch(
+         { ...SPEC, idempotencyKey: sharedKey },
+         firstIntent,
+      );
+      const second = store.prepareWatch(
+         { ...SPEC, idempotencyKey: sharedKey },
+         secondIntent,
+      );
+      const replay = store.prepareWatch(
+         { ...SPEC, idempotencyKey: sharedKey },
+         firstIntent,
+      );
+
+      assert.equal(first.created, true);
+      assert.equal(second.created, true);
+      assert.notEqual(first.watch.id, second.watch.id);
+      assert.equal(replay.created, false);
+      assert.equal(replay.watch.id, first.watch.id);
+      assert.equal(
+         store.getByPayerAndIdempotencyKey(PAYER, sharedKey)?.id,
+         first.watch.id,
+      );
+      assert.equal(
+         store.getByPayerAndIdempotencyKey(WATCH_SENDER, sharedKey)?.id,
+         second.watch.id,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('same payer and idempotency key cannot be rebound to a different watch specification', () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 10,
+      maxOpenWatchesPerPayer: 10,
+   });
+
+   try {
+      const key = 'same-payer-conflict';
+      store.prepareWatch(
+         { ...SPEC, idempotencyKey: key },
+         intent('CONFLICT_SERVICE_TX'),
+      );
+
+      assert.throws(
+         () => store.prepareWatch(
+            {
+               ...SPEC,
+               idempotencyKey: key,
+               atomicAmount: '2500001',
+            },
+            intent('CONFLICT_SERVICE_TX_RETRY'),
+         ),
+         IdempotencyConflictError,
+      );
+      assert.equal(store.listSettlementReconciliationCandidates().length, 1);
+   } finally {
+      store.close();
+   }
+});
+
 test('capacity and transaction uniqueness reject before creating another obligation', () => {
    const store = new RoundWatchStore(':memory:', { maxOpenWatches: 1, maxOpenWatchesPerPayer: 1 });
    try {
@@ -5671,6 +5817,25 @@ test('legacy migration is idempotent and does not fabricate proof or alter match
          assert.equal(legacy?.workUnitsUsed, 0);
          store.close();
       }
+
+      const migrated = new DatabaseSync(path);
+      const schema = migrated.prepare(`
+         SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'roundwatch_watches'
+      `).get() as unknown as { sql?: string };
+      const indexes = migrated.prepare(`
+         SELECT name FROM sqlite_master
+         WHERE type = 'index' AND tbl_name = 'roundwatch_watches'
+      `).all() as unknown as Array<{ name: string }>;
+      migrated.close();
+
+      assert.doesNotMatch(
+         schema.sql ?? '',
+         /idempotency_key\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i,
+      );
+      assert.ok(
+         indexes.some(index => index.name === 'roundwatch_idempotency_scope_unique'),
+      );
    } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
