@@ -1,6 +1,9 @@
 import type { TransactionIdPage } from './roundwatch-indexer.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
-import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
+import {
+   DEFAULT_INDEXER_HEALTH_EVIDENCE_FRESHNESS_MS,
+   type IndexerHealthProbe,
+} from './roundwatch-health-probe.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
    IndexerRequestTurnBudget,
