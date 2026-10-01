@@ -2566,6 +2566,7 @@ test('verified payer cannot obtain a legacy NULL-payer watch through replay', as
       const legacySpec = {
          ...SPEC,
          idempotencyKey: 'legacy-null-payer-http',
+         expectedSender: WATCH_SENDER,
       };
       const legacy = store.prepareWatch(legacySpec).watch;
       const facilitator = new MiddlewareFacilitator(
