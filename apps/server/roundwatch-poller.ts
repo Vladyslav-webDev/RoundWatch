@@ -107,7 +107,10 @@ export class RoundWatchPoller {
 
    healthSnapshot(): WorkerHealthSnapshot {
       return this.workerHealth.snapshot(
-         Math.max(this.intervalMilliseconds * 3, 45_000),
+         Math.max(
+            this.intervalMilliseconds * 3,
+            this.healthProbe?.readinessFreshnessMilliseconds() ?? 45_000,
+         ),
       );
    }
 
@@ -518,7 +521,11 @@ export class RoundWatchPoller {
             this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
          }
          if (this.healthProbe && outcome.failed === (outcome.isolatedFailures ?? 0)) {
-            const sample = await this.healthProbe.runIfDue();
+            const probeAge =
+               outcome.attempted === 0
+                  ? this.healthProbe.idleIntervalMilliseconds()
+                  : this.healthProbe.activeIntervalMilliseconds();
+            const sample = await this.healthProbe.runIfDue(probeAge);
             if (generation !== this.generation) return;
             if (sample.revision > this.lastObservedProbeRevision) {
                this.lastObservedProbeRevision = sample.revision;

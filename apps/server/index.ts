@@ -15,7 +15,12 @@ import {
    resolveScanQueryVariant,
 } from './roundwatch-indexer.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
-import { IndexerHealthProbe } from './roundwatch-health-probe.js';
+import {
+   DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS,
+   DEFAULT_INDEXER_IDLE_HEALTH_PROBE_INTERVAL_MS,
+   DEFAULT_PAID_ADMISSION_INDEXER_EVIDENCE_MAX_AGE_MS,
+   IndexerHealthProbe,
+} from './roundwatch-health-probe.js';
 import {
    DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
    RoundWatchRuntimeSampler,
@@ -102,6 +107,8 @@ let signedPaymentRequestsPerSecond;
 let signedPaymentBurst;
 let signedPaymentConcurrency;
 let minimumFreeDiskBytes;
+let indexerIdleProbeIntervalMilliseconds;
+let paidAdmissionProbeMaxAgeMilliseconds;
 
 try {
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
@@ -181,6 +188,32 @@ try {
       DEFAULT_MIN_FREE_DISK_BYTES,
       'ROUNDWATCH_MIN_FREE_DISK_BYTES',
    );
+   indexerIdleProbeIntervalMilliseconds = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_INDEXER_IDLE_PROBE_INTERVAL_MS,
+      DEFAULT_INDEXER_IDLE_HEALTH_PROBE_INTERVAL_MS,
+      'ROUNDWATCH_INDEXER_IDLE_PROBE_INTERVAL_MS',
+   );
+   paidAdmissionProbeMaxAgeMilliseconds = parseRequiredPositiveInteger(
+      process.env.ROUNDWATCH_PAID_ADMISSION_PROBE_MAX_AGE_MS,
+      DEFAULT_PAID_ADMISSION_INDEXER_EVIDENCE_MAX_AGE_MS,
+      'ROUNDWATCH_PAID_ADMISSION_PROBE_MAX_AGE_MS',
+   );
+   if (
+      indexerIdleProbeIntervalMilliseconds <
+      DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS
+   ) {
+      throw new Error(
+         'ROUNDWATCH_INDEXER_IDLE_PROBE_INTERVAL_MS must be at least the active 15000 ms probe interval',
+      );
+   }
+   if (
+      paidAdmissionProbeMaxAgeMilliseconds <
+      DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS
+   ) {
+      throw new Error(
+         'ROUNDWATCH_PAID_ADMISSION_PROBE_MAX_AGE_MS must be at least the active 15000 ms probe interval',
+      );
+   }
 } catch (error) {
    console.error(error instanceof Error ? error.message : error);
    process.exit(1);
@@ -277,6 +310,9 @@ const indexer = new AlgorandIndexerClient(
 const healthProbe = new IndexerHealthProbe(
    indexer,
    networkConfig.usdcAssetIdNumber,
+   undefined,
+   DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS,
+   indexerIdleProbeIntervalMilliseconds,
 );
 const poller = new RoundWatchPoller(
    store,
@@ -299,6 +335,86 @@ const reconciler = new SettlementReconciler(
    economicsMetrics,
    healthProbe,
 );
+const currentReadinessSnapshot = () => {
+   const storage = store.readinessCheck();
+   const pollerHealth = poller.healthSnapshot();
+   const reconcilerHealth = reconciler.healthSnapshot();
+   const pollerReady = pollerHealth.ready;
+   const reconcilerReady = reconcilerHealth.ready;
+   const backgroundWorkers = pollerReady && reconcilerReady;
+   const diskHeadroom = hasDatabaseDiskHeadroom(
+      databasePath,
+      minimumFreeDiskBytes,
+   );
+   const ready = storage && backgroundWorkers && diskHeadroom;
+   const checks = {
+      storage,
+      poller: pollerReady,
+      reconciler: reconcilerReady,
+      backgroundWorkers,
+      diskHeadroom,
+   };
+
+   if (!ready) {
+      console.warn(JSON.stringify({
+         event: 'roundwatch_readiness_blocked',
+         timestamp: new Date().toISOString(),
+         checks,
+         poller: pollerHealth,
+         reconciler: reconcilerHealth,
+      }));
+   }
+
+   return { ready, checks };
+};
+
+const paidAdmissionReadinessCheck = async () => {
+   const storage = store.readinessCheck();
+   const diskHeadroom = hasDatabaseDiskHeadroom(
+      databasePath,
+      minimumFreeDiskBytes,
+   );
+   const pollerHealth = poller.healthSnapshot();
+   const reconcilerHealth = reconciler.healthSnapshot();
+   const workersOperational =
+      pollerHealth.started &&
+      pollerHealth.cycleNotStalled &&
+      reconcilerHealth.started &&
+      reconcilerHealth.cycleNotStalled;
+
+   if (!storage || !diskHeadroom || !workersOperational) {
+      return {
+         ready: false,
+         checks: {
+            storage,
+            poller: pollerHealth.started && pollerHealth.cycleNotStalled,
+            reconciler:
+               reconcilerHealth.started && reconcilerHealth.cycleNotStalled,
+            backgroundWorkers: workersOperational,
+            diskHeadroom,
+         },
+      };
+   }
+
+   const sample = await healthProbe.runIfDue(
+      paidAdmissionProbeMaxAgeMilliseconds,
+   );
+   const pollerReady = sample.evidence.polling;
+   const reconcilerReady = sample.evidence.reconciliation;
+   const backgroundWorkers = pollerReady && reconcilerReady;
+
+   return {
+      ready: storage && diskHeadroom && backgroundWorkers,
+      checks: {
+         storage,
+         poller: pollerReady,
+         reconciler: reconcilerReady,
+         backgroundWorkers,
+         diskHeadroom,
+      },
+   };
+};
+
 const app = createApp({
    avmAddress,
    facilitatorClient,
@@ -313,38 +429,8 @@ const app = createApp({
       concurrency: signedPaymentConcurrency,
    },
    requestTelemetry: {},
-   readinessCheck: () => {
-      const storage = store.readinessCheck();
-      const pollerHealth = poller.healthSnapshot();
-      const reconcilerHealth = reconciler.healthSnapshot();
-      const pollerReady = pollerHealth.ready;
-      const reconcilerReady = reconcilerHealth.ready;
-      const backgroundWorkers = pollerReady && reconcilerReady;
-      const diskHeadroom = hasDatabaseDiskHeadroom(
-         databasePath,
-         minimumFreeDiskBytes,
-      );
-      const ready = storage && backgroundWorkers && diskHeadroom;
-      const checks = {
-         storage,
-         poller: pollerReady,
-         reconciler: reconcilerReady,
-         backgroundWorkers,
-         diskHeadroom,
-      };
-
-      if (!ready) {
-         console.warn(JSON.stringify({
-            event: 'roundwatch_readiness_blocked',
-            timestamp: new Date().toISOString(),
-            checks,
-            poller: pollerHealth,
-            reconciler: reconcilerHealth,
-         }));
-      }
-
-      return { ready, checks };
-   },
+   readinessCheck: currentReadinessSnapshot,
+   paidAdmissionReadinessCheck,
 });
 const runtimeSampler = economicsMetrics
    ? new RoundWatchRuntimeSampler(
@@ -393,6 +479,9 @@ server.on('listening', () => {
    );
    console.log(
       `Readiness disk headroom floor: ${minimumFreeDiskBytes} bytes`,
+   );
+   console.log(
+      `Indexer capability probe: active=${DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS} ms idle=${indexerIdleProbeIntervalMilliseconds} ms paid-max-age=${paidAdmissionProbeMaxAgeMilliseconds} ms`,
    );
    console.log(
       'Request telemetry: enabled (structured JSON; ephemeral HMAC fingerprints)',
