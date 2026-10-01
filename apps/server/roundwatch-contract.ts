@@ -1,3 +1,39 @@
+export const NEW_WATCH_IDEMPOTENCY_PLACEHOLDER =
+   'replace-with-unique-idempotency-key';
+export const NEW_WATCH_INVOICE_NOTE_PLACEHOLDER =
+   'replace-with-unique-invoice-note';
+
+export interface NewWatchCallerIntent {
+   idempotencyKey: string;
+   expectedSender: string;
+   invoiceNote?: string;
+}
+
+export function newWatchCallerIntentAdmissionError(
+   intent: NewWatchCallerIntent,
+): { error: string; code: string } | undefined {
+   if (intent.idempotencyKey === NEW_WATCH_IDEMPOTENCY_PLACEHOLDER) {
+      return {
+         error:
+            'idempotencyKey must be caller-generated; the discovery example literal cannot be used for a paid watch',
+         code: 'example_idempotency_key',
+      };
+   }
+
+   if (intent.invoiceNote === NEW_WATCH_INVOICE_NOTE_PLACEHOLDER) {
+      return {
+         error:
+            'invoiceNote must be caller-selected; the discovery example literal cannot be used for a paid watch',
+         code: 'example_invoice_note',
+      };
+   }
+
+   const senderError = newWatchSenderAdmissionError(intent.expectedSender);
+   return senderError
+      ? { error: senderError, code: 'unsupported_expected_sender' }
+      : undefined;
+}
+
 export const ALGORAND_ZERO_ADDRESS =
    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
 
