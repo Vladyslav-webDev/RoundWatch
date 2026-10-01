@@ -96,8 +96,10 @@ function readLocalReadiness(
    const workersOperational =
       poller.started &&
       poller.cycleNotStalled &&
+      poller.providerHealth !== 'unhealthy' &&
       reconciler.started &&
-      reconciler.cycleNotStalled;
+      reconciler.cycleNotStalled &&
+      reconciler.providerHealth !== 'unhealthy';
 
    return {
       storage,
@@ -109,9 +111,14 @@ function readLocalReadiness(
 }
 
 function localFailureSnapshot(local: LocalReadiness): PaidReadinessSnapshot {
-   const poller = local.poller.started && local.poller.cycleNotStalled;
+   const poller =
+      local.poller.started &&
+      local.poller.cycleNotStalled &&
+      local.poller.providerHealth !== 'unhealthy';
    const reconciler =
-      local.reconciler.started && local.reconciler.cycleNotStalled;
+      local.reconciler.started &&
+      local.reconciler.cycleNotStalled &&
+      local.reconciler.providerHealth !== 'unhealthy';
 
    return {
       ready: false,
