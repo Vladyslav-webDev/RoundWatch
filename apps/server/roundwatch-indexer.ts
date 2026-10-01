@@ -362,7 +362,13 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       try {
          const page = await this.searchWatchPageFor(syntheticWatch, tip, tip);
          if (page.currentRound >= tip) {
-            await this.getBlock(tip);
+            // /health can briefly lead the block lookup route at the newest
+            // indexed round. The scan at tip proves current search freshness;
+            // probe the immediately previous block to validate checkpoint
+            // capability without turning normal provider propagation skew into
+            // a false readiness outage.
+            const checkpointRound = tip > 0 ? tip - 1 : tip;
+            await this.getBlock(checkpointRound);
             polling = true;
          }
       } catch { /* The scan and checkpoint routes must both be validated. */ }
