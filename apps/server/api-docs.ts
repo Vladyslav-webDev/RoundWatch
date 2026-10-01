@@ -244,7 +244,7 @@ export function buildOpenApiDocument(
                   },
                   '409': {
                      description:
-                        'The idempotency key already belongs to an existing watch.',
+                        'Idempotency replay for the same payer/key/specification, or an idempotency conflict when the same payer/key is rebound to a different watch specification. No second settlement occurs for the replay/conflict response.',
                      content: {
                         'application/json': {
                            schema: { $ref: '#/components/schemas/ErrorResponse' },
@@ -475,7 +475,7 @@ export function buildOpenApiDocument(
                      minLength: 8,
                      maxLength: 128,
                      description:
-                        'Stable caller-supplied key used to prevent duplicate durable watches for the same payment intent.',
+                        'Caller-generated stable key scoped to the x402 service payer. Reuse the same key only for the same semantic watch request. Do not submit discovery example literals; UUID-style keys are recommended.',
                   },
                   expectedSender: {
                      type: 'string',
