@@ -390,6 +390,87 @@ test('idle capability evidence is cached longer, unhealthy evidence accelerates 
    assert.equal(recovered.evidence.polling, true);
 });
 
+test('systemic poller and reconciler failures invalidate the shared provider epoch', async () => {
+   for (const worker of ['poller', 'reconciler'] as const) {
+      const store = new RoundWatchStore(':memory:');
+      let probeNow = 1_000;
+      const probe = new IndexerHealthProbe(
+         {
+            async probeReadinessCapabilities() {
+               return { polling: true, reconciliation: true };
+            },
+         },
+         ASSET,
+         () => probeNow,
+         1_000,
+         1_000,
+      );
+      const before = probe.currentFailureEpoch();
+
+      try {
+         if (worker === 'poller') {
+            active(store, 'failure-epoch-poller');
+            const failing = fakeIndexer({
+               async getCurrentRound() {
+                  throw new Error('systemic poller outage');
+               },
+            });
+            const poller = new RoundWatchPoller(
+               store,
+               failing,
+               5,
+               100,
+               undefined,
+               undefined,
+               undefined,
+               undefined,
+               probe,
+            );
+            poller.start();
+            try {
+               await until(() => probe.currentFailureEpoch() > before);
+            } finally {
+               poller.stop();
+            }
+         } else {
+            store.prepareWatch(
+               {
+                  idempotencyKey: 'failure-epoch-reconciler',
+                  expectedSender: ADDRESS,
+                  expectedReceiver: OTHER,
+                  assetId: ASSET,
+                  atomicAmount: '1',
+               },
+               service('failure-epoch-reconciler'),
+            );
+            const failing = fakeIndexer({
+               async lookupAssetTransfer() {
+                  throw new Error('systemic reconciler outage');
+               },
+            });
+            const reconciler = new SettlementReconciler(
+               store,
+               failing,
+               { network: NETWORK, intervalMilliseconds: 5 },
+               undefined,
+               probe,
+            );
+            reconciler.start();
+            try {
+               await until(() => probe.currentFailureEpoch() > before);
+            } finally {
+               reconciler.stop();
+            }
+         }
+
+         assert.ok(probe.currentFailureEpoch() > before);
+         probeNow += 1_000;
+      } finally {
+         store.close();
+      }
+   }
+});
+
 test('paid readiness refreshes after a newer provider-failure epoch instead of reusing cached success', async () => {
    let now = 0;
    let healthy = true;
