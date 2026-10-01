@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "import": "tsx src/cli.ts",
+    "snapshot": "tsx src/cli.ts",
     "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

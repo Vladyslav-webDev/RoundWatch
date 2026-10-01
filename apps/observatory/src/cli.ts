@@ -10,7 +10,7 @@ function argument(flag: string): string {
 
 async function main(): Promise<void> {
    if (process.argv.length !== 6 || process.argv[2] !== '--input' || process.argv[4] !== '--output') {
-      throw new Error('usage: pnpm -C apps/observatory import --input LOCAL_JSON --output NEW_RUN_DIRECTORY');
+      throw new Error('usage: pnpm -C apps/observatory snapshot --input LOCAL_JSON --output NEW_RUN_DIRECTORY');
    }
    const result = await importSnapshot(argument('--input'), argument('--output'));
    process.stdout.write(`${result.report.diagnostic}: ${result.runDirectory}\n`);

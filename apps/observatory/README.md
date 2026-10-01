@@ -7,7 +7,7 @@ Run from the repository root:
 ```sh
 pnpm -C apps/observatory test
 pnpm -C apps/observatory typecheck
-pnpm -C apps/observatory import --input apps/observatory/fixtures/known-items.json --output my-new-run-directory
+pnpm -C apps/observatory snapshot --input fixtures/known-items.json --output my-new-run-directory
 ```
 
 `--input` is required. `--output` must name a new directory whose parent already exists. No file is found automatically. A run writes `raw/sha256-<digest>.json` (original bytes), `observatory.json` (deterministic report), then `manifest.json` (run time and outcome). Existing output directories are rejected. Only a final manifest with `status: "complete"` marks a valid catalog import. Malformed JSON, malformed recognized envelopes, and unsupported envelopes retain evidence but get `status: "rejected"` and a nonzero CLI exit code.
