@@ -108,6 +108,13 @@ export interface WatchRecord extends WatchSpec {
    pollingRetryAt?: string;
 }
 
+export class IdempotencyConflictError extends Error {
+   constructor(readonly existing: WatchRecord) {
+      super('Idempotency key is already bound to a different watch specification');
+      this.name = 'IdempotencyConflictError';
+   }
+}
+
 export interface SettlementEvidence {
    transaction: string;
    network: string;
@@ -261,6 +268,12 @@ export class RoundWatchStore {
       `).run(this.workUnitBudget);
 
       this.database.exec(`
+         CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_idempotency_scope_unique
+         ON roundwatch_watches(
+            COALESCE(expected_service_payer, ''),
+            idempotency_key
+         );
+
          CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_expected_service_tx_unique
          ON roundwatch_watches(expected_service_transaction)
          WHERE expected_service_transaction IS NOT NULL;
@@ -349,13 +362,20 @@ export class RoundWatchStore {
       this.database.exec('BEGIN IMMEDIATE;');
 
       try {
-         const existingRow = this.database.prepare(`
-            SELECT * FROM roundwatch_watches WHERE idempotency_key = ?
-         `).get(spec.idempotencyKey) as unknown as WatchRow | undefined;
+         const existingRow = this.findIdempotencyRow(
+            spec.idempotencyKey,
+            settlementIntent?.payer,
+         );
 
          if (existingRow) {
+            const existing = mapRow(existingRow);
+
+            if (!watchSpecMatches(existing, spec)) {
+               throw new IdempotencyConflictError(existing);
+            }
+
             this.database.exec('COMMIT;');
-            return { watch: mapRow(existingRow), created: false };
+            return { watch: existing, created: false };
          }
 
          const globalCount = this.countOpenObligations();
@@ -694,10 +714,29 @@ export class RoundWatchStore {
       return row ? mapRow(row) : undefined;
    }
 
+   // Diagnostic/legacy helper. New request paths should use the payer-scoped
+   // lookup because idempotency keys are no longer globally unique.
    getByIdempotencyKey(idempotencyKey: string): WatchRecord | undefined {
       const row = this.database.prepare(`
-         SELECT * FROM roundwatch_watches WHERE idempotency_key = ?
+         SELECT * FROM roundwatch_watches
+         WHERE idempotency_key = ?
+         ORDER BY created_at ASC
+         LIMIT 1
       `).get(idempotencyKey) as unknown as WatchRow | undefined;
+
+      return row ? mapRow(row) : undefined;
+   }
+
+   getByPayerAndIdempotencyKey(
+      payer: string,
+      idempotencyKey: string,
+   ): WatchRecord | undefined {
+      const row = this.database.prepare(`
+         SELECT * FROM roundwatch_watches
+         WHERE expected_service_payer = ?
+           AND idempotency_key = ?
+         LIMIT 1
+      `).get(payer, idempotencyKey) as unknown as WatchRow | undefined;
 
       return row ? mapRow(row) : undefined;
    }
@@ -819,7 +858,7 @@ export class RoundWatchStore {
       this.database.exec(`
          CREATE TABLE IF NOT EXISTS roundwatch_watches (
             id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
+            idempotency_key TEXT NOT NULL,
             state TEXT NOT NULL CHECK (
                state IN (
                   'settlement_pending',
@@ -878,10 +917,15 @@ export class RoundWatchStore {
          WHERE type = 'table' AND name = 'roundwatch_watches'
       `).get() as unknown as { sql?: string } | undefined;
 
-      if (
+      const hasCurrentStates =
          schema?.sql?.includes("'expired'") &&
-         schema.sql.includes("'indeterminate'")
-      ) {
+         schema.sql.includes("'indeterminate'");
+      const hasGlobalIdempotencyUnique =
+         /idempotency_key\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(
+            schema?.sql ?? '',
+         );
+
+      if (hasCurrentStates && !hasGlobalIdempotencyUnique) {
          return;
       }
 
@@ -987,6 +1031,41 @@ export class RoundWatchStore {
       }
    }
 
+   private findIdempotencyRow(
+      idempotencyKey: string,
+      payer?: string,
+   ): WatchRow | undefined {
+      if (!payer) {
+         return this.database.prepare(`
+            SELECT * FROM roundwatch_watches
+            WHERE expected_service_payer IS NULL
+              AND idempotency_key = ?
+            ORDER BY created_at ASC
+            LIMIT 1
+         `).get(idempotencyKey) as unknown as WatchRow | undefined;
+      }
+
+      // Exact payer scope is authoritative. A legacy row with no persisted
+      // payer remains a conservative global reservation until it is explicitly
+      // resolved/migrated with trustworthy payer evidence.
+      return this.database.prepare(`
+         SELECT * FROM roundwatch_watches
+         WHERE idempotency_key = ?
+           AND (
+              expected_service_payer = ?
+              OR expected_service_payer IS NULL
+           )
+         ORDER BY
+            CASE WHEN expected_service_payer = ? THEN 0 ELSE 1 END,
+            created_at ASC
+         LIMIT 1
+      `).get(
+         idempotencyKey,
+         payer,
+         payer,
+      ) as unknown as WatchRow | undefined;
+   }
+
    private currentTime(): Date {
       const now = this.now();
 
@@ -1020,6 +1099,19 @@ export class RoundWatchStore {
          );
       }
    }
+}
+
+function watchSpecMatches(
+   watch: WatchRecord,
+   spec: WatchSpec,
+): boolean {
+   return (
+      watch.expectedSender === spec.expectedSender &&
+      watch.expectedReceiver === spec.expectedReceiver &&
+      watch.assetId === spec.assetId &&
+      watch.atomicAmount === spec.atomicAmount &&
+      (watch.invoiceNote ?? undefined) === (spec.invoiceNote ?? undefined)
+   );
 }
 
 function assertSettlementEvidenceMatches(
