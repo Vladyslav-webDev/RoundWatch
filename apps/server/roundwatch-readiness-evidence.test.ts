@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { AlgorandIndexerClient, type RoundWatchIndexer, type TransactionPage } from './roundwatch-indexer.js';
-import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
+import {
+   DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS,
+   IndexerHealthProbe,
+   type IndexerCapabilityEvidence,
+} from './roundwatch-health-probe.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler, type SettlementLookupIndexer } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
@@ -46,7 +50,31 @@ async function until(condition: () => boolean): Promise<void> {
    assert.fail('timed out waiting for worker cycle');
 }
 
-test('R01: exhausted retry makes no provider request and cannot recover health', async () => {
+test('idle readiness probe is shared and due at most once every configured interval', async () => {
+   let now = 1_000;
+   let calls = 0;
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() {
+         calls += 1;
+         return { polling: true, reconciliation: true };
+      },
+   }, ASSET, () => now);
+
+   await probe.runIfDue();
+   assert.equal(calls, 1);
+   now += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS - 1;
+   await probe.runIfDue();
+   assert.equal(calls, 1);
+   now += 1;
+   await probe.runIfDue();
+   assert.equal(calls, 2);
+   now += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
+   await probe.runIfDue();
+   assert.equal(calls, 3);
+   assert.equal(DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS, 30_000);
+});
+
+test('R01: one transient provider failure is tolerated only while prior success is fresh', async () => {
    let now = new Date('2026-09-28T12:00:00.000Z');
    const store = new RoundWatchStore(':memory:', { workUnitBudget: 1, now: () => now });
    try {
@@ -56,9 +84,13 @@ test('R01: exhausted retry makes no provider request and cannot recover health',
       const tracker = new WorkerHealthTracker(() => now.getTime());
       tracker.markStarted();
       tracker.markProbeResult(true);
+      const lastSuccess = tracker.snapshot(45_000).lastProviderEvidenceAtMs;
       tracker.markCycleStarted();
       tracker.markCycleCompleted(await poller.runOnce());
-      assert.equal(tracker.snapshot(45_000).ready, false);
+      const degraded = tracker.snapshot(45_000);
+      assert.equal(degraded.ready, true);
+      assert.equal(degraded.providerHealth, 'unhealthy');
+      assert.equal(degraded.consecutiveFailures, 1);
       const calls = indexer.calls.length;
       const retryAt = store.getWatch(watch.id)!.pollingRetryAt!;
       now = new Date(Date.parse(retryAt) + 1);
@@ -68,6 +100,12 @@ test('R01: exhausted retry makes no provider request and cannot recover health',
       assert.equal(exhausted.noOp, 1);
       assert.equal(exhausted.providerEvidence, undefined);
       assert.equal(indexer.calls.length, calls);
+      const coolingDown = tracker.snapshot(45_000);
+      assert.equal(coolingDown.ready, true);
+      assert.equal(coolingDown.providerHealth, 'unhealthy');
+      assert.equal(coolingDown.consecutiveFailures, 1);
+      assert.equal(coolingDown.lastProviderEvidenceAtMs, lastSuccess);
+      now = new Date((lastSuccess ?? 0) + 45_001);
       assert.equal(tracker.snapshot(45_000).ready, false);
       assert.equal(store.getWatch(watch.id)?.workUnitsUsed, 1);
    } finally { store.close(); }
@@ -107,7 +145,7 @@ test('R02: restart in durable cooldown starts unknown and probes without chargin
          assert.equal(storeRecord(restarted, watch.id).workUnitsUsed, before.workUnitsUsed);
          assert.equal(storeRecord(restarted, watch.id).pollingRetryAt, before.pollingRetryAt);
          assert.deepEqual(storeRecord(restarted, watch.id), before);
-         healthy = true; probeNow += 15_000;
+         healthy = true; probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
          await until(() => poller.readinessCheck());
          assert.equal(probeCalls, 2);
          assert.equal(indexer.calls.length, 0);
@@ -139,7 +177,7 @@ test('empty startup shares one bounded probe and stop/start requires fresh evide
       assert.equal(store.listPollingCandidates().length, 0);
       assert.equal(store.listSettlementReconciliationCandidates().length, 0);
       evidence = { polling: true, reconciliation: true };
-      probeNow += 15_000;
+      probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
       await until(() => poller.readinessCheck() && reconciler.readinessCheck());
       assert.equal(calls, 2);
       assert.equal(indexer.calls.length, 0);
@@ -153,7 +191,7 @@ test('empty startup shares one bounded probe and stop/start requires fresh evide
       assert.equal(reconciler.readinessCheck(), false);
       await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(calls, 2);
-      probeNow += 15_000;
+      probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
       await until(() => poller.readinessCheck() && reconciler.readinessCheck());
       assert.equal(calls, 3);
    } finally { poller.stop(); reconciler.stop(); store.close(); }
@@ -179,7 +217,7 @@ test('R03: terminal final polling watch leaves a bounded recovery path', async (
       const terminal = store.getWatch(watch.id)!;
       await until(() => probeCalls === 1);
       assert.equal(poller.readinessCheck(), false);
-      recovered = true; probeNow += 15_000;
+      recovered = true; probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
       await until(() => poller.readinessCheck());
       assert.deepEqual(store.getWatch(watch.id), terminal);
    } finally { poller.stop(); store.close(); }
@@ -206,7 +244,7 @@ test('R05: final reconciliation candidate can activate and idle reconciler can r
       const activated = store.getWatch(watch.id)!;
       await until(() => probeCalls === 1);
       assert.equal(reconciler.readinessCheck(), false);
-      recovered = true; probeNow += 15_000;
+      recovered = true; probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
       await until(() => reconciler.readinessCheck());
       assert.deepEqual(store.getWatch(watch.id), activated);
    } finally { reconciler.stop(); store.close(); }
@@ -265,6 +303,7 @@ test('functional probe requires scan, checkpoint block, and both reconciliation 
       assert.ok(paths.some(path => path.includes('/assets/')));
       if (failedRoute !== 'scan') assert.ok(paths.includes('/v2/blocks/101'));
       assert.ok(paths.length <= 5);
+      if (failedRoute === 'none') assert.equal(paths.length, 5);
    }
 });
 
@@ -299,7 +338,7 @@ test('checkpoint 503 keeps an idle poller unready until that route recovers', as
       assert.equal(blockCalls, 1);
       assert.equal(store.listActiveWatches().length, 0);
       blockHealthy = true;
-      probeNow += 15_000;
+      probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
       await until(() => poller.readinessCheck());
       assert.equal(blockCalls, 2);
       assert.equal(store.listActiveWatches().length, 0);
@@ -339,17 +378,34 @@ test('missing-proof and inactive polling turns expose no provider evidence', asy
    assert.equal(indexer.calls.length, 0);
 });
 
-test('mixed progress and isolated failure stays healthy; systemic failure wins', () => {
+test('single systemic failure is degraded-but-ready; repeated failure fails closed and recovery resets', () => {
    const tracker = new WorkerHealthTracker();
    tracker.markStarted(); tracker.markProbeResult(true);
    tracker.markCycleStarted();
    tracker.markCycleCompleted({ attempted: 2, succeeded: 1, failed: 1,
       isolatedFailures: 1, providerEvidence: 1 });
    assert.equal(tracker.snapshot(45_000).ready, true);
+
    tracker.markCycleStarted();
    tracker.markCycleCompleted({ attempted: 2, succeeded: 1, failed: 1,
       providerEvidence: 1 });
-   assert.equal(tracker.snapshot(45_000).ready, false);
+   const transient = tracker.snapshot(45_000);
+   assert.equal(transient.ready, true);
+   assert.equal(transient.providerHealth, 'unhealthy');
+   assert.equal(transient.consecutiveFailures, 1);
+
+   tracker.markCycleStarted();
+   tracker.markCycleCompleted({ attempted: 1, succeeded: 0, failed: 1 });
+   const sustained = tracker.snapshot(45_000);
+   assert.equal(sustained.ready, false);
+   assert.equal(sustained.providerHealth, 'unhealthy');
+   assert.equal(sustained.consecutiveFailures, 2);
+
+   tracker.markProbeResult(true);
+   const recovered = tracker.snapshot(45_000);
+   assert.equal(recovered.ready, true);
+   assert.equal(recovered.providerHealth, 'healthy');
+   assert.equal(recovered.consecutiveFailures, 0);
 });
 
 function storeRecord(store: RoundWatchStore, id: string): WatchRecord {
