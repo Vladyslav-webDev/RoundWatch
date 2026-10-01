@@ -1,0 +1,10 @@
+{
+  "data": {
+    "resources": [
+      {
+        "resource": {"url": "https://example.invalid/pay/b", "description": "Alternate envelope"},
+        "accepts": []
+      }
+    ]
+  }
+}

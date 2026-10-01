@@ -1,0 +1,18 @@
+{
+  "capturedAt": "2026-09-24T12:07:27.130Z",
+  "sourceUrl": "https://example.invalid/discovery/resources",
+  "sourceDescription": "saved discovery response",
+  "items": [
+    {
+      "id": "entry-1",
+      "resourceUrl": "https://example.invalid/pay/a",
+      "description": "Saved service description",
+      "firstSeen": "2026-09-16T10:26:05.997Z",
+      "lastSeen": "2026-09-24T12:07:27.130Z",
+      "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}}}},
+      "accepts": [
+        {"scheme": "exact", "network": "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=", "amount": "100000", "asset": "31566704", "payTo": "PAYEE_A"}
+      ]
+    }
+  ]
+}

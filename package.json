@@ -5,7 +5,8 @@
   "license": "MIT",
   "packageManager": "pnpm@12.3.4",
   "scripts": {
-    "typecheck": "pnpm -C apps/server run typecheck && pnpm -C apps/client run typecheck",
+    "typecheck": "pnpm -C apps/server run typecheck && pnpm -C apps/client run typecheck && pnpm -C apps/observatory run typecheck",
+    "test:observatory": "pnpm -C apps/observatory run test",
     "dev:server": "pnpm -C apps/server run dev",
     "dev:client": "pnpm -C apps/client run dev"
   }
