@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+
+import {
+   ALGORAND_MAINNET_CAIP2,
+   ALGORAND_TESTNET_CAIP2,
+} from './network-config.js';
 
 export type WatchState =
    | 'settlement_pending'
@@ -39,6 +44,7 @@ export interface RoundWatchStoreOptions {
    maxOpenWatchesPerPayer?: number;
    workUnitBudget?: number;
    readinessProbeIntervalMilliseconds?: number;
+   schemaMode?: 'migrate' | 'existing-refund-audit';
    now?: () => Date;
 }
 
@@ -232,6 +238,42 @@ export class RoundWatchStore {
          'readinessProbeIntervalMilliseconds',
       );
       this.now = options.now ?? (() => new Date());
+
+      const schemaMode = options.schemaMode ?? 'migrate';
+
+      if (schemaMode === 'existing-refund-audit') {
+         if (
+            databasePath === ':memory:' ||
+            !existsSync(databasePath) ||
+            !statSync(databasePath).isFile()
+         ) {
+            throw new Error(
+               'Refund audit mode requires an existing SQLite database file',
+            );
+         }
+
+         // Validate the target read-only before opening it for the append. This
+         // prevents an operator typo or unrelated SQLite file from being
+         // created/migrated by a refund command.
+         const validationDatabase = new DatabaseSync(databasePath, {
+            readOnly: true,
+         });
+         try {
+            assertExistingRefundAuditSchema(validationDatabase);
+         } finally {
+            validationDatabase.close();
+         }
+
+         if (!existsSync(databasePath)) {
+            throw new Error(
+               'Refund audit database disappeared after validation',
+            );
+         }
+
+         this.database = new DatabaseSync(databasePath);
+         this.database.exec('PRAGMA foreign_keys = ON;');
+         return;
+      }
 
       if (databasePath !== ':memory:') {
          mkdirSync(dirname(databasePath), { recursive: true });
@@ -1345,23 +1387,114 @@ function mapRow(row: WatchRow): WatchRecord {
          : { pollingRetryAt: row.polling_retry_at }),
    };
 }
+function assertExistingRefundAuditSchema(
+   database: DatabaseSync,
+): void {
+   const watchTable = database.prepare(`
+      SELECT 1 AS present
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'roundwatch_watches'
+   `).get();
+   const refundTable = database.prepare(`
+      SELECT 1 AS present
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'roundwatch_refunds'
+   `).get();
+
+   if (!watchTable || !refundTable) {
+      throw new Error(
+         'Refund audit target is not a current RoundWatch database',
+      );
+   }
+
+   const watchColumns = new Set(
+      (database.prepare('PRAGMA table_info(roundwatch_watches)').all() as Array<{
+         name: string;
+      }>).map(row => row.name),
+   );
+   const requiredWatchColumns = [
+      'id',
+      'idempotency_key',
+      'state',
+      'expected_service_payer',
+      'settlement_reconciliation_terminal',
+      'work_unit_budget',
+      'work_units_used',
+      'polling_failure_count',
+   ];
+   if (requiredWatchColumns.some(column => !watchColumns.has(column))) {
+      throw new Error(
+         'Refund audit target has an unsupported RoundWatch watch schema',
+      );
+   }
+
+   const refundColumns = new Set(
+      (database.prepare('PRAGMA table_info(roundwatch_refunds)').all() as Array<{
+         name: string;
+      }>).map(row => row.name),
+   );
+   const requiredRefundColumns = [
+      'id',
+      'watch_id',
+      'transaction_id',
+      'network',
+      'atomic_amount',
+      'reason',
+      'recorded_at',
+   ];
+   if (requiredRefundColumns.some(column => !refundColumns.has(column))) {
+      throw new Error(
+         'Refund audit target has an unsupported refund schema',
+      );
+   }
+
+   const foreignKeys = database.prepare(
+      'PRAGMA foreign_key_list(roundwatch_refunds)',
+   ).all() as Array<{ table: string; from: string; to: string }>;
+   if (
+      !foreignKeys.some(
+         row =>
+            row.table === 'roundwatch_watches' &&
+            row.from === 'watch_id' &&
+            row.to === 'id',
+      )
+   ) {
+      throw new Error(
+         'Refund audit target does not reference the RoundWatch watch table',
+      );
+   }
+}
+
+const MAX_UINT64 = (1n << 64n) - 1n;
+const ALGORAND_TRANSACTION_ID_PATTERN = /^[A-Z2-7]{52}$/;
+const SUPPORTED_REFUND_NETWORKS = new Set<string>([
+   ALGORAND_TESTNET_CAIP2,
+   ALGORAND_MAINNET_CAIP2,
+]);
+
 function assertRefundEvidence(evidence: RefundEvidence): void {
    if (
       typeof evidence.transaction !== 'string' ||
-      evidence.transaction.length < 1 ||
-      evidence.transaction.length > 128
+      !ALGORAND_TRANSACTION_ID_PATTERN.test(evidence.transaction)
    ) {
-      throw new Error('refund transaction must be a 1-128 character identifier');
+      throw new Error(
+         'refund transaction must be a canonical 52-character Algorand transaction ID',
+      );
    }
    if (
       typeof evidence.network !== 'string' ||
-      evidence.network.length < 1 ||
-      evidence.network.length > 128
+      !SUPPORTED_REFUND_NETWORKS.has(evidence.network)
    ) {
-      throw new Error('refund network must be a 1-128 character identifier');
+      throw new Error('refund network must be a supported RoundWatch Algorand network');
    }
-   if (!/^[1-9]\d*$/.test(evidence.atomicAmount)) {
-      throw new Error('refund atomicAmount must be a positive integer string');
+   if (
+      typeof evidence.atomicAmount !== 'string' ||
+      !/^[1-9]\d*$/.test(evidence.atomicAmount) ||
+      BigInt(evidence.atomicAmount) > MAX_UINT64
+   ) {
+      throw new Error(
+         'refund atomicAmount must be a positive uint64 integer string',
+      );
    }
    if (
       evidence.reason !== undefined &&

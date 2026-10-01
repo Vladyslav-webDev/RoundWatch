@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { FacilitatorClient } from '@x402/core/server';
 import type {
@@ -6168,13 +6170,13 @@ test('refund audit evidence persists separately and never rewrites the watch lif
       assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
 
       const first = store.recordRefundEvidence(watch.id, {
-         transaction: 'REFUND_TX_001',
+         transaction: SIGNED_SERVICE_TX_ID,
          network: ALGORAND_TESTNET,
          atomicAmount: '20000',
          reason: 'service failure refund',
       });
       const replay = store.recordRefundEvidence(watch.id, {
-         transaction: 'REFUND_TX_001',
+         transaction: SIGNED_SERVICE_TX_ID,
          network: ALGORAND_TESTNET,
          atomicAmount: '20000',
          reason: 'service failure refund',
@@ -6185,10 +6187,12 @@ test('refund audit evidence persists separately and never rewrites the watch lif
       assert.equal(store.listRefundEvidence(watch.id).length, 1);
       store.close();
 
-      store = new RoundWatchStore(path);
+      store = new RoundWatchStore(path, {
+         schemaMode: 'existing-refund-audit',
+      });
       const persisted = store.listRefundEvidence(watch.id);
       assert.equal(persisted.length, 1);
-      assert.equal(persisted[0]?.transaction, 'REFUND_TX_001');
+      assert.equal(persisted[0]?.transaction, SIGNED_SERVICE_TX_ID);
       assert.equal(persisted[0]?.atomicAmount, '20000');
       assert.equal(persisted[0]?.reason, 'service failure refund');
       assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
@@ -6199,7 +6203,7 @@ test('refund audit evidence persists separately and never rewrites the watch lif
       ).watch;
       assert.throws(
          () => store.recordRefundEvidence(other.id, {
-            transaction: 'REFUND_TX_001',
+            transaction: SIGNED_SERVICE_TX_ID,
             network: ALGORAND_TESTNET,
             atomicAmount: '20000',
             reason: 'service failure refund',
@@ -6212,6 +6216,167 @@ test('refund audit evidence persists separately and never rewrites the watch lif
    }
 });
 
+
+test('refund audit validation rejects malformed transaction, network, and uint64 overflow', () => {
+   const store = new RoundWatchStore(':memory:');
+
+   try {
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'refund-validation-watch' },
+         intent('REFUND_VALIDATION_SERVICE_TX'),
+      ).watch;
+      const valid = {
+         transaction: SIGNED_SERVICE_TX_ID,
+         network: ALGORAND_TESTNET,
+         atomicAmount: '20000',
+      };
+
+      for (const invalid of [
+         { transaction: ' ' },
+         { transaction: 'A'.repeat(51) },
+         { transaction: '0'.repeat(52) },
+         { network: 'not-a-network' },
+         { atomicAmount: '18446744073709551616' },
+         { atomicAmount: '020000' },
+      ]) {
+         assert.throws(
+            () => store.recordRefundEvidence(watch.id, {
+               ...valid,
+               ...invalid,
+            }),
+         );
+      }
+
+      assert.deepEqual(store.listRefundEvidence(watch.id), []);
+   } finally {
+      store.close();
+   }
+});
+
+test('refund CLI refuses a nonexistent or unrelated database without creating or migrating it', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-refund-cli-'));
+   const missingPath = join(directory, 'typo.sqlite');
+   const unrelatedPath = join(directory, 'unrelated.sqlite');
+   const tsxCli = fileURLToPath(
+      new URL('./node_modules/tsx/dist/cli.mjs', import.meta.url),
+   );
+   const script = fileURLToPath(new URL('./record-refund.ts', import.meta.url));
+   const args = [
+      'missing-watch',
+      SIGNED_SERVICE_TX_ID,
+      ALGORAND_TESTNET,
+      '20000',
+      'operator evidence',
+   ];
+
+   const run = (path: string, extra: string[] = []) =>
+      spawnSync(
+         process.execPath,
+         [tsxCli, script, ...extra, ...args],
+         {
+            env: {
+               ...process.env,
+               ROUNDWATCH_DB_PATH: path,
+            },
+            encoding: 'utf8',
+         },
+      );
+
+   try {
+      const missing = run(missingPath);
+      assert.notEqual(missing.status, 0);
+      assert.equal(existsSync(missingPath), false);
+
+      const unrelated = new DatabaseSync(unrelatedPath);
+      unrelated.exec('CREATE TABLE unrelated (id INTEGER PRIMARY KEY)');
+      unrelated.close();
+
+      const rejected = run(unrelatedPath);
+      assert.notEqual(rejected.status, 0);
+      const check = new DatabaseSync(unrelatedPath, { readOnly: true });
+      const watchTableCount = check.prepare(
+         "SELECT count(*) AS n FROM sqlite_master WHERE name = 'roundwatch_watches'",
+      ).get() as unknown as { n: number };
+      assert.equal(watchTableCount.n, 0);
+      check.close();
+
+      // An explicit separator is tolerated by the script itself. The database
+      // is still nonexistent, so failure must occur at safe target validation,
+      // not because "--" was mistaken for the watch ID.
+      const separator = run(missingPath, ['--']);
+      assert.notEqual(separator.status, 0);
+      assert.equal(existsSync(missingPath), false);
+      assert.doesNotMatch(separator.stderr, /Watch not found: --/);
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
+
+test('refund CLI appends evidence to an existing current store without changing watch lifecycle', () => {
+   const directory = mkdtempSync(join(tmpdir(), 'roundwatch-refund-cli-success-'));
+   const path = join(directory, 'roundwatch.sqlite');
+   const tsxCli = fileURLToPath(
+      new URL('./node_modules/tsx/dist/cli.mjs', import.meta.url),
+   );
+   const script = fileURLToPath(new URL('./record-refund.ts', import.meta.url));
+
+   try {
+      let store = new RoundWatchStore(path, { workUnitBudget: 1 });
+      const watch = store.prepareWatch(
+         { ...SPEC, idempotencyKey: 'refund-cli-success-watch' },
+         intent('REFUND_CLI_SUCCESS_SERVICE_TX'),
+      ).watch;
+      assert.equal(store.claimWorkUnit(watch.id), 'claimed');
+      assert.equal(store.claimWorkUnit(watch.id), 'exhausted');
+      const before = store.getWatch(watch.id)!;
+      assert.equal(before.state, 'indeterminate');
+      store.close();
+
+      const result = spawnSync(
+         process.execPath,
+         [
+            tsxCli,
+            script,
+            '--',
+            watch.id,
+            SIGNED_SERVICE_TX_ID,
+            ALGORAND_TESTNET,
+            '20000',
+            'service failure refund',
+         ],
+         {
+            env: {
+               ...process.env,
+               ROUNDWATCH_DB_PATH: path,
+            },
+            encoding: 'utf8',
+         },
+      );
+      assert.equal(result.status, 0, result.stderr);
+
+      const output = JSON.parse(result.stdout) as {
+         watchState?: string;
+         refund?: {
+            transaction?: string;
+            atomicAmount?: string;
+         };
+      };
+      assert.equal(output.watchState, 'indeterminate');
+      assert.equal(output.refund?.transaction, SIGNED_SERVICE_TX_ID);
+      assert.equal(output.refund?.atomicAmount, '20000');
+
+      store = new RoundWatchStore(path, {
+         schemaMode: 'existing-refund-audit',
+      });
+      assert.deepEqual(store.getWatch(watch.id), before);
+      const refunds = store.listRefundEvidence(watch.id);
+      assert.equal(refunds.length, 1);
+      assert.equal(refunds[0]?.transaction, SIGNED_SERVICE_TX_ID);
+      store.close();
+   } finally {
+      rmSync(directory, { recursive: true, force: true });
+   }
+});
 
 test('legacy migration is idempotent and does not fabricate proof or alter matched state', () => {
    const directory = mkdtempSync(join(tmpdir(), 'roundwatch-legacy-'));
