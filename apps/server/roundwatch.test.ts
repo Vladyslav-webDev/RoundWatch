@@ -1185,7 +1185,7 @@ test('store readiness is cached, writable, and fails after close', () => {
    assert.equal(store.readinessCheck(), false);
 });
 
-test('worker health isolates contained failures but keeps provider failures sticky through cooldown', () => {
+test('worker health tolerates one fresh transient failure but keeps failures sticky through cooldown', () => {
    let now = 1_000;
    const tracker = new WorkerHealthTracker(() => now);
 
@@ -1214,20 +1214,30 @@ test('worker health isolates contained failures but keeps provider failures stic
    now = 3_101;
    assert.equal(tracker.snapshot(1_000).ready, false);
 
-   // A provider/systemic all-failed cycle makes readiness fail.
-   now = 3_200;
-   tracker.markCycleCompleted({ attempted: 2, succeeded: 0, failed: 2 });
-   const failed = tracker.snapshot(1_000);
-   assert.equal(failed.ready, false);
-   assert.equal(failed.consecutiveFailures, 1);
+   // Fresh independent evidence re-establishes readiness before exercising
+   // the bounded one-failure hysteresis.
+   now = 3_150;
+   tracker.markProbeResult(true);
+   assert.equal(tracker.snapshot(1_000).ready, true);
 
-   // Backoff can make the next cycle empty. That must not magically heal the
-   // provider failure and reopen paid admission.
+   // One systemic provider failure is visible as unhealthy/degraded but does
+   // not immediately remove the instance while prior success is still fresh.
+   now = 3_200;
+   tracker.markCycleStarted();
+   tracker.markCycleCompleted({ attempted: 2, succeeded: 0, failed: 2 });
+   const degraded = tracker.snapshot(1_000);
+   assert.equal(degraded.ready, true);
+   assert.equal(degraded.providerHealth, 'unhealthy');
+   assert.equal(degraded.consecutiveFailures, 1);
+
+   // Backoff can make the next cycle empty. That must not fabricate recovery
+   // or refresh provider evidence.
    now = 3_250;
    tracker.markCycleStarted();
    tracker.markCycleCompleted({ attempted: 0, succeeded: 0, failed: 0 });
    const coolingDown = tracker.snapshot(1_000);
-   assert.equal(coolingDown.ready, false);
+   assert.equal(coolingDown.ready, true);
+   assert.equal(coolingDown.providerHealth, 'unhealthy');
    assert.equal(coolingDown.consecutiveFailures, 1);
 
    // A later isolated permanent watch error also cannot erase the earlier
@@ -1240,19 +1250,25 @@ test('worker health isolates contained failures but keeps provider failures stic
       failed: 1,
       isolatedFailures: 1,
    });
-   const stillFailed = tracker.snapshot(1_000);
-   assert.equal(stillFailed.ready, false);
-   assert.equal(stillFailed.consecutiveFailures, 1);
+   const stillDegraded = tracker.snapshot(1_000);
+   assert.equal(stillDegraded.ready, true);
+   assert.equal(stillDegraded.providerHealth, 'unhealthy');
+   assert.equal(stillDegraded.consecutiveFailures, 1);
 
-   // A mixed real success and systemic failure remains unhealthy.
+   // A second systemic failure crosses the bounded threshold and fails closed.
    tracker.markCycleStarted();
    now = 3_300;
    tracker.markCycleProgress();
    tracker.markCycleCompleted({ attempted: 2, succeeded: 1, failed: 1, providerEvidence: 1 });
-   assert.equal(tracker.snapshot(1_000).ready, false);
+   const failed = tracker.snapshot(1_000);
+   assert.equal(failed.ready, false);
+   assert.equal(failed.providerHealth, 'unhealthy');
+   assert.equal(failed.consecutiveFailures, 2);
+
    tracker.markProbeResult(true);
    const recovered = tracker.snapshot(1_000);
    assert.equal(recovered.ready, true);
+   assert.equal(recovered.providerHealth, 'healthy');
    assert.equal(recovered.consecutiveFailures, 0);
    assert.equal(recovered.lastErrorAtMs, 3_300);
 
@@ -1282,14 +1298,18 @@ test('worker health isolates contained failures but keeps provider failures stic
       /isolatedFailures cannot exceed failed/,
    );
 
+   // A failed whole cycle is another systemic failure event. One failure after
+   // a fresh recovery remains degraded-but-ready; a repeated one would fail closed.
    tracker.markCycleStarted();
    tracker.markCycleFailed();
-   assert.equal(tracker.snapshot(1_000).ready, false);
+   const cycleFailure = tracker.snapshot(1_000);
+   assert.equal(cycleFailure.ready, true);
+   assert.equal(cycleFailure.providerHealth, 'unhealthy');
+   assert.equal(cycleFailure.consecutiveFailures, 1);
 
    tracker.markStopped();
    assert.equal(tracker.snapshot(1_000).ready, false);
 });
-
 test('poller cycle outcome exposes isolated watch failures to readiness accounting', async () => {
    const store = new RoundWatchStore(':memory:');
    try {
