@@ -197,6 +197,56 @@ test('empty startup shares one bounded probe and stop/start requires fresh evide
    } finally { poller.stop(); reconciler.stop(); store.close(); }
 });
 
+test('shared probe keeps one reconciliation-only transient ready, then fails closed on repetition and recovers', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let probeNow = 1_000;
+   let evidence: IndexerCapabilityEvidence = { polling: true, reconciliation: true };
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return evidence; },
+   }, ASSET, () => probeNow);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer as SettlementLookupIndexer,
+      { network: NETWORK, intervalMilliseconds: 5 }, undefined, probe);
+
+   try {
+      poller.start(); reconciler.start();
+      await until(() => poller.readinessCheck() && reconciler.readinessCheck());
+
+      evidence = { polling: true, reconciliation: false };
+      probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
+      await until(() => reconciler.healthSnapshot().consecutiveFailures === 1);
+
+      const firstFailure = reconciler.healthSnapshot();
+      assert.equal(firstFailure.ready, true);
+      assert.equal(firstFailure.providerHealth, 'unhealthy');
+      assert.equal(firstFailure.consecutiveFailures, 1);
+      assert.equal(poller.healthSnapshot().ready, true);
+      assert.equal(poller.healthSnapshot().providerHealth, 'healthy');
+
+      probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
+      await until(() => reconciler.healthSnapshot().consecutiveFailures === 2);
+
+      const repeatedFailure = reconciler.healthSnapshot();
+      assert.equal(repeatedFailure.ready, false);
+      assert.equal(repeatedFailure.providerHealth, 'unhealthy');
+      assert.equal(repeatedFailure.consecutiveFailures, 2);
+      assert.equal(poller.healthSnapshot().ready, true);
+
+      evidence = { polling: true, reconciliation: true };
+      probeNow += DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS;
+      await until(() => reconciler.readinessCheck());
+
+      const recovered = reconciler.healthSnapshot();
+      assert.equal(recovered.providerHealth, 'healthy');
+      assert.equal(recovered.consecutiveFailures, 0);
+      assert.equal(poller.readinessCheck(), true);
+   } finally {
+      poller.stop(); reconciler.stop(); store.close();
+   }
+});
+
 test('R03: terminal final polling watch leaves a bounded recovery path', async () => {
    const store = new RoundWatchStore(':memory:');
    const watch = active(store, 'r03');
