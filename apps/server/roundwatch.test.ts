@@ -54,6 +54,7 @@ import {
 } from './request-body.js';
 import {
    IdempotencyConflictError,
+   LegacyIdempotencyReservationError,
    probeSqliteWriteReadiness,
    RoundWatchStore,
    WatchCapacityError,
@@ -2552,6 +2553,57 @@ test('signed discovery idempotency placeholder is rejected before facilitator ve
       assert.equal(
          store.getByIdempotencyKey(spec.idempotencyKey),
          undefined,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('verified payer cannot obtain a legacy NULL-payer watch through replay', async () => {
+   const store = new RoundWatchStore(':memory:');
+
+   try {
+      const legacySpec = {
+         ...SPEC,
+         idempotencyKey: 'legacy-null-payer-http',
+      };
+      const legacy = store.prepareWatch(legacySpec).watch;
+      const facilitator = new MiddlewareFacilitator(
+         store,
+         legacySpec.idempotencyKey,
+      );
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: facilitator,
+         store,
+         indexer: new MiddlewareIndexer(),
+         requireSettlementIntent: true,
+      });
+      const { paymentHeader, body } =
+         await createSyntheticPaidRequest(app, legacySpec);
+
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body,
+      });
+
+      assert.equal(response.status, 409);
+      const rejected = await response.json() as {
+         code?: string;
+         watch?: unknown;
+         watchId?: unknown;
+      };
+      assert.equal(rejected.code, 'legacy_idempotency_conflict');
+      assert.equal(rejected.watch, undefined);
+      assert.equal(rejected.watchId, undefined);
+      assert.equal(facilitator.settleCalls, 0);
+      assert.equal(
+         store.getByIdempotencyKey(legacySpec.idempotencyKey)?.id,
+         legacy.id,
       );
    } finally {
       store.close();
@@ -5851,6 +5903,43 @@ test('same payer and idempotency key cannot be rebound to a different watch spec
          IdempotencyConflictError,
       );
       assert.equal(store.listSettlementReconciliationCandidates().length, 1);
+   } finally {
+      store.close();
+   }
+});
+
+test('legacy NULL-payer idempotency rows remain opaque global reservations', () => {
+   const store = new RoundWatchStore(':memory:', {
+      maxOpenWatches: 10,
+      maxOpenWatchesPerPayer: 10,
+   });
+
+   try {
+      const legacySpec = {
+         ...SPEC,
+         idempotencyKey: 'legacy-null-payer-reservation',
+      };
+      const legacy = store.prepareWatch(legacySpec).watch;
+
+      assert.equal(legacy.expectedServicePayer, undefined);
+      assert.throws(
+         () => store.prepareWatch(
+            legacySpec,
+            intent('LEGACY_FOREIGN_RETRY'),
+         ),
+         LegacyIdempotencyReservationError,
+      );
+      assert.equal(
+         store.getByIdempotencyKey(legacySpec.idempotencyKey)?.id,
+         legacy.id,
+      );
+      assert.equal(
+         store.getByPayerAndIdempotencyKey(
+            PAYER,
+            legacySpec.idempotencyKey,
+         ),
+         undefined,
+      );
    } finally {
       store.close();
    }
