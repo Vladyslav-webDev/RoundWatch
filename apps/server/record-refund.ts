@@ -2,8 +2,11 @@ import { resolve } from 'node:path';
 
 import { RoundWatchStore } from './roundwatch-store.js';
 
+const cliArguments = process.argv.slice(2);
+if (cliArguments[0] === '--') cliArguments.shift();
+
 const [watchId, transaction, network, atomicAmount, ...reasonParts] =
-   process.argv.slice(2);
+   cliArguments;
 const reason = reasonParts.join(' ').trim() || undefined;
 
 if (!watchId || !transaction || !network || !atomicAmount) {
@@ -22,7 +25,9 @@ if (!configuredDatabasePath) {
 }
 
 const databasePath = resolve(configuredDatabasePath);
-const store = new RoundWatchStore(databasePath);
+const store = new RoundWatchStore(databasePath, {
+   schemaMode: 'existing-refund-audit',
+});
 
 try {
    const watch = store.getWatch(watchId);
