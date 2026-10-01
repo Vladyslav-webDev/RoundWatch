@@ -121,6 +121,19 @@ export interface SettlementEvidence {
    payer?: string;
 }
 
+export interface RefundEvidence {
+   transaction: string;
+   network: string;
+   atomicAmount: string;
+   reason?: string;
+}
+
+export interface RefundRecord extends RefundEvidence {
+   id: number;
+   watchId: string;
+   recordedAt: string;
+}
+
 interface WatchRow {
    id: string;
    idempotency_key: string;
@@ -163,6 +176,16 @@ interface WatchRow {
    polling_last_failure_at: string | null;
    polling_retry_at: string | null;
 }
+interface RefundRow {
+   id: number;
+   watch_id: string;
+   transaction_id: string;
+   network: string;
+   atomic_amount: string;
+   reason: string | null;
+   recorded_at: string;
+}
+
 
 export class RoundWatchStore {
    private readonly database: DatabaseSync;
@@ -257,6 +280,10 @@ export class RoundWatchStore {
       );
       this.ensureColumn('polling_retry_at', 'polling_retry_at TEXT');
       this.ensureWatchStateConstraint();
+      // Create audit tables only after the primary watch schema has finished
+      // any rebuild/migration. This prevents foreign-key references from being
+      // retargeted to a temporary legacy table during ALTER TABLE RENAME.
+      this.createRefundAuditTable();
 
       // Existing rows predate the durable work contract. Give them a fresh
       // conservative budget from migration time instead of leaving an
@@ -798,6 +825,71 @@ export class RoundWatchStore {
          WHERE id = ? AND settlement_reconciliation_terminal = 0
       `).run(nextAttemptAt.toISOString(), id);
    }
+   recordRefundEvidence(
+      watchId: string,
+      evidence: RefundEvidence,
+   ): RefundRecord {
+      if (!this.getWatch(watchId)) {
+         throw new Error(`Cannot record refund for missing watch ${watchId}`);
+      }
+      assertRefundEvidence(evidence);
+
+      const existing = this.database.prepare(`
+         SELECT * FROM roundwatch_refunds
+         WHERE transaction_id = ?
+      `).get(evidence.transaction) as unknown as RefundRow | undefined;
+
+      if (existing) {
+         const mapped = mapRefundRow(existing);
+         if (
+            mapped.watchId !== watchId ||
+            mapped.network !== evidence.network ||
+            mapped.atomicAmount !== evidence.atomicAmount ||
+            (mapped.reason ?? undefined) !== (evidence.reason ?? undefined)
+         ) {
+            throw new Error(
+               'Refund transaction is already bound to different audit evidence',
+            );
+         }
+         return mapped;
+      }
+
+      const recordedAt = this.currentTime().toISOString();
+      const result = this.database.prepare(`
+         INSERT INTO roundwatch_refunds (
+            watch_id,
+            transaction_id,
+            network,
+            atomic_amount,
+            reason,
+            recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+         watchId,
+         evidence.transaction,
+         evidence.network,
+         evidence.atomicAmount,
+         evidence.reason ?? null,
+         recordedAt,
+      );
+
+      const row = this.database.prepare(`
+         SELECT * FROM roundwatch_refunds WHERE id = ?
+      `).get(Number(result.lastInsertRowid)) as unknown as RefundRow;
+
+      return mapRefundRow(row);
+   }
+
+   listRefundEvidence(watchId: string): RefundRecord[] {
+      const rows = this.database.prepare(`
+         SELECT * FROM roundwatch_refunds
+         WHERE watch_id = ?
+         ORDER BY recorded_at ASC, id ASC
+      `).all(watchId) as unknown as RefundRow[];
+
+      return rows.map(mapRefundRow);
+   }
+
 
    configuredWorkUnitBudget(): number {
       return this.workUnitBudget;
@@ -1065,6 +1157,24 @@ export class RoundWatchStore {
          payer,
       ) as unknown as WatchRow | undefined;
    }
+   private createRefundAuditTable(): void {
+      this.database.exec(`
+         CREATE TABLE IF NOT EXISTS roundwatch_refunds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            watch_id TEXT NOT NULL,
+            transaction_id TEXT NOT NULL UNIQUE,
+            network TEXT NOT NULL,
+            atomic_amount TEXT NOT NULL,
+            reason TEXT,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY (watch_id) REFERENCES roundwatch_watches(id)
+         );
+
+         CREATE INDEX IF NOT EXISTS roundwatch_refunds_watch_idx
+         ON roundwatch_refunds(watch_id, recorded_at);
+      `);
+   }
+
 
    private currentTime(): Date {
       const now = this.now();
@@ -1218,6 +1328,45 @@ function mapRow(row: WatchRow): WatchRecord {
          : { pollingRetryAt: row.polling_retry_at }),
    };
 }
+function assertRefundEvidence(evidence: RefundEvidence): void {
+   if (
+      typeof evidence.transaction !== 'string' ||
+      evidence.transaction.length < 1 ||
+      evidence.transaction.length > 128
+   ) {
+      throw new Error('refund transaction must be a 1-128 character identifier');
+   }
+   if (
+      typeof evidence.network !== 'string' ||
+      evidence.network.length < 1 ||
+      evidence.network.length > 128
+   ) {
+      throw new Error('refund network must be a 1-128 character identifier');
+   }
+   if (!/^[1-9]\d*$/.test(evidence.atomicAmount)) {
+      throw new Error('refund atomicAmount must be a positive integer string');
+   }
+   if (
+      evidence.reason !== undefined &&
+      (evidence.reason.length < 1 ||
+         Buffer.byteLength(evidence.reason, 'utf8') > 256)
+   ) {
+      throw new Error('refund reason must be 1-256 UTF-8 bytes when supplied');
+   }
+}
+
+function mapRefundRow(row: RefundRow): RefundRecord {
+   return {
+      id: row.id,
+      watchId: row.watch_id,
+      transaction: row.transaction_id,
+      network: row.network,
+      atomicAmount: row.atomic_amount,
+      ...(row.reason === null ? {} : { reason: row.reason }),
+      recordedAt: row.recorded_at,
+   };
+}
+
 
 export function probeSqliteWriteReadiness(
    database: DatabaseSync,
