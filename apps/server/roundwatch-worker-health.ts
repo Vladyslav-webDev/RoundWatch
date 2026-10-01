@@ -17,6 +17,7 @@ export interface WorkerHealthSnapshot {
    started: boolean;
    running: boolean;
    ready: boolean;
+   cycleNotStalled: boolean;
    providerHealth: 'unknown' | 'healthy' | 'unhealthy';
    consecutiveFailures: number;
    lastCycleStartedAtMs?: number;
@@ -84,6 +85,7 @@ export class WorkerHealthTracker {
       // Recovery from unknown/unhealthy requires the independent functional probe.
       if (this.providerHealth === 'healthy' && (outcome.providerEvidence ?? 0) > 0) {
          this.lastProviderEvidenceAtMs = completedAt;
+         this.consecutiveFailures = 0;
       }
    }
 
@@ -95,9 +97,20 @@ export class WorkerHealthTracker {
          this.consecutiveFailures = 0;
          this.lastProviderEvidenceAtMs = at;
       } else {
-         this.providerHealth = 'unhealthy';
          this.consecutiveFailures += 1;
          this.lastErrorAtMs = at;
+
+         // Public readiness uses one-sample hysteresis once health has been
+         // established. A single transient functional-probe failure records
+         // degradation but does not immediately flap /ready. Startup/unknown
+         // state remains fail-closed, and a second consecutive probe failure
+         // marks the provider unhealthy.
+         if (
+            this.providerHealth !== 'healthy' ||
+            this.consecutiveFailures >= 2
+         ) {
+            this.providerHealth = 'unhealthy';
+         }
       }
    }
 
@@ -150,6 +163,7 @@ export class WorkerHealthTracker {
          started: this.started,
          running: this.running,
          ready,
+         cycleNotStalled,
          providerHealth,
          consecutiveFailures: this.consecutiveFailures,
          ...(this.lastCycleStartedAtMs === undefined

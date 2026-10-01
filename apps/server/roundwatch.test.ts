@@ -1144,6 +1144,108 @@ test('liveness and readiness are separate service signals', async () => {
    }
 });
 
+test('paid watch admission refreshes readiness before both discovery 402 and signed retry', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let paidReady = true;
+   let paidChecks = 0;
+   let verifyCalls = 0;
+   let settleCalls = 0;
+
+   try {
+      const facilitator = {
+         getSupported: async () => ({
+            kinds: [
+               {
+                  x402Version: 2,
+                  scheme: 'exact',
+                  network: ALGORAND_TESTNET,
+               },
+            ],
+            extensions: [],
+            signers: {},
+         }),
+         verify: async () => {
+            verifyCalls += 1;
+            return { isValid: true, payer: PAYER };
+         },
+         settle: async () => {
+            settleCalls += 1;
+            throw new Error('blocked signed retry must not settle');
+         },
+      } as unknown as FacilitatorClient;
+
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: facilitator,
+         store,
+         indexer: new MiddlewareIndexer(),
+         readinessCheck: () => ({
+            ready: true,
+            checks: { cached: true },
+         }),
+         paidAdmissionReadinessCheck: async () => {
+            paidChecks += 1;
+            return {
+               ready: paidReady,
+               checks: { freshIndexerCapabilities: paidReady },
+            };
+         },
+      });
+
+      const body = JSON.stringify({
+         idempotencyKey: 'paid-readiness-refresh',
+         expectedSender: WATCH_SENDER,
+         expectedReceiver: RECEIVER,
+         atomicAmount: SPEC.atomicAmount,
+         invoiceNote: SPEC.invoiceNote,
+      });
+
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body,
+      });
+      assert.equal(unpaid.status, 402);
+      assert.equal(paidChecks, 1);
+
+      const encoded = unpaid.headers.get('payment-required');
+      assert.ok(encoded);
+      const required = decodePaymentRequiredHeader(encoded).accepts[0]!;
+      const paymentHeader = encodePaymentSignatureHeader({
+         x402Version: 2,
+         accepted: required,
+         payload: {
+            paymentGroup: [SIGNED_SERVICE_PAYMENT],
+            paymentIndex: 0,
+         },
+      } as PaymentPayload);
+
+      paidReady = false;
+      const signed = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body,
+      });
+
+      assert.equal(signed.status, 503);
+      assert.equal(paidChecks, 2);
+      const rejected = await signed.json() as {
+         code?: string;
+         checks?: Record<string, boolean>;
+      };
+      assert.equal(rejected.code, 'service_not_ready');
+      assert.equal(rejected.checks?.freshIndexerCapabilities, false);
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
+   } finally {
+      store.close();
+   }
+});
+
+
 test('SQLite readiness requires a real write-capable transaction and fails query-only mode', () => {
    const database = new DatabaseSync(':memory:');
    try {

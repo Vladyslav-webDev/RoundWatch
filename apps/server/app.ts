@@ -231,6 +231,7 @@ export interface AppDependencies {
    mcpRequestGateOptions?: SignedPaymentGateOptions;
    recoveryRequestGateOptions?: SignedPaymentGateOptions;
    readinessCheck?: () => ReadinessSnapshot;
+   paidAdmissionReadinessCheck?: () => Promise<ReadinessSnapshot>;
    requestTelemetry?: RequestTelemetryOptions;
 }
 
@@ -382,6 +383,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       mcpRequestGateOptions,
       recoveryRequestGateOptions,
       readinessCheck,
+      paidAdmissionReadinessCheck,
       requestTelemetry,
    } = dependencies;
 
@@ -789,10 +791,12 @@ export function createApp(dependencies: AppDependencies): Hono {
 
       try {
          const storageReady = store.readinessCheck();
-         const snapshot = readinessCheck?.() ?? {
-            ready: storageReady,
-            checks: { storage: storageReady },
-         };
+         const snapshot = paidAdmissionReadinessCheck
+            ? await paidAdmissionReadinessCheck()
+            : readinessCheck?.() ?? {
+                 ready: storageReady,
+                 checks: { storage: storageReady },
+              };
 
          if (!snapshot.ready) {
             c.header('cache-control', 'no-store');

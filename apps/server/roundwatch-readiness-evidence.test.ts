@@ -306,6 +306,89 @@ test('checkpoint 503 keeps an idle poller unready until that route recovers', as
    } finally { poller.stop(); store.close(); }
 });
 
+test('established readiness tolerates one transient probe failure but not two consecutive failures', () => {
+   let now = 1_000;
+   const tracker = new WorkerHealthTracker(() => now);
+   tracker.markStarted();
+   tracker.markProbeResult(true);
+   assert.equal(tracker.snapshot(45_000).ready, true);
+
+   now += 1_000;
+   tracker.markProbeResult(false);
+   let snapshot = tracker.snapshot(45_000);
+   assert.equal(snapshot.ready, true);
+   assert.equal(snapshot.providerHealth, 'healthy');
+   assert.equal(snapshot.consecutiveFailures, 1);
+
+   now += 1_000;
+   tracker.markProbeResult(false);
+   snapshot = tracker.snapshot(45_000);
+   assert.equal(snapshot.ready, false);
+   assert.equal(snapshot.providerHealth, 'unhealthy');
+   assert.equal(snapshot.consecutiveFailures, 2);
+
+   now += 1_000;
+   tracker.markProbeResult(true);
+   snapshot = tracker.snapshot(45_000);
+   assert.equal(snapshot.ready, true);
+   assert.equal(snapshot.consecutiveFailures, 0);
+});
+
+test('idle capability evidence is cached longer, unhealthy evidence accelerates retry, and concurrent callers single-flight', async () => {
+   let now = 1_000;
+   let evidence: IndexerCapabilityEvidence = {
+      polling: true,
+      reconciliation: true,
+   };
+   let calls = 0;
+   const probe = new IndexerHealthProbe(
+      {
+         async probeReadinessCapabilities() {
+            calls += 1;
+            await Promise.resolve();
+            return evidence;
+         },
+      },
+      ASSET,
+      () => now,
+      15_000,
+      120_000,
+   );
+
+   assert.throws(
+      () => probe.runIfDue(14_999),
+      /at least the active probe interval/,
+   );
+
+   const [first, shared] = await Promise.all([
+      probe.runIfDue(probe.idleIntervalMilliseconds()),
+      probe.runIfDue(probe.idleIntervalMilliseconds()),
+   ]);
+   assert.equal(calls, 1);
+   assert.equal(first.revision, shared.revision);
+
+   now += 30_000;
+   const cached = await probe.runIfDue(probe.idleIntervalMilliseconds());
+   assert.equal(calls, 1);
+   assert.equal(cached.revision, first.revision);
+
+   now += 90_000;
+   evidence = { polling: false, reconciliation: false };
+   const failed = await probe.runIfDue(probe.idleIntervalMilliseconds());
+   assert.equal(calls, 2);
+   assert.equal(failed.evidence.polling, false);
+
+   now += 14_000;
+   await probe.runIfDue(probe.idleIntervalMilliseconds());
+   assert.equal(calls, 2);
+
+   now += 1_000;
+   evidence = { polling: true, reconciliation: true };
+   const recovered = await probe.runIfDue(probe.idleIntervalMilliseconds());
+   assert.equal(calls, 3);
+   assert.equal(recovered.evidence.polling, true);
+});
+
 test('health evidence ages out; empty, no-op, and isolated cycles cannot renew it', () => {
    let now = 1_000;
    const tracker = new WorkerHealthTracker(() => now);

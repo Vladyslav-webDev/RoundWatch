@@ -128,7 +128,7 @@ export function buildOpenApiDocument(
                operationId: 'getReadiness',
                summary: 'Check durable-service readiness',
                description:
-                  'Readiness checks cached durable-write capability plus production worker progress/error freshness. A non-ready service refuses new paid watch obligations before x402 verification. Use this endpoint before directing paid traffic.',
+                  'Public readiness checks cached durable-write capability plus production worker progress/error freshness with transient-probe hysteresis. Paid watch admission separately refreshes stale Indexer capability evidence before issuing a 402 or accepting a signed retry, and fails closed before x402 verification when required capabilities are unavailable.',
                responses: {
                   '200': {
                      description: 'RoundWatch is ready to accept paid obligations.',
