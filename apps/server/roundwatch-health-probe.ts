@@ -15,19 +15,21 @@ export interface IndexerCapabilitySource {
 
 export interface IndexerProbeSample {
    revision: number;
+   failureEpoch: number;
    attemptedAtMs: number;
+   completedAtMs: number;
    evidence: IndexerCapabilityEvidence;
 }
 
 // Both workers and paid admission share one probe and one in-flight promise.
-// The source uses the production Indexer client, so every request passes
-// through its dispatcher. Idle callers may request a much longer cache age;
-// unhealthy evidence is always rechecked at the short active interval.
+// Provider failures invalidate cached evidence by epoch rather than by comparing
+// worker Date.now() timestamps with this probe's monotonic performance clock.
 export class IndexerHealthProbe {
    private lastAttemptAtMs?: number;
    private pending?: Promise<IndexerProbeSample>;
    private latest?: IndexerProbeSample;
    private revision = 0;
+   private failureEpoch = 0;
 
    constructor(
       private readonly source: IndexerCapabilitySource,
@@ -52,6 +54,13 @@ export class IndexerHealthProbe {
 
    currentRevision(): number { return this.revision; }
 
+   currentFailureEpoch(): number { return this.failureEpoch; }
+
+   invalidateForProviderFailure(): number {
+      this.failureEpoch += 1;
+      return this.failureEpoch;
+   }
+
    activeIntervalMilliseconds(): number {
       return this.minimumIntervalMs;
    }
@@ -67,17 +76,25 @@ export class IndexerHealthProbe {
       );
    }
 
+   isSampleFreshForAdmission(
+      sample: IndexerProbeSample,
+      maximumEvidenceAgeMs: number,
+   ): boolean {
+      this.assertMaximumEvidenceAge(maximumEvidenceAgeMs);
+      const at = this.now();
+      return (
+         sample.failureEpoch === this.failureEpoch &&
+         sample.completedAtMs >= sample.attemptedAtMs &&
+         sample.completedAtMs - sample.attemptedAtMs <= maximumEvidenceAgeMs &&
+         at >= sample.attemptedAtMs &&
+         at - sample.attemptedAtMs <= maximumEvidenceAgeMs
+      );
+   }
+
    runIfDue(
       maximumEvidenceAgeMs = this.minimumIntervalMs,
    ): Promise<IndexerProbeSample> {
-      if (
-         !Number.isSafeInteger(maximumEvidenceAgeMs) ||
-         maximumEvidenceAgeMs < this.minimumIntervalMs
-      ) {
-         throw new Error(
-            'health probe maximum evidence age must be at least the active probe interval',
-         );
-      }
+      this.assertMaximumEvidenceAge(maximumEvidenceAgeMs);
 
       if (this.pending) return this.pending;
 
@@ -85,11 +102,14 @@ export class IndexerHealthProbe {
       const latestHealthy =
          this.latest?.evidence.polling === true &&
          this.latest.evidence.reconciliation === true;
-      const effectiveMaximumAgeMs = latestHealthy
+      const latestMatchesFailureEpoch =
+         this.latest?.failureEpoch === this.failureEpoch;
+      const effectiveMaximumAgeMs = latestHealthy && latestMatchesFailureEpoch
          ? maximumEvidenceAgeMs
          : Math.min(maximumEvidenceAgeMs, this.minimumIntervalMs);
 
       if (
+         latestMatchesFailureEpoch &&
          this.lastAttemptAtMs !== undefined &&
          at - this.lastAttemptAtMs < effectiveMaximumAgeMs
       ) {
@@ -98,15 +118,33 @@ export class IndexerHealthProbe {
 
       this.lastAttemptAtMs = at;
       const revision = ++this.revision;
+      const failureEpoch = this.failureEpoch;
       const pending = this.source.probeReadinessCapabilities(this.assetId)
          .catch(() => ({ polling: false, reconciliation: false }))
          .then(evidence => {
-            const sample = { revision, attemptedAtMs: at, evidence };
+            const sample = {
+               revision,
+               failureEpoch,
+               attemptedAtMs: at,
+               completedAtMs: this.now(),
+               evidence,
+            };
             this.latest = sample;
             return sample;
          })
          .finally(() => { this.pending = undefined; });
       this.pending = pending;
       return pending;
+   }
+
+   private assertMaximumEvidenceAge(maximumEvidenceAgeMs: number): void {
+      if (
+         !Number.isSafeInteger(maximumEvidenceAgeMs) ||
+         maximumEvidenceAgeMs < this.minimumIntervalMs
+      ) {
+         throw new Error(
+            'health probe maximum evidence age must be at least the active probe interval',
+         );
+      }
    }
 }
