@@ -44,7 +44,10 @@ import type {
    WatchRecord,
    WatchSpec,
 } from './roundwatch-store.js';
-import { WatchCapacityError } from './roundwatch-store.js';
+import {
+   IdempotencyConflictError,
+   WatchCapacityError,
+} from './roundwatch-store.js';
 import { merchantIdentityHtml } from './merchant-identity.js';
 import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
 import {
@@ -78,6 +81,8 @@ const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 const DEFAULT_SIGNED_WATCH_BODY_READ_TIMEOUT_MILLISECONDS = 5_000;
 const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
+const DISCOVERY_IDEMPOTENCY_PLACEHOLDER =
+   'replace-with-unique-idempotency-key';
 const EXAMPLE_MONITORED_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
 const ROUNDWATCH_DISCOVERY_TAGS = [
@@ -250,7 +255,7 @@ function createWatchDiscovery(
    return declareDiscoveryExtension({
       bodyType: 'json',
       input: {
-         idempotencyKey: 'replace-with-unique-idempotency-key',
+         idempotencyKey: DISCOVERY_IDEMPOTENCY_PLACEHOLDER,
          expectedSender: EXAMPLE_MONITORED_SENDER,
          expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
          atomicAmount: '1000000',
@@ -263,7 +268,7 @@ function createWatchDiscovery(
                minLength: 8,
                maxLength: 128,
                description:
-                  'Stable caller-supplied key used to prevent duplicate durable watches for the same payment intent',
+                  'Caller-generated stable key used to prevent duplicate durable watches for the same payment intent. Do not submit the discovery example literal; a UUID is recommended.',
             },
             expectedSender: {
                type: 'string',
@@ -1121,6 +1126,17 @@ export function createApp(dependencies: AppDependencies): Hono {
       try {
          prepared = store.prepareWatch(spec, settlementIntent);
       } catch (error) {
+         if (error instanceof IdempotencyConflictError) {
+            return c.json(
+               {
+                  error:
+                     'Idempotency key is already bound to a different watch specification for this payer',
+                  code: 'idempotency_conflict',
+               },
+               409,
+            );
+         }
+
          if (error instanceof WatchCapacityError) {
             console.warn(`RoundWatch admission rejected scope=${error.scope}`);
             return c.json(
@@ -1141,7 +1157,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       if (!prepared.created) {
          return c.json(
             {
-               error: 'Idempotency key already has a watch',
+               error: 'Idempotency replay: this payer already has a watch for the same key and specification',
+               code: 'idempotency_replay',
                watch: publicWatch(prepared.watch),
             },
             409,
@@ -1197,7 +1214,10 @@ export function createApp(dependencies: AppDependencies): Hono {
          return c.json({ error: 'Invalid recovery request' }, 400);
       }
 
-      const existing = store.getByIdempotencyKey(parsed.spec.idempotencyKey);
+      const existing = store.getByPayerAndIdempotencyKey(
+         servicePayer,
+         parsed.spec.idempotencyKey,
+      );
       const exactMatch =
          existing !== undefined &&
          existing.expectedSender === parsed.spec.expectedSender &&
@@ -1379,6 +1399,14 @@ function extractSettlementIntent(
 function validateNewWatchAdmission(
    spec: WatchSpec,
 ): { error: string; code: string } | undefined {
+   if (spec.idempotencyKey === DISCOVERY_IDEMPOTENCY_PLACEHOLDER) {
+      return {
+         error:
+            'idempotencyKey must be caller-generated; the discovery example literal cannot be used for a paid watch',
+         code: 'example_idempotency_key',
+      };
+   }
+
    const error = newWatchSenderAdmissionError(spec.expectedSender);
    return error
       ? { error, code: 'unsupported_expected_sender' }
