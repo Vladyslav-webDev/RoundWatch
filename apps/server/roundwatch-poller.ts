@@ -106,12 +106,15 @@ export class RoundWatchPoller {
    }
 
    healthSnapshot(): WorkerHealthSnapshot {
-      return this.workerHealth.snapshot(
-         Math.max(
-            this.intervalMilliseconds * 3,
-            this.healthProbe?.readinessFreshnessMilliseconds() ?? 45_000,
+      return {
+         ...this.workerHealth.snapshot(
+            Math.max(
+               this.intervalMilliseconds * 3,
+               this.healthProbe?.readinessFreshnessMilliseconds() ?? 45_000,
+            ),
          ),
-      );
+         generation: this.generation,
+      };
    }
 
    readinessCheck(): boolean {
@@ -518,6 +521,7 @@ export class RoundWatchPoller {
          );
          if (generation !== this.generation) return;
          if (outcome.failed > (outcome.isolatedFailures ?? 0)) {
+            this.healthProbe?.invalidateForProviderFailure();
             this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
          }
          if (this.healthProbe && outcome.failed === (outcome.isolatedFailures ?? 0)) {
@@ -534,7 +538,10 @@ export class RoundWatchPoller {
          }
          this.workerHealth.markCycleCompleted(outcome);
       } catch (error) {
-         if (generation === this.generation) this.workerHealth.markCycleFailed();
+         if (generation === this.generation) {
+            this.healthProbe?.invalidateForProviderFailure();
+            this.workerHealth.markCycleFailed();
+         }
          console.error('RoundWatch poll failed:', safeErrorMessage(error));
       } finally {
          this.running = false;
