@@ -46,6 +46,7 @@ import type {
 } from './roundwatch-store.js';
 import {
    IdempotencyConflictError,
+   LegacyIdempotencyReservationError,
    WatchCapacityError,
 } from './roundwatch-store.js';
 import { merchantIdentityHtml } from './merchant-identity.js';
@@ -1130,6 +1131,17 @@ export function createApp(dependencies: AppDependencies): Hono {
       try {
          prepared = store.prepareWatch(spec, settlementIntent);
       } catch (error) {
+         if (error instanceof LegacyIdempotencyReservationError) {
+            return c.json(
+               {
+                  error:
+                     'Idempotency key is reserved by legacy state whose payer ownership is unknown',
+                  code: 'legacy_idempotency_conflict',
+               },
+               409,
+            );
+         }
+
          if (error instanceof IdempotencyConflictError) {
             return c.json(
                {
