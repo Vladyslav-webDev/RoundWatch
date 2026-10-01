@@ -6,6 +6,7 @@ export interface IndexerCapabilityEvidence {
 }
 
 export const DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS = 30_000;
+export const DEFAULT_INDEXER_HEALTH_EVIDENCE_FRESHNESS_MS = 75_000;
 
 export interface IndexerCapabilitySource {
    probeReadinessCapabilities(assetId: number): Promise<IndexerCapabilityEvidence>;
