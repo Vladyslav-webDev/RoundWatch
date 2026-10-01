@@ -108,6 +108,13 @@ export interface WatchRecord extends WatchSpec {
    pollingRetryAt?: string;
 }
 
+export class LegacyIdempotencyReservationError extends Error {
+   constructor() {
+      super('Idempotency key is reserved by legacy state with unknown payer ownership');
+      this.name = 'LegacyIdempotencyReservationError';
+   }
+}
+
 export class IdempotencyConflictError extends Error {
    constructor(readonly existing: WatchRecord) {
       super('Idempotency key is already bound to a different watch specification');
@@ -396,6 +403,16 @@ export class RoundWatchStore {
 
          if (existingRow) {
             const existing = mapRow(existingRow);
+
+            // A pre-payer legacy row remains a conservative global reservation,
+            // but an incoming verified payer must never be treated as its
+            // authorized owner merely because key/specification happen to match.
+            if (
+               settlementIntent?.payer &&
+               existing.expectedServicePayer === undefined
+            ) {
+               throw new LegacyIdempotencyReservationError();
+            }
 
             if (!watchSpecMatches(existing, spec)) {
                throw new IdempotencyConflictError(existing);
