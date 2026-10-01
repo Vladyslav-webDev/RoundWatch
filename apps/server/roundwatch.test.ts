@@ -506,6 +506,69 @@ test('MCP server supports modern discovery, deterministic tool listing, and watc
             ?.exactDeadlineEligible,
          false,
       );
+      for (const [id, argumentsValue, expectedMessage] of [
+         [
+            28,
+            {
+               idempotencyKey: 'replace-with-unique-idempotency-key',
+               expectedSender: WATCH_SENDER,
+               expectedReceiver: RECEIVER,
+               atomicAmount: '1000000',
+            },
+            /caller-generated/i,
+         ],
+         [
+            29,
+            {
+               idempotencyKey: 'mcp-real-caller-key',
+               expectedSender: WATCH_SENDER,
+               expectedReceiver: RECEIVER,
+               atomicAmount: '1000000',
+               invoiceNote: 'replace-with-unique-invoice-note',
+            },
+            /caller-selected/i,
+         ],
+      ] as const) {
+         const rejectedSentinel = await app.request('/mcp', {
+            method: 'POST',
+            headers: {
+               ...modernHeaders,
+               'mcp-method': 'tools/call',
+               'mcp-name': 'roundwatch.prepare_watch',
+            },
+            body: JSON.stringify({
+               jsonrpc: '2.0',
+               id,
+               method: 'tools/call',
+               params: {
+                  name: 'roundwatch.prepare_watch',
+                  arguments: argumentsValue,
+                  _meta: {
+                     'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                     'io.modelcontextprotocol/clientCapabilities': {},
+                  },
+               },
+            }),
+         });
+         assert.equal(rejectedSentinel.status, 200);
+         const rejectedSentinelBody = await rejectedSentinel.json() as {
+            result?: {
+               isError?: unknown;
+               content?: Array<{ text?: unknown }>;
+               structuredContent?: unknown;
+            };
+         };
+         assert.equal(rejectedSentinelBody.result?.isError, true);
+         assert.match(
+            String(rejectedSentinelBody.result?.content?.[0]?.text ?? ''),
+            expectedMessage,
+         );
+         assert.equal(
+            rejectedSentinelBody.result?.structuredContent,
+            undefined,
+         );
+      }
+
       const rejectedZeroSender = await app.request('/mcp', {
          method: 'POST',
          headers: {
@@ -2554,6 +2617,116 @@ test('signed discovery idempotency placeholder is rejected before facilitator ve
          store.getByIdempotencyKey(spec.idempotencyKey),
          undefined,
       );
+
+      const noteSpec = {
+         ...SPEC,
+         idempotencyKey: 'caller-generated-note-sentinel-test',
+         expectedSender: WATCH_SENDER,
+         invoiceNote: 'replace-with-unique-invoice-note',
+      };
+      const noteRequest = await createSyntheticPaidRequest(app, noteSpec);
+      const noteResponse = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': noteRequest.paymentHeader,
+         },
+         body: noteRequest.body,
+      });
+      assert.equal(noteResponse.status, 400);
+      const noteRejected = await noteResponse.json() as {
+         code?: string;
+         error?: string;
+      };
+      assert.equal(noteRejected.code, 'example_invoice_note');
+      assert.match(noteRejected.error ?? '', /caller-selected/i);
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
+      assert.equal(
+         store.getByIdempotencyKey(noteSpec.idempotencyKey),
+         undefined,
+      );
+   } finally {
+      store.close();
+   }
+});
+
+test('served OpenAPI watch example is structurally useful but cannot execute unchanged', async () => {
+   const store = new RoundWatchStore(':memory:');
+   let verifyCalls = 0;
+   let settleCalls = 0;
+
+   try {
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER,
+         facilitatorClient: {
+            getSupported: async () => ({
+               kinds: [
+                  {
+                     x402Version: 2,
+                     scheme: 'exact',
+                     network: ALGORAND_TESTNET,
+                  },
+               ],
+               extensions: [],
+               signers: {},
+            }),
+            verify: async () => {
+               verifyCalls += 1;
+               throw new Error('OpenAPI example must not reach verification');
+            },
+            settle: async () => {
+               settleCalls += 1;
+               throw new Error('OpenAPI example must not settle');
+            },
+         } as unknown as FacilitatorClient,
+         store,
+         indexer: new MiddlewareIndexer(),
+         requireSettlementIntent: true,
+      });
+
+      const docs = await (await app.request('/openapi.json')).json() as any;
+      const example =
+         docs.paths['/spike/watch'].post.requestBody.content['application/json']
+            .example as Record<string, unknown>;
+      assert.equal(
+         example.idempotencyKey,
+         'replace-with-unique-idempotency-key',
+      );
+      assert.equal(
+         example.invoiceNote,
+         'replace-with-unique-invoice-note',
+      );
+
+      const unpaid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify(example),
+      });
+      assert.equal(unpaid.status, 402);
+      const required = decodePaymentRequiredHeader(
+         unpaid.headers.get('payment-required')!,
+      ).accepts[0]!;
+      const paymentHeader = encodePaymentSignatureHeader({
+         x402Version: 2,
+         accepted: required,
+         payload: {
+            paymentGroup: [SIGNED_SERVICE_PAYMENT],
+            paymentIndex: 0,
+         },
+      } as PaymentPayload);
+
+      const paid = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: {
+            'content-type': 'application/json',
+            'payment-signature': paymentHeader,
+         },
+         body: JSON.stringify(example),
+      });
+      assert.equal(paid.status, 400);
+      assert.equal(verifyCalls, 0);
+      assert.equal(settleCalls, 0);
    } finally {
       store.close();
    }

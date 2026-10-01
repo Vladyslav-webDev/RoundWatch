@@ -2,6 +2,8 @@ import type { RoundWatchNetworkConfig } from './network-config.js';
 import {
    buildWatchEligibilityContract,
    eligibilityBoundarySummary,
+   NEW_WATCH_IDEMPOTENCY_PLACEHOLDER,
+   NEW_WATCH_INVOICE_NOTE_PLACEHOLDER,
 } from './roundwatch-contract.js';
 import { MCP_MODERN_PROTOCOL_VERSION } from './mcp.js';
 
@@ -169,13 +171,13 @@ export function buildOpenApiDocument(
                            $ref: '#/components/schemas/CreateWatchRequest',
                         },
                         example: {
-                           idempotencyKey: 'invoice-2026-09-22-001',
+                           idempotencyKey: NEW_WATCH_IDEMPOTENCY_PLACEHOLDER,
                            expectedSender:
                               'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4',
                            expectedReceiver:
                               'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
                            atomicAmount: '1000000',
-                           invoiceNote: 'roundwatch:invoice-2026-09-22-001',
+                           invoiceNote: NEW_WATCH_INVOICE_NOTE_PLACEHOLDER,
                         },
                      },
                   },

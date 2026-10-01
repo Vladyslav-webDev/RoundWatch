@@ -54,7 +54,9 @@ import { buildLlmsTxt, buildOpenApiDocument } from './api-docs.js';
 import {
    buildWatchEligibilityContract,
    eligibilityBoundarySummary,
-   newWatchSenderAdmissionError,
+   NEW_WATCH_IDEMPOTENCY_PLACEHOLDER,
+   NEW_WATCH_INVOICE_NOTE_PLACEHOLDER,
+   newWatchCallerIntentAdmissionError,
 } from './roundwatch-contract.js';
 import { handleMcpHttpRequest } from './mcp.js';
 import {
@@ -82,8 +84,6 @@ const MAX_SAFE_ATOMIC_AMOUNT_DIGITS = MAX_SAFE_ATOMIC_AMOUNT.toString().length;
 const MAX_PAYMENT_SIGNATURE_HEADER_BYTES = 16 * 1024;
 const DEFAULT_SIGNED_WATCH_BODY_READ_TIMEOUT_MILLISECONDS = 5_000;
 const ROUNDWATCH_SERVICE_NAME = 'RoundWatch';
-const DISCOVERY_IDEMPOTENCY_PLACEHOLDER =
-   'replace-with-unique-idempotency-key';
 const EXAMPLE_MONITORED_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const ROUNDWATCH_ICON_URL = 'https://roundwatch.observer/favicon.svg';
 const ROUNDWATCH_DISCOVERY_TAGS = [
@@ -257,11 +257,11 @@ function createWatchDiscovery(
    return declareDiscoveryExtension({
       bodyType: 'json',
       input: {
-         idempotencyKey: DISCOVERY_IDEMPOTENCY_PLACEHOLDER,
+         idempotencyKey: NEW_WATCH_IDEMPOTENCY_PLACEHOLDER,
          expectedSender: EXAMPLE_MONITORED_SENDER,
          expectedReceiver: 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI',
          atomicAmount: '1000000',
-         invoiceNote: 'replace-with-unique-invoice-note',
+         invoiceNote: NEW_WATCH_INVOICE_NOTE_PLACEHOLDER,
       },
       inputSchema: {
          properties: {
@@ -1415,18 +1415,13 @@ function extractSettlementIntent(
 function validateNewWatchAdmission(
    spec: WatchSpec,
 ): { error: string; code: string } | undefined {
-   if (spec.idempotencyKey === DISCOVERY_IDEMPOTENCY_PLACEHOLDER) {
-      return {
-         error:
-            'idempotencyKey must be caller-generated; the discovery example literal cannot be used for a paid watch',
-         code: 'example_idempotency_key',
-      };
-   }
-
-   const error = newWatchSenderAdmissionError(spec.expectedSender);
-   return error
-      ? { error, code: 'unsupported_expected_sender' }
-      : undefined;
+   return newWatchCallerIntentAdmissionError({
+      idempotencyKey: spec.idempotencyKey,
+      expectedSender: spec.expectedSender,
+      ...(spec.invoiceNote === undefined
+         ? {}
+         : { invoiceNote: spec.invoiceNote }),
+   });
 }
 
 function parseWatchSpec(

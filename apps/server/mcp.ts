@@ -5,6 +5,7 @@ import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
    buildWatchEligibilityContract,
    eligibilityBoundarySummary,
+   newWatchCallerIntentAdmissionError,
    newWatchSenderAdmissionError,
 } from './roundwatch-contract.js';
 import {
@@ -751,7 +752,13 @@ function validateWatchArguments(
 function validatePrepareArguments(
    args: Record<string, unknown>,
 ): { value: PreparedWatchArguments } | { error: string } {
-   return validateWatchArguments(args, false);
+   const parsed = validateWatchArguments(args, false);
+   if ('error' in parsed) return parsed;
+
+   const admissionError = newWatchCallerIntentAdmissionError(parsed.value);
+   return admissionError
+      ? { error: admissionError.error }
+      : parsed;
 }
 
 function validateRecoveryArguments(
