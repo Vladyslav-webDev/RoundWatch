@@ -65,6 +65,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Observatory offline tests
+        run: pnpm -C apps/observatory test
+
       - name: RoundWatch focused tests
         run: pnpm -C apps/server test
 
