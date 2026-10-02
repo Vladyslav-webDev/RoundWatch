@@ -727,6 +727,7 @@ function buildSyntheticTransaction(
 
    return {
       id: `BENCH_TX_${collisionStreamKey}_${minRound}_${maxRound}_${index}`,
+      'tx-type': 'axfer',
       sender: EXPECTED_SENDER,
       note: Buffer.from(noteText, 'utf8').toString('base64'),
       'confirmed-round': round,
@@ -755,6 +756,7 @@ function buildSyntheticTransaction(
 
 interface SyntheticTransaction {
    id: string;
+   'tx-type': 'axfer';
    sender: string;
    note: string;
    'confirmed-round': number;
