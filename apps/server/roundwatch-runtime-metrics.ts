@@ -8,13 +8,19 @@ import type {
    RuntimeResourceSample,
 } from './roundwatch-metrics.js';
 import type { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
+import type { PollerCapacitySnapshot } from './roundwatch-poller.js';
+import type { RoundWatchCapacitySnapshot } from './roundwatch-store.js';
 
 export const DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS = 60_000;
+
+export type CapacityRuntimeSnapshot =
+   RoundWatchCapacitySnapshot & PollerCapacitySnapshot;
 
 export interface EconomicsRuntimeSnapshot {
    resources: RuntimeResourceSample;
    activeWatchMetrics: number;
    freeWork: Record<FreeRequestCategory, FreeWorkSnapshot>;
+   capacity?: CapacityRuntimeSnapshot;
 }
 
 export interface EconomicsRuntimeSamplerOptions {
@@ -25,6 +31,7 @@ export interface EconomicsRuntimeSamplerOptions {
    cpuUsage?: () => NodeJS.CpuUsage;
    fileSize?: (path: string) => number | undefined;
    log?: (snapshot: EconomicsRuntimeSnapshot) => void;
+   capacitySnapshot?: () => CapacityRuntimeSnapshot;
 }
 
 export class RoundWatchRuntimeSampler {
@@ -35,6 +42,7 @@ export class RoundWatchRuntimeSampler {
    private readonly cpuUsage: () => NodeJS.CpuUsage;
    private readonly fileSize: (path: string) => number | undefined;
    private readonly log: (snapshot: EconomicsRuntimeSnapshot) => void;
+   private readonly capacitySnapshot?: () => CapacityRuntimeSnapshot;
    private timer: NodeJS.Timeout | undefined;
    private previousCpu: NodeJS.CpuUsage;
    private previousMonotonic: number;
@@ -54,6 +62,7 @@ export class RoundWatchRuntimeSampler {
       this.memoryUsage = options.memoryUsage ?? (() => process.memoryUsage());
       this.cpuUsage = options.cpuUsage ?? (() => process.cpuUsage());
       this.fileSize = options.fileSize ?? safeFileSize;
+      this.capacitySnapshot = options.capacitySnapshot;
       this.log = options.log ?? (snapshot => {
          console.info(
             `RoundWatch economics runtime ${JSON.stringify(snapshot)}`,
@@ -145,6 +154,9 @@ export class RoundWatchRuntimeSampler {
          },
          activeWatchMetrics: this.metrics.activeWatchMetricCount(),
          freeWork: this.metrics.snapshotAllFreeWork(),
+         ...(this.capacitySnapshot === undefined
+            ? {}
+            : { capacity: this.capacitySnapshot() }),
       };
    }
 
