@@ -401,7 +401,18 @@ const runtimeSampler = economicsMetrics
       economicsMetrics,
       dispatcher,
       databasePath,
-      { intervalMilliseconds: economicsSampleIntervalMilliseconds },
+      {
+         intervalMilliseconds: economicsSampleIntervalMilliseconds,
+         capacitySnapshot: () => {
+            const pollerCapacity = poller.capacitySnapshot();
+            return {
+               ...store.capacitySnapshot(
+                  pollerCapacity.currentIndexerRound,
+               ),
+               ...pollerCapacity,
+            };
+         },
+      },
    )
    : undefined;
 

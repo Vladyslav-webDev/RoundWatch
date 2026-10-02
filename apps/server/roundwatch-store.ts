@@ -147,6 +147,25 @@ export interface RefundRecord extends RefundEvidence {
    recordedAt: string;
 }
 
+export interface RoundWatchScanLagSnapshot {
+   samples: number;
+   p50: number;
+   p95: number;
+   max: number;
+}
+
+export interface RoundWatchCapacitySnapshot {
+   unfinishedWatches: number;
+   activeWatches: number;
+   settlementPendingWatches: number;
+   unresolvedSettlementUnknownWatches: number;
+   activeWatchesMissingScanBaseline: number;
+   watchesPastDeadlineAwaitingCoverage: number;
+   oldestActiveWatchAgeMs?: number;
+   currentIndexerRound?: number;
+   scanLagRounds?: RoundWatchScanLagSnapshot;
+}
+
 interface WatchRow {
    id: string;
    idempotency_key: string;
@@ -950,6 +969,123 @@ export class RoundWatchStore {
    }
 
 
+   capacitySnapshot(
+      currentIndexerRound?: number,
+   ): RoundWatchCapacitySnapshot {
+      if (
+         currentIndexerRound !== undefined &&
+         (!Number.isSafeInteger(currentIndexerRound) ||
+            currentIndexerRound < 0)
+      ) {
+         throw new Error(
+            'currentIndexerRound must be a non-negative safe integer',
+         );
+      }
+
+      const counts = this.database.prepare(`
+         SELECT
+            SUM(
+               CASE
+                  WHEN (
+                     state IN ('settlement_pending', 'active')
+                     OR (
+                        state = 'settlement_unknown'
+                        AND settlement_reconciliation_terminal = 0
+                     )
+                  ) THEN 1
+                  ELSE 0
+               END
+            ) AS unfinished,
+            SUM(CASE WHEN state = 'active' THEN 1 ELSE 0 END) AS active,
+            SUM(
+               CASE WHEN state = 'settlement_pending' THEN 1 ELSE 0 END
+            ) AS pending,
+            SUM(
+               CASE
+                  WHEN state = 'settlement_unknown'
+                     AND settlement_reconciliation_terminal = 0
+                  THEN 1
+                  ELSE 0
+               END
+            ) AS unresolved_unknown
+         FROM roundwatch_watches
+      `).get() as unknown as {
+         unfinished: number | null;
+         active: number | null;
+         pending: number | null;
+         unresolved_unknown: number | null;
+      };
+
+      const activeRows = this.database.prepare(`
+         SELECT
+            scan_after_round,
+            closing_round,
+            activated_at,
+            created_at,
+            expires_at
+         FROM roundwatch_watches
+         WHERE state = 'active'
+      `).all() as unknown as Array<{
+         scan_after_round: number | null;
+         closing_round: number | null;
+         activated_at: string | null;
+         created_at: string;
+         expires_at: string | null;
+      }>;
+
+      const nowMs = this.currentTime().getTime();
+      const activeAges = activeRows
+         .map(row => Date.parse(row.activated_at ?? row.created_at))
+         .filter(Number.isFinite)
+         .map(startedAt => Math.max(0, nowMs - startedAt));
+
+      const lagRounds: number[] = [];
+      if (currentIndexerRound !== undefined) {
+         for (const row of activeRows) {
+            if (row.scan_after_round === null) continue;
+            const targetRound = row.closing_round === null
+               ? currentIndexerRound
+               : Math.min(currentIndexerRound, row.closing_round);
+            lagRounds.push(
+               Math.max(0, targetRound - row.scan_after_round),
+            );
+         }
+      }
+
+      const watchesPastDeadlineAwaitingCoverage = activeRows.filter(row => {
+         if (row.expires_at === null) return false;
+         const expiresAt = Date.parse(row.expires_at);
+         if (!Number.isFinite(expiresAt) || expiresAt > nowMs) return false;
+         return (
+            row.closing_round === null ||
+            row.scan_after_round === null ||
+            row.scan_after_round < row.closing_round
+         );
+      }).length;
+
+      return {
+         unfinishedWatches: counts.unfinished ?? 0,
+         activeWatches: counts.active ?? 0,
+         settlementPendingWatches: counts.pending ?? 0,
+         unresolvedSettlementUnknownWatches:
+            counts.unresolved_unknown ?? 0,
+         activeWatchesMissingScanBaseline: activeRows.filter(
+            row => row.scan_after_round === null,
+         ).length,
+         watchesPastDeadlineAwaitingCoverage,
+         ...(activeAges.length === 0
+            ? {}
+            : { oldestActiveWatchAgeMs: Math.max(...activeAges) }),
+         ...(currentIndexerRound === undefined
+            ? {}
+            : { currentIndexerRound }),
+         ...(lagRounds.length === 0
+            ? {}
+            : { scanLagRounds: roundLagDistribution(lagRounds) }),
+      };
+   }
+
+
    configuredWorkUnitBudget(): number {
       return this.workUnitBudget;
    }
@@ -1387,6 +1523,26 @@ function mapRow(row: WatchRow): WatchRecord {
          : { pollingRetryAt: row.polling_retry_at }),
    };
 }
+function roundLagDistribution(
+   values: number[],
+): RoundWatchScanLagSnapshot {
+   const sorted = [...values].sort((left, right) => left - right);
+   const percentile = (quantile: number): number => {
+      const index = Math.min(
+         sorted.length - 1,
+         Math.max(0, Math.ceil(sorted.length * quantile) - 1),
+      );
+      return sorted[index]!;
+   };
+
+   return {
+      samples: sorted.length,
+      p50: percentile(0.5),
+      p95: percentile(0.95),
+      max: sorted[sorted.length - 1]!,
+   };
+}
+
 function assertExistingRefundAuditSchema(
    database: DatabaseSync,
 ): void {

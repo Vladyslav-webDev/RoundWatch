@@ -221,6 +221,28 @@ test('runtime sampler reports interval CPU, memory, disk, dispatcher, and free-w
             arrayBuffers: 500_000,
          }),
          fileSize: path => path.endsWith('-wal') ? 4_096 : 65_536,
+         capacitySnapshot: () => ({
+            unfinishedWatches: 3,
+            activeWatches: 2,
+            settlementPendingWatches: 1,
+            unresolvedSettlementUnknownWatches: 0,
+            activeWatchesMissingScanBaseline: 0,
+            watchesPastDeadlineAwaitingCoverage: 1,
+            oldestActiveWatchAgeMs: 60_000,
+            currentIndexerRound: 150,
+            scanLagRounds: {
+               samples: 2,
+               p50: 3,
+               p95: 7,
+               max: 7,
+            },
+            lastCycleDurationMs: 25,
+            watchesAttemptedLastCycle: 2,
+            watchesSucceededLastCycle: 2,
+            watchesFailedLastCycle: 0,
+            currentIndexerRoundObservedAt:
+               '2026-09-19T11:59:59.000Z',
+         }),
          log: () => {},
       },
    );
@@ -239,6 +261,89 @@ test('runtime sampler reports interval CPU, memory, disk, dispatcher, and free-w
    assert.equal(snapshot.activeWatchMetrics, 0);
    assert.equal(snapshot.freeWork.health.requests, 1);
    assert.equal(snapshot.freeWork.health.responseBytes, 32);
+   assert.equal(snapshot.capacity?.unfinishedWatches, 3);
+   assert.equal(snapshot.capacity?.scanLagRounds?.p95, 7);
+   assert.equal(snapshot.capacity?.lastCycleDurationMs, 25);
+});
+
+test('capacity snapshot reports durable obligation counts and chain lag', () => {
+   let now = new Date('2026-09-19T12:00:00.000Z');
+   const store = new RoundWatchStore(':memory:', {
+      now: () => now,
+   });
+   const receiver =
+      'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
+   const sender =
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+
+   const prepare = (suffix: string) => store.prepareWatch(
+      {
+         idempotencyKey: `capacity-${suffix}`,
+         expectedSender: sender,
+         expectedReceiver: receiver,
+         assetId: 10458941,
+         atomicAmount: '1',
+      },
+      {
+         expectedTransaction: `SERVICE_CAPACITY_${suffix}`,
+         network: ALGORAND_TESTNET,
+         payer: `PAYER_CAPACITY_${suffix}`,
+         receiver,
+         assetId: 10458941,
+         atomicAmount: '1000',
+         firstValid: 1,
+         lastValid: 1_000,
+      },
+   );
+
+   try {
+      const first = prepare('first');
+      store.activateWatch(
+         first.watch.id,
+         {
+            transaction: 'SERVICE_CAPACITY_first',
+            network: ALGORAND_TESTNET,
+            payer: 'PAYER_CAPACITY_first',
+         },
+         100,
+      );
+      assert.equal(store.advanceScanRound(first.watch.id, 100, 110), true);
+
+      now = new Date('2026-09-19T12:10:00.000Z');
+      const second = prepare('second');
+      store.activateWatch(
+         second.watch.id,
+         {
+            transaction: 'SERVICE_CAPACITY_second',
+            network: ALGORAND_TESTNET,
+            payer: 'PAYER_CAPACITY_second',
+         },
+         120,
+      );
+
+      now = new Date('2026-09-19T12:20:00.000Z');
+      prepare('pending');
+
+      now = new Date('2026-09-19T12:35:00.000Z');
+      const snapshot = store.capacitySnapshot(150);
+
+      assert.equal(snapshot.unfinishedWatches, 3);
+      assert.equal(snapshot.activeWatches, 2);
+      assert.equal(snapshot.settlementPendingWatches, 1);
+      assert.equal(snapshot.unresolvedSettlementUnknownWatches, 0);
+      assert.equal(snapshot.activeWatchesMissingScanBaseline, 0);
+      assert.equal(snapshot.watchesPastDeadlineAwaitingCoverage, 1);
+      assert.equal(snapshot.oldestActiveWatchAgeMs, 35 * 60_000);
+      assert.equal(snapshot.currentIndexerRound, 150);
+      assert.deepEqual(snapshot.scanLagRounds, {
+         samples: 2,
+         p50: 30,
+         p95: 40,
+         max: 40,
+      });
+   } finally {
+      store.close();
+   }
 });
 
 test('HTTP instrumentation separates health, public status, and unpaid watch creation', async () => {
