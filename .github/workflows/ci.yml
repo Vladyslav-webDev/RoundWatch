@@ -71,6 +71,15 @@ jobs:
       - name: RoundWatch focused tests
         run: pnpm -C apps/server test
 
+      - name: Capacity baseline synthetic benchmark
+        env:
+          ROUNDWATCH_BENCH_WATCH_COUNTS: "10,25,50,100"
+          ROUNDWATCH_BENCH_QUERY_VARIANTS: "C"
+          ROUNDWATCH_BENCH_PROFILES: "quiet-exact-note,quiet-no-note,hot-exact-note,adversarial-c-filter-collision"
+          ROUNDWATCH_BENCH_TARGET_ROUNDS: "100"
+          ROUNDWATCH_BENCH_ROUND_WINDOW: "100"
+        run: pnpm -C apps/server run benchmark:economics
+
       - name: MainNet client safety tests
         run: pnpm -C apps/client test
 
