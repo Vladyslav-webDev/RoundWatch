@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+
 import {
    IndexerHttpError,
    matchesWatch,
@@ -30,6 +32,15 @@ export const DEFAULT_POLL_FAILURE_BASE_BACKOFF_MILLISECONDS = 5_000;
 export const MAX_POLL_FAILURE_BACKOFF_MILLISECONDS = 5 * 60_000;
 export const MAX_POLL_RETRY_AFTER_MILLISECONDS = 60 * 60_000;
 
+export interface PollerCapacitySnapshot {
+   lastCycleDurationMs?: number;
+   watchesAttemptedLastCycle: number;
+   watchesSucceededLastCycle: number;
+   watchesFailedLastCycle: number;
+   currentIndexerRound?: number;
+   currentIndexerRoundObservedAt?: string;
+}
+
 interface ScanSession {
    minRound: number;
    maxRound: number;
@@ -53,6 +64,12 @@ export class RoundWatchPoller {
    private historicalPageCacheBytes = 0;
    private readonly workerHealth = new WorkerHealthTracker();
    private lastObservedProbeRevision = 0;
+   private lastCycleDurationMs?: number;
+   private watchesAttemptedLastCycle = 0;
+   private watchesSucceededLastCycle = 0;
+   private watchesFailedLastCycle = 0;
+   private lastObservedIndexerRound?: number;
+   private lastObservedIndexerRoundAt?: string;
 
    constructor(
       private readonly store: RoundWatchStore,
@@ -121,9 +138,30 @@ export class RoundWatchPoller {
       return this.healthSnapshot().ready;
    }
 
+   capacitySnapshot(): PollerCapacitySnapshot {
+      return {
+         ...(this.lastCycleDurationMs === undefined
+            ? {}
+            : { lastCycleDurationMs: this.lastCycleDurationMs }),
+         watchesAttemptedLastCycle: this.watchesAttemptedLastCycle,
+         watchesSucceededLastCycle: this.watchesSucceededLastCycle,
+         watchesFailedLastCycle: this.watchesFailedLastCycle,
+         ...(this.lastObservedIndexerRound === undefined
+            ? {}
+            : { currentIndexerRound: this.lastObservedIndexerRound }),
+         ...(this.lastObservedIndexerRoundAt === undefined
+            ? {}
+            : {
+                 currentIndexerRoundObservedAt:
+                    this.lastObservedIndexerRoundAt,
+              }),
+      };
+   }
+
    async runOnce(
       onProgress?: () => void,
    ): Promise<WorkerCycleOutcome> {
+      const cycleStartedAt = performance.now();
       const outcome: WorkerCycleOutcome = {
          attempted: 0,
          succeeded: 0,
@@ -133,7 +171,7 @@ export class RoundWatchPoller {
 
       if (watches.length === 0) {
          this.nextWatchIndex = 0;
-         return outcome;
+         return this.finishCapacityCycle(outcome, cycleStartedAt);
       }
 
       const startIndex = this.nextWatchIndex % watches.length;
@@ -150,7 +188,13 @@ export class RoundWatchPoller {
       const sharedPages = new Map<string, Promise<TransactionPage>>();
 
       const getSweepTip = (): Promise<number> => {
-         sharedTipPromise ??= this.indexer.getCurrentRound('health');
+         sharedTipPromise ??= this.indexer.getCurrentRound('health').then(
+            round => {
+               this.lastObservedIndexerRound = round;
+               this.lastObservedIndexerRoundAt = this.now().toISOString();
+               return round;
+            },
+         );
          return sharedTipPromise;
       };
 
@@ -232,6 +276,20 @@ export class RoundWatchPoller {
          }
       }
 
+      return this.finishCapacityCycle(outcome, cycleStartedAt);
+   }
+
+   private finishCapacityCycle(
+      outcome: WorkerCycleOutcome,
+      cycleStartedAt: number,
+   ): WorkerCycleOutcome {
+      this.lastCycleDurationMs = Math.max(
+         0,
+         performance.now() - cycleStartedAt,
+      );
+      this.watchesAttemptedLastCycle = outcome.attempted;
+      this.watchesSucceededLastCycle = outcome.succeeded;
+      this.watchesFailedLastCycle = outcome.failed;
       return outcome;
    }
 
