@@ -1,0 +1,1394 @@
+{
+  "recordedAt": "2026-10-02",
+  "productionCommit": "80b4a6aa0454b3afd0a7d3f36e5703576bdd9987",
+  "measurementCommit": "e847522e8aa5d570e8ae5927b18ab17ba307d719",
+  "workflowRunId": 37007545692,
+  "workflowRunNumber": 281,
+  "runner": "ubuntu-latest",
+  "node": "24.14.0",
+  "pnpm": "12.3.4",
+  "configuration": {
+    "watchCounts": [
+      10,
+      25,
+      50,
+      100
+    ],
+    "queryVariants": [
+      "C"
+    ],
+    "profiles": [
+      "quiet-exact-note",
+      "quiet-no-note",
+      "hot-exact-note",
+      "adversarial-c-filter-collision"
+    ],
+    "targetRounds": 100,
+    "roundWindow": 100,
+    "syntheticRequestsPerSecond": 100000,
+    "syntheticBurst": 100000,
+    "dispatcherConcurrency": 2
+  },
+  "results": [
+    {
+      "queryVariant": "C",
+      "profile": "quiet-exact-note",
+      "activity": "quiet",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 10,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 47.79307799999992,
+      "totalRequests": 11,
+      "attributedRequests": 10,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 0.1,
+        "p50": 0,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 0.1,
+        "p50": 0,
+        "p95": 1,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 74.3,
+        "p50": 40,
+        "p95": 383,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.005038500000034673,
+        "p50": 0.004137000000014268,
+        "p95": 0.01017899999999372,
+        "max": 0.01017899999999372
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.45147079999997003,
+        "p50": 0.3021729999999252,
+        "p95": 1.56407999999999,
+        "max": 1.56407999999999
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 10,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 60.461,
+      "cpuSystemMs": 11.271,
+      "peakRssBytes": 175243264,
+      "peakHeapUsedBytes": 67676800,
+      "sqliteBytes": 4096,
+      "walBytes": 828152,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 10,
+      "physicalScanRequests": 10,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.1
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-exact-note",
+      "activity": "quiet",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 25,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 44.29028799999992,
+      "totalRequests": 26,
+      "attributedRequests": 25,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 0.04,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 0.04,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 53.72,
+        "p50": 40,
+        "p95": 40,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.0034127599999828817,
+        "p50": 0.0031060000001161825,
+        "p95": 0.005239999999957945,
+        "max": 0.0053299999999580905
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.17409059999999044,
+        "p50": 0.15829499999995278,
+        "p95": 0.2642409999998563,
+        "max": 0.2826359999999113
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 25,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 22.856,
+      "cpuSystemMs": 20.429,
+      "peakRssBytes": 180879360,
+      "peakHeapUsedBytes": 70268408,
+      "sqliteBytes": 4096,
+      "walBytes": 1903472,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 25,
+      "physicalScanRequests": 25,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.04
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-exact-note",
+      "activity": "quiet",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 50,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 80.33275099999992,
+      "totalRequests": 51,
+      "attributedRequests": 50,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 0.02,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 0.02,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 46.86,
+        "p50": 40,
+        "p95": 40,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.004258200000017496,
+        "p50": 0.002936000000090644,
+        "p95": 0.005521000000044296,
+        "max": 0.03728899999987334
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.14078624000001128,
+        "p50": 0.13245600000004742,
+        "p95": 0.17706900000007408,
+        "max": 0.22565000000008695
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 50,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 50.464,
+      "cpuSystemMs": 28.493,
+      "peakRssBytes": 190316544,
+      "peakHeapUsedBytes": 74634744,
+      "sqliteBytes": 4096,
+      "walBytes": 3699792,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 50,
+      "physicalScanRequests": 50,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.02
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-exact-note",
+      "activity": "quiet",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 100,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 101.21730700000012,
+      "totalRequests": 101,
+      "attributedRequests": 100,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 0.01,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 0.01,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 43.43,
+        "p50": 40,
+        "p95": 40,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.002961169999991853,
+        "p50": 0.0026149999998779094,
+        "p95": 0.0038870000000770233,
+        "max": 0.02587800000014795
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.24237066000001734,
+        "p50": 0.11658699999998134,
+        "p95": 0.20190499999989697,
+        "max": 11.854213000000072
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 100,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 112.528,
+      "cpuSystemMs": 46.147,
+      "peakRssBytes": 212598784,
+      "peakHeapUsedBytes": 63347440,
+      "sqliteBytes": 126976,
+      "walBytes": 4140632,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 100,
+      "physicalScanRequests": 100,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.01
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-no-note",
+      "activity": "quiet",
+      "withNote": false,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 10,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 13.481690999999955,
+      "totalRequests": 2,
+      "attributedRequests": 1,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 0.1,
+        "p50": 0,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 38.3,
+        "p50": 0,
+        "p95": 383,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.00020439999998416168,
+        "p50": 0,
+        "p95": 0.002043999999841617,
+        "max": 0.002043999999841617
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.02126650000000154,
+        "p50": 0,
+        "p95": 0.21266500000001543,
+        "max": 0.21266500000001543
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 1,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 8.802,
+      "cpuSystemMs": 7.546,
+      "peakRssBytes": 212729856,
+      "peakHeapUsedBytes": 65372424,
+      "sqliteBytes": 4096,
+      "walBytes": 828152,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 10,
+      "logicalScanPages": 10,
+      "physicalScanRequests": 1,
+      "scanPageReuseFactor": 10,
+      "effectivePhysicalRequestsPerWatch": 0.2
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-no-note",
+      "activity": "quiet",
+      "withNote": false,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 25,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 29.401460000000043,
+      "totalRequests": 2,
+      "attributedRequests": 1,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 0.04,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 15.32,
+        "p50": 0,
+        "p95": 0,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.00007136000000173226,
+        "p50": 0,
+        "p95": 0,
+        "max": 0.0017840000000433065
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.0066543600000022705,
+        "p50": 0,
+        "p95": 0,
+        "max": 0.16635900000005677
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 1,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 24.422,
+      "cpuSystemMs": 6.936,
+      "peakRssBytes": 212860928,
+      "peakHeapUsedBytes": 67100904,
+      "sqliteBytes": 4096,
+      "walBytes": 1903472,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 25,
+      "logicalScanPages": 25,
+      "physicalScanRequests": 1,
+      "scanPageReuseFactor": 25,
+      "effectivePhysicalRequestsPerWatch": 0.08
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-no-note",
+      "activity": "quiet",
+      "withNote": false,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 50,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 64.47691199999986,
+      "totalRequests": 2,
+      "attributedRequests": 1,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 0.02,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 7.66,
+        "p50": 0,
+        "p95": 0,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.00003725999999915075,
+        "p50": 0,
+        "p95": 0,
+        "max": 0.0018629999999575375
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.0031093800000007834,
+        "p50": 0,
+        "p95": 0,
+        "max": 0.15546900000003916
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 1,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 45.618,
+      "cpuSystemMs": 24.534,
+      "peakRssBytes": 212766720,
+      "peakHeapUsedBytes": 69963800,
+      "sqliteBytes": 4096,
+      "walBytes": 3687432,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 50,
+      "logicalScanPages": 50,
+      "physicalScanRequests": 1,
+      "scanPageReuseFactor": 50,
+      "effectivePhysicalRequestsPerWatch": 0.04
+    },
+    {
+      "queryVariant": "C",
+      "profile": "quiet-no-note",
+      "activity": "quiet",
+      "withNote": false,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 100,
+      "targetRounds": 100,
+      "transactionsPerWindow": 5,
+      "sweeps": 1,
+      "elapsedMs": 71.55620999999996,
+      "totalRequests": 2,
+      "attributedRequests": 1,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 0.01,
+        "p50": 0,
+        "p95": 0,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "responseBytesPerWatch": {
+        "mean": 3.83,
+        "p50": 0,
+        "p95": 0,
+        "max": 383
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.000019629999999324356,
+        "p50": 0,
+        "p95": 0,
+        "max": 0.0019629999999324355
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 0.0018623700000011923,
+        "p50": 0,
+        "p95": 0,
+        "max": 0.18623700000011922
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 1,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 84.382,
+      "cpuSystemMs": 31.801,
+      "peakRssBytes": 216174592,
+      "peakHeapUsedBytes": 74956912,
+      "sqliteBytes": 126976,
+      "walBytes": 4120032,
+      "uniqueSyntheticTransactionsServed": 1,
+      "transactionReuseFactor": 100,
+      "logicalScanPages": 100,
+      "physicalScanRequests": 1,
+      "scanPageReuseFactor": 100,
+      "effectivePhysicalRequestsPerWatch": 0.02
+    },
+    {
+      "queryVariant": "C",
+      "profile": "hot-exact-note",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 10,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 1,
+      "elapsedMs": 53.08707200000026,
+      "totalRequests": 11,
+      "attributedRequests": 10,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 15,
+        "p50": 12,
+        "p95": 22,
+        "max": 22
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 15,
+        "p50": 12,
+        "p95": 22,
+        "max": 22
+      },
+      "responseBytesPerWatch": {
+        "mean": 4940.8,
+        "p50": 4045,
+        "p95": 7307,
+        "max": 7307
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.004447199999958684,
+        "p50": 0.0021439999995891412,
+        "p95": 0.02538700000013705,
+        "max": 0.02538700000013705
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 3.6736239000000297,
+        "p50": 3.042631000000256,
+        "p95": 6.7289810000002035,
+        "max": 6.7289810000002035
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 10,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 77.382,
+      "cpuSystemMs": 6.025,
+      "peakRssBytes": 223612928,
+      "peakHeapUsedBytes": 62443616,
+      "sqliteBytes": 4096,
+      "walBytes": 828152,
+      "uniqueSyntheticTransactionsServed": 150,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 10,
+      "physicalScanRequests": 10,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.1
+    },
+    {
+      "queryVariant": "C",
+      "profile": "hot-exact-note",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 25,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 1,
+      "elapsedMs": 87.64373399999977,
+      "totalRequests": 26,
+      "attributedRequests": 25,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 7.2,
+        "p50": 2,
+        "p95": 22,
+        "max": 22
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 7.2,
+        "p50": 2,
+        "p95": 22,
+        "max": 22
+      },
+      "responseBytesPerWatch": {
+        "mean": 2390.56,
+        "p50": 709,
+        "p95": 7306,
+        "max": 7307
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.0017797600000085368,
+        "p50": 0.001783000000159518,
+        "p95": 0.002185000000281434,
+        "max": 0.0022839999996904226
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 1.973646960000042,
+        "p50": 1.9541549999999006,
+        "p95": 2.1582250000001295,
+        "max": 2.164658000000145
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 25,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 75.629,
+      "cpuSystemMs": 15.974,
+      "peakRssBytes": 223531008,
+      "peakHeapUsedBytes": 93607008,
+      "sqliteBytes": 4096,
+      "walBytes": 1903472,
+      "uniqueSyntheticTransactionsServed": 150,
+      "transactionReuseFactor": 1.2,
+      "logicalScanPages": 25,
+      "physicalScanRequests": 25,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.04
+    },
+    {
+      "queryVariant": "C",
+      "profile": "hot-exact-note",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 50,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 1,
+      "elapsedMs": 183.77292699999998,
+      "totalRequests": 51,
+      "attributedRequests": 50,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 4.6,
+        "p50": 2,
+        "p95": 22,
+        "max": 22
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 4.6,
+        "p50": 2,
+        "p95": 22,
+        "max": 22
+      },
+      "responseBytesPerWatch": {
+        "mean": 1542.96,
+        "p50": 678,
+        "p95": 7183,
+        "max": 7307
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.001876639999982217,
+        "p50": 0.0017430000002605084,
+        "p95": 0.002966000000014901,
+        "max": 0.004066999999849941
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 2.187847240000001,
+        "p50": 2.0908810000000813,
+        "p95": 2.465346999999838,
+        "max": 2.550615999999991
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 50,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 155.682,
+      "cpuSystemMs": 35.538,
+      "peakRssBytes": 250400768,
+      "peakHeapUsedBytes": 121340032,
+      "sqliteBytes": 4096,
+      "walBytes": 3687432,
+      "uniqueSyntheticTransactionsServed": 150,
+      "transactionReuseFactor": 1.5333333333333334,
+      "logicalScanPages": 50,
+      "physicalScanRequests": 50,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.02
+    },
+    {
+      "queryVariant": "C",
+      "profile": "hot-exact-note",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": false,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 100,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 1,
+      "elapsedMs": 314.980407,
+      "totalRequests": 101,
+      "attributedRequests": 100,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "pagesPerWatch": {
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 2.8,
+        "p50": 2,
+        "p95": 12,
+        "max": 22
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 2.8,
+        "p50": 2,
+        "p95": 12,
+        "max": 22
+      },
+      "responseBytesPerWatch": {
+        "mean": 953.95,
+        "p50": 678,
+        "p95": 4045,
+        "max": 7307
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.001816579999986061,
+        "p50": 0.0016829999999572465,
+        "p95": 0.0023949999999786087,
+        "max": 0.003937999999834574
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 2.1377339000000304,
+        "p50": 1.887101000000257,
+        "p95": 2.58247399999982,
+        "max": 8.98660800000016
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 100,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 318.978,
+      "cpuSystemMs": 36.931,
+      "peakRssBytes": 291971072,
+      "peakHeapUsedBytes": 108889712,
+      "sqliteBytes": 126976,
+      "walBytes": 4120032,
+      "uniqueSyntheticTransactionsServed": 150,
+      "transactionReuseFactor": 1.8666666666666667,
+      "logicalScanPages": 100,
+      "physicalScanRequests": 100,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 1.01
+    },
+    {
+      "queryVariant": "C",
+      "profile": "adversarial-c-filter-collision",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": true,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 10,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 2,
+      "elapsedMs": 163.58129000000008,
+      "totalRequests": 21,
+      "attributedRequests": 20,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "pagesPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "responseBytesPerWatch": {
+        "mean": 511988,
+        "p50": 511988,
+        "p95": 511988,
+        "max": 511988
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.003994199999942794,
+        "p50": 0.0037569999999504944,
+        "p95": 0.005840999999691121,
+        "max": 0.005840999999691121
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 11.635842400000048,
+        "p50": 11.059114999999565,
+        "p95": 13.669399999999769,
+        "max": 13.669399999999769
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 20,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 170.269,
+      "cpuSystemMs": 19.617,
+      "peakRssBytes": 304001024,
+      "peakHeapUsedBytes": 109535264,
+      "sqliteBytes": 4096,
+      "walBytes": 910552,
+      "uniqueSyntheticTransactionsServed": 15000,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 20,
+      "physicalScanRequests": 20,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 2.1
+    },
+    {
+      "queryVariant": "C",
+      "profile": "adversarial-c-filter-collision",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": true,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 25,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 2,
+      "elapsedMs": 354.4151670000001,
+      "totalRequests": 51,
+      "attributedRequests": 50,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "pagesPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "responseBytesPerWatch": {
+        "mean": 522788,
+        "p50": 529988,
+        "p95": 529988,
+        "max": 529988
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.0050932400000237976,
+        "p50": 0.004227999999784515,
+        "p95": 0.006461999999828549,
+        "max": 0.024245000000519212
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 10.514357200000031,
+        "p50": 9.578901000000315,
+        "p95": 16.05977699999994,
+        "max": 16.089883999999984
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 50,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 370.894,
+      "cpuSystemMs": 47.141,
+      "peakRssBytes": 325632000,
+      "peakHeapUsedBytes": 118898904,
+      "sqliteBytes": 4096,
+      "walBytes": 2109472,
+      "uniqueSyntheticTransactionsServed": 37500,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 50,
+      "physicalScanRequests": 50,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 2.04
+    },
+    {
+      "queryVariant": "C",
+      "profile": "adversarial-c-filter-collision",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": true,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 50,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 2,
+      "elapsedMs": 728.8886530000004,
+      "totalRequests": 101,
+      "attributedRequests": 100,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "pagesPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "responseBytesPerWatch": {
+        "mean": 526388,
+        "p50": 529988,
+        "p95": 529988,
+        "max": 529988
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.004814639999976862,
+        "p50": 0.0045679999998355925,
+        "p95": 0.006852999999864551,
+        "max": 0.007714000000305532
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 10.836823820000028,
+        "p50": 9.688284000000749,
+        "p95": 19.73810999999978,
+        "max": 23.292893999999706
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 100,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 691.132,
+      "cpuSystemMs": 88.282,
+      "peakRssBytes": 352014336,
+      "peakHeapUsedBytes": 128400400,
+      "sqliteBytes": 118784,
+      "walBytes": 4120032,
+      "uniqueSyntheticTransactionsServed": 75000,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 100,
+      "physicalScanRequests": 100,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 2.02
+    },
+    {
+      "queryVariant": "C",
+      "profile": "adversarial-c-filter-collision",
+      "activity": "hot",
+      "withNote": true,
+      "adversarialFilterCollision": true,
+      "sharedFilterAcrossWatches": false,
+      "staggeredAdmissions": false,
+      "activeWatches": 100,
+      "targetRounds": 100,
+      "transactionsPerWindow": 1500,
+      "sweeps": 2,
+      "elapsedMs": 1370.614318,
+      "totalRequests": 201,
+      "attributedRequests": 200,
+      "sharedRequests": 1,
+      "requestsPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "pagesPerWatch": {
+        "mean": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "transactionsReturnedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "transactionsExaminedPerWatch": {
+        "mean": 1500,
+        "p50": 1500,
+        "p95": 1500,
+        "max": 1500
+      },
+      "responseBytesPerWatch": {
+        "mean": 528188,
+        "p50": 529988,
+        "p95": 529988,
+        "max": 529988
+      },
+      "queueWaitMsPerWatch": {
+        "mean": 0.004131029999998645,
+        "p50": 0.003798000000642787,
+        "p95": 0.005761000000347849,
+        "max": 0.00940699999955541
+      },
+      "indexerWallMsPerWatch": {
+        "mean": 10.711576339999992,
+        "p50": 9.61856699999953,
+        "p95": 17.149540000000343,
+        "max": 37.713033000000905
+      },
+      "roundsCoveredPerWatch": {
+        "mean": 100,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "requestsByPurpose": {
+        "activation": 0,
+        "reconciliation": 0,
+        "absence-proof": 0,
+        "scan-page": 200,
+        "checkpoint": 0,
+        "health": 1
+      },
+      "cpuUserMs": 1354.577,
+      "cpuSystemMs": 169.223,
+      "peakRssBytes": 409100288,
+      "peakHeapUsedBytes": 152495408,
+      "sqliteBytes": 196608,
+      "walBytes": 4128272,
+      "uniqueSyntheticTransactionsServed": 150000,
+      "transactionReuseFactor": 1,
+      "logicalScanPages": 200,
+      "physicalScanRequests": 200,
+      "scanPageReuseFactor": 1,
+      "effectivePhysicalRequestsPerWatch": 2.01
+    }
+  ]
+}
