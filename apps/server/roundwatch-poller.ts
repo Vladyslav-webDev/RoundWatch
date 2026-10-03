@@ -161,6 +161,7 @@ export class RoundWatchPoller {
    async runOnce(
       onProgress?: () => void,
    ): Promise<WorkerCycleOutcome> {
+      const generation = this.generation;
       const cycleStartedAt = performance.now();
       const outcome: WorkerCycleOutcome = {
          attempted: 0,
@@ -257,13 +258,24 @@ export class RoundWatchPoller {
             onProgress?.();
          } catch (error) {
             outcome.failed += 1;
+            const failure = classifyPollingFailure(error);
+            if (
+               failure.disposition !== 'permanent' &&
+               generation === this.generation
+            ) {
+               // Publish at recognition, before another watch can await the
+               // provider. Completion records statistics, not another epoch.
+               this.healthProbe?.invalidateForProviderFailure();
+               this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
+               this.workerHealth.markProviderFailure();
+            }
             this.sessions.delete(watch.id);
             // A cached page may contain a provider continuation token that
             // later became invalid. Clear the bounded cache on any scan-path
             // failure so the next admitted attempt restarts from durable
             // coverage rather than replaying stale provider state.
             this.clearHistoricalPageCache();
-            const persisted = this.persistPollingFailure(watch, error);
+            const persisted = this.persistPollingFailure(watch, failure);
             if (persisted?.state === 'indeterminate') {
                outcome.isolatedFailures =
                   (outcome.isolatedFailures ?? 0) + 1;
@@ -295,10 +307,8 @@ export class RoundWatchPoller {
 
    private persistPollingFailure(
       watch: WatchRecord,
-      error: unknown,
+      failure: ClassifiedPollingFailure,
    ): WatchRecord | undefined {
-      const failure = classifyPollingFailure(error);
-
       if (failure.disposition === 'permanent') {
          const updated = this.store.recordPollingFailure(watch.id, {
             code: failure.code,
@@ -578,10 +588,6 @@ export class RoundWatchPoller {
             { if (generation === this.generation) this.workerHealth.markCycleProgress(); },
          );
          if (generation !== this.generation) return;
-         if (outcome.failed > (outcome.isolatedFailures ?? 0)) {
-            this.healthProbe?.invalidateForProviderFailure();
-            this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
-         }
          if (this.healthProbe && outcome.failed === (outcome.isolatedFailures ?? 0)) {
             const probeAge =
                outcome.attempted === 0
@@ -589,7 +595,10 @@ export class RoundWatchPoller {
                   : this.healthProbe.activeIntervalMilliseconds();
             const sample = await this.healthProbe.runIfDue(probeAge);
             if (generation !== this.generation) return;
-            if (sample.revision > this.lastObservedProbeRevision) {
+            if (
+               sample.revision > this.lastObservedProbeRevision &&
+               this.healthProbe.isSampleFreshForAdmission(sample, probeAge)
+            ) {
                this.lastObservedProbeRevision = sample.revision;
                this.workerHealth.markProbeResult(sample.evidence.polling);
             }

@@ -30,6 +30,7 @@ import {
    type SignedPaymentGateOptions,
 } from './free-payment-gate.js';
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
+import type { PaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
 import type {
    FreeRequestCategory,
    RoundWatchEconomicsMetrics,
@@ -232,7 +233,7 @@ export interface AppDependencies {
    mcpRequestGateOptions?: SignedPaymentGateOptions;
    recoveryRequestGateOptions?: SignedPaymentGateOptions;
    readinessCheck?: () => ReadinessSnapshot;
-   paidAdmissionReadinessCheck?: () => Promise<ReadinessSnapshot>;
+   paidAdmissionReadinessCheck?: PaidAdmissionReadinessCheck;
    requestTelemetry?: RequestTelemetryOptions;
 }
 
@@ -1127,6 +1128,47 @@ export function createApp(dependencies: AppDependencies): Hono {
       }
 
       let prepared;
+
+      // The authorization flow verifies before this handler and settles only
+      // after a successful response. Async refresh can itself return across a
+      // microtask gap, so consume CURRENT readiness synchronously afterward.
+      // No await separates validateCurrent from prepareWatch's durable commit.
+      // A 503 skips x402 settlement.
+      try {
+         const storageReady = store.readinessCheck();
+         let snapshot = paidAdmissionReadinessCheck
+            ? await paidAdmissionReadinessCheck()
+            : readinessCheck?.() ?? {
+                 ready: storageReady,
+                 checks: { storage: storageReady },
+              };
+
+         if (snapshot.ready && paidAdmissionReadinessCheck) {
+            snapshot = paidAdmissionReadinessCheck.validateCurrent(snapshot);
+         }
+
+         if (!snapshot.ready) {
+            return c.json(
+               {
+                  error:
+                     'RoundWatch is not ready to accept paid watch obligations',
+                  code: 'service_not_ready',
+                  checks: snapshot.checks,
+               },
+               503,
+            );
+         }
+      } catch {
+         return c.json(
+            {
+               error:
+                  'RoundWatch is not ready to accept paid watch obligations',
+               code: 'service_not_ready',
+               checks: { readinessCheck: false },
+            },
+            503,
+         );
+      }
 
       try {
          prepared = store.prepareWatch(spec, settlementIntent);
