@@ -100,7 +100,10 @@ export class SettlementReconciler {
                         : this.healthProbe.activeIntervalMilliseconds();
                   const sample = await this.healthProbe.runIfDue(probeAge);
                   if (generation !== this.generation) return;
-                  if (sample.revision > this.lastObservedProbeRevision) {
+                  if (
+                     sample.revision > this.lastObservedProbeRevision &&
+                     this.healthProbe.isSampleFreshForAdmission(sample, probeAge)
+                  ) {
                      this.lastObservedProbeRevision = sample.revision;
                      this.workerHealth.markProbeResult(sample.evidence.reconciliation);
                   }

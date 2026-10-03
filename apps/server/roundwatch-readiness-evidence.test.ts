@@ -639,6 +639,273 @@ async function flushUntil(condition: () => boolean): Promise<void> {
    assert.fail('worker did not reach the expected state after draining microtasks');
 }
 
+test('Wave A follow-up: two failed customer turns sharing one physical tip request invalidate evidence once', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+   }, ASSET, () => 1_000);
+   const entered = deferredSignal();
+   let rejectTip!: (error: Error) => void;
+   const held = new Promise<number>((_resolve, reject) => { rejectTip = reject; });
+   let physicalRequests = 0;
+   const indexer = fakeIndexer({ getCurrentRound() {
+      physicalRequests += 1;
+      entered.release();
+      return held;
+   } });
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   let sweep: Promise<unknown> | undefined;
+   try {
+      active(store, 'shared-failure-first');
+      active(store, 'shared-failure-second');
+      const healthy = await probe.runIfDue(30_000);
+      const before = probe.currentFailureEpoch();
+      sweep = poller.runOnce();
+      await entered.promise;
+      rejectTip(new TypeError('one shared physical provider failure'));
+      const outcome = await sweep;
+      assert.deepEqual(outcome, { attempted: 2, succeeded: 0, failed: 2 });
+      assert.equal(physicalRequests, 1);
+      assert.equal(probe.currentFailureEpoch(), before + 1);
+      assert.equal(probe.isSampleFreshForAdmission(healthy, 30_000), false);
+      assert.equal(poller.healthSnapshot().providerHealth, 'unhealthy');
+      assert.equal(poller.capacitySnapshot().watchesFailedLastCycle, 2);
+      assert.ok(store.listActiveWatches().every(watch => watch.pollingFailureCount === 1));
+   } finally {
+      rejectTip(new TypeError('test cleanup'));
+      await sweep;
+      store.close();
+   }
+});
+
+test('Wave A P2 revision: a newer coalesced failure obsoletes held recovery before paid consumption', async () => {
+   let now = 1_000;
+   let calls = 0;
+   const held = deferredSignal();
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      if (calls === 2) await held.promise;
+      return { polling: true, reconciliation: true };
+   } }, ASSET, () => now);
+   const worker = { healthSnapshot: () => ({ started: true, running: false,
+      ready: true, cycleNotStalled: true, providerHealth: 'healthy' as const,
+      consecutiveFailures: 0, generation: 1 }) };
+   const paid = createPaidAdmissionReadinessCheck({
+      storageReady: () => true, diskHeadroom: () => true,
+      poller: worker, reconciler: worker, healthProbe: probe,
+      maximumEvidenceAgeMilliseconds: 30_000,
+   });
+
+   const initial = await paid();
+   assert.equal(initial.ready, true);
+   assert.equal(calls, 1);
+   assert.equal(probe.currentSample()?.providerFailureRevision, 0);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   const recovery = probe.runIfDue(30_000);
+   const pendingAdmission = paid();
+   assert.equal(calls, 2, 'paid admission shares the held physical recovery probe');
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   assert.equal(probe.currentFailureEpoch(), 1);
+   now += 1;
+   held.release();
+   const obsolete = await recovery;
+   const rejected = await pendingAdmission;
+   assert.equal(obsolete.failureEpoch, 1);
+   assert.equal(obsolete.providerFailureRevision, 1);
+   assert.deepEqual(obsolete.evidence, { polling: true, reconciliation: true });
+   assert.equal(probe.isSampleFreshForAdmission(obsolete, 30_000), false);
+   assert.equal(rejected.ready, false);
+   assert.equal(rejected.checks.capabilityEvidenceFresh, false);
+   assert.equal(paid.validateCurrent(initial).ready, false);
+
+   // No interval has elapsed: the later failure must defeat healthy cache reuse.
+   const recovered = await probe.runIfDue(30_000);
+   assert.equal(calls, 3);
+   assert.equal(recovered.failureEpoch, 1);
+   assert.equal(recovered.providerFailureRevision, 2);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+   assert.equal((await paid()).ready, true);
+   assert.equal(calls, 3, 'the new current sample remains reusable');
+   assert.equal(probe.invalidateForProviderFailure(), 2);
+});
+
+test('Wave A P2 revision: workers reject obsolete recovery and it cannot rearm public invalidation', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+   const store = new RoundWatchStore(':memory:');
+   const held = deferredSignal();
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      if (calls === 2) await held.promise;
+      return { polling: true, reconciliation: true };
+   } }, ASSET, () => 1_000);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: NETWORK, intervalMilliseconds: 5_000 }, undefined, probe);
+   try {
+      await probe.runIfDue(30_000);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      poller.start();
+      reconciler.start();
+      await flushUntil(() => calls === 2);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      held.release();
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().providerHealth, 'unknown');
+         assert.equal(worker.readinessCheck(), false);
+      }
+      assert.equal(probe.invalidateForProviderFailure(), 1,
+         'obsolete complete recovery must not rearm public epoch publication');
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+      assert.equal(calls, 3, 'both workers share a new probe despite the unchanged public epoch');
+      assert.equal(probe.currentSample()?.providerFailureRevision, 3);
+      assert.equal(probe.invalidateForProviderFailure(), 2);
+   } finally {
+      poller.stop();
+      reconciler.stop();
+      held.release();
+      store.close();
+   }
+});
+
+test('Wave A P2 revision: recovery rearming uses the physical probe age policy while paid admission keeps its own', async () => {
+   for (const [maximumAge, duration] of [
+      [15_000, 15_000], [15_000, 15_001],
+      [60_000, 45_000], [60_000, 60_001],
+   ] as const) {
+      let now = 1_000;
+      let calls = 0;
+      const held = deferredSignal();
+      const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+         calls += 1;
+         if (calls === 2) await held.promise;
+         return { polling: true, reconciliation: true };
+      } }, ASSET, () => now);
+      const worker = { healthSnapshot: () => ({ started: true, running: false,
+         ready: true, cycleNotStalled: true, providerHealth: 'healthy' as const,
+         consecutiveFailures: 0, generation: 1 }) };
+      const paid = createPaidAdmissionReadinessCheck({
+         storageReady: () => true, diskHeadroom: () => true,
+         poller: worker, reconciler: worker, healthProbe: probe,
+         maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      const initial = await paid();
+      assert.equal(initial.ready, true);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      const recovery = probe.runIfDue(maximumAge);
+      now += duration;
+      held.release();
+      const sample = await recovery;
+      assert.equal(probe.isSampleFreshForAdmission(sample, maximumAge), duration <= maximumAge);
+      assert.equal(paid.validateCurrent(initial).ready, duration <= 30_000,
+         'the paid freshness policy is independent of the physical probe policy');
+      assert.equal(probe.invalidateForProviderFailure(), duration <= maximumAge ? 2 : 1,
+         `rearm at duration ${duration} must use the requested ${maximumAge}ms policy`);
+   }
+});
+
+test('Wave A follow-up: repeated failures coalesce until fresh complete capability recovery', async () => {
+   let now = 1_000;
+   let evidence = { polling: true, reconciliation: true };
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return evidence; },
+   }, ASSET, () => now);
+   const healthy = await probe.runIfDue(30_000);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   assert.equal(probe.isSampleFreshForAdmission(healthy, 30_000), false);
+
+   // Failed and partially healthy probes do not establish complete recovery.
+   for (const partial of [{ polling: false, reconciliation: false },
+      { polling: true, reconciliation: false }]) {
+      now += 15_000;
+      evidence = partial;
+      await probe.runIfDue(30_000);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+   }
+   now += 15_000;
+   evidence = { polling: true, reconciliation: true };
+   const recovered = await probe.runIfDue(30_000);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+   assert.equal(probe.currentFailureEpoch(), 1);
+   assert.equal(probe.invalidateForProviderFailure(), 2);
+   assert.equal(probe.invalidateForProviderFailure(), 2);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), false);
+});
+
+test('Wave A follow-up: over-age complete probe cannot rearm failure invalidation', async () => {
+   let now = 1_000;
+   let release!: (evidence: IndexerCapabilityEvidence) => void;
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ probeReadinessCapabilities() {
+      calls += 1;
+      return calls === 1
+         ? Promise.resolve({ polling: true, reconciliation: true })
+         : new Promise<IndexerCapabilityEvidence>(resolve => { release = resolve; });
+   } }, ASSET, () => now);
+   await probe.runIfDue(30_000);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   const slow = probe.runIfDue(30_000);
+   now += 30_001;
+   release({ polling: true, reconciliation: true });
+   assert.equal(probe.isSampleFreshForAdmission(await slow, 30_000), false);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+});
+
+test('Wave A follow-up: synchronous consumption rechecks all current admission inputs without probing', async () => {
+   for (const failure of ['storage', 'disk', 'poller', 'reconciler', 'poller-generation',
+      'reconciler-generation', 'epoch', 'age', 'capabilities'] as const) {
+      let now = 1_000;
+      let storage = true;
+      let disk = true;
+      let probeCalls = 0;
+      let evidence = { polling: true, reconciliation: true };
+      const poller = { started: true, running: false, ready: true, cycleNotStalled: true,
+         providerHealth: 'healthy' as 'healthy' | 'unhealthy', consecutiveFailures: 0, generation: 1 };
+      const reconciler = { ...poller };
+      const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+         probeCalls += 1; return evidence;
+      } }, ASSET, () => now);
+      const paid = createPaidAdmissionReadinessCheck({
+         storageReady: () => storage, diskHeadroom: () => disk,
+         poller: { healthSnapshot: () => poller }, reconciler: { healthSnapshot: () => reconciler },
+         healthProbe: probe, maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      const absent = paid.validateCurrent({ ready: true, checks: {}, workerGenerations: { poller: 1, reconciler: 1 } });
+      assert.equal(absent.ready, false);
+      assert.equal(absent.checks.capabilityEvidenceFresh, false);
+      assert.equal(probeCalls, 0);
+      const refreshed = await paid();
+      assert.equal(refreshed.ready, true);
+      assert.equal(paid.validateCurrent(refreshed).ready, true);
+      if (failure === 'storage') storage = false;
+      else if (failure === 'disk') disk = false;
+      else if (failure === 'poller') poller.providerHealth = 'unhealthy';
+      else if (failure === 'reconciler') reconciler.providerHealth = 'unhealthy';
+      else if (failure === 'poller-generation') poller.generation += 1;
+      else if (failure === 'reconciler-generation') reconciler.generation += 1;
+      else if (failure === 'epoch') probe.invalidateForProviderFailure();
+      else if (failure === 'age') {
+         now += 30_000;
+         assert.equal(paid.validateCurrent(refreshed).ready, true);
+         now += 1;
+      } else {
+         now += 15_000;
+         evidence = { polling: true, reconciliation: false };
+         await probe.runIfDue(15_000);
+      }
+      const calls = probeCalls;
+      assert.equal(paid.validateCurrent(refreshed).ready, false, failure);
+      assert.equal(probeCalls, calls, 'synchronous guard must perform zero provider probes');
+   }
+});
+
 test('paid readiness refreshes after a newer provider-failure epoch instead of reusing cached success', async () => {
    let now = 0;
    let healthy = true;
@@ -713,13 +980,16 @@ test('provider failure during an in-flight probe invalidates that sample and the
 
    const first = probe.runIfDue(30_000);
    probe.invalidateForProviderFailure();
+   assert.equal(probe.invalidateForProviderFailure(), 1);
    resolveFirst({ polling: true, reconciliation: true });
    const stale = await first;
 
    assert.equal(probe.isSampleFreshForAdmission(stale, 30_000), false);
+   assert.equal(probe.invalidateForProviderFailure(), 1, 'obsolete in-flight success cannot rearm invalidation');
    const recovered = await probe.runIfDue(30_000);
    assert.equal(calls, 2);
    assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+   assert.equal(probe.invalidateForProviderFailure(), 2);
 });
 
 test('paid readiness rejects a probe whose aggregate duration exceeds its evidence-age policy', async () => {

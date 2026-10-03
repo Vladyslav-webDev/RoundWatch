@@ -47,7 +47,7 @@ import {
 } from './roundwatch-poller.js';
 import { hasDatabaseDiskHeadroom } from './roundwatch-readiness.js';
 import { IndexerHealthProbe } from './roundwatch-health-probe.js';
-import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
+import { createPaidAdmissionReadinessCheck, type PaidReadinessSnapshot } from './roundwatch-paid-readiness.js';
 import { WorkerHealthTracker } from './roundwatch-worker-health.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
@@ -1251,13 +1251,13 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
             ready: true,
             checks: { cached: true },
          }),
-         paidAdmissionReadinessCheck: async () => {
+         paidAdmissionReadinessCheck: Object.assign(async () => {
             paidChecks += 1;
             return {
                ready: paidReady,
                checks: { freshIndexerCapabilities: paidReady },
             };
-         },
+         }, { validateCurrent: () => ({ ready: paidReady, checks: { freshIndexerCapabilities: paidReady } }) }),
       });
 
       const body = JSON.stringify({
@@ -1315,7 +1315,7 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
 
 
 test('Wave A: readiness loss or exception during verification rejects before durable preparation and settlement', async t => {
-   for (const failure of ['worker', 'exception'] as const) {
+   for (const failure of ['worker', 'exception', 'commit-exception'] as const) {
       const store = new RoundWatchStore(':memory:');
       const spec = { ...SPEC, idempotencyKey: `verification-race-${failure}`, expectedSender: WATCH_SENDER };
       const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
@@ -1333,6 +1333,7 @@ test('Wave A: readiness loss or exception during verification rejects before dur
          maximumEvidenceAgeMilliseconds: 30_000,
       });
       let throwReadiness = false;
+      let throwCommitReadiness = false;
       let readinessCalls = 0;
       let verifyCalls = 0;
       let enterVerification!: () => void;
@@ -1349,11 +1350,14 @@ test('Wave A: readiness loss or exception during verification rejects before dur
       const app = createApp({
          avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store, indexer,
          requireSettlementIntent: true,
-         paidAdmissionReadinessCheck: () => {
+         paidAdmissionReadinessCheck: Object.assign(() => {
             readinessCalls += 1;
             if (throwReadiness) throw new Error('private readiness diagnostic');
             return paidReadiness();
-         },
+         }, { validateCurrent: (snapshot: PaidReadinessSnapshot) => {
+            if (throwCommitReadiness) throw new Error('private commitment diagnostic');
+            return paidReadiness.validateCurrent(snapshot);
+         } }),
       });
       let pending: Promise<Response> | undefined;
       try {
@@ -1374,8 +1378,10 @@ test('Wave A: readiness loss or exception during verification rejects before dur
             probe.invalidateForProviderFailure();
             tracker.markCycleFailed();
             assert.equal((await paidReadiness()).ready, false);
-         } else {
+         } else if (failure === 'exception') {
             throwReadiness = true;
+         } else {
+            throwCommitReadiness = true;
          }
          releaseVerification();
          const response = await pending;
@@ -1386,7 +1392,7 @@ test('Wave A: readiness loss or exception during verification rejects before dur
          const rejected = await response.json() as { code: string; checks: Record<string, boolean> };
          assert.equal(rejected.code, 'service_not_ready');
          assert.equal(rejected.checks[failure === 'worker' ? 'backgroundWorkers' : 'readinessCheck'], false);
-         assert.doesNotMatch(JSON.stringify(rejected), /private readiness diagnostic/);
+         assert.doesNotMatch(JSON.stringify(rejected), /private (readiness|commitment) diagnostic/);
          assert.equal(readinessCalls, 2);
          assert.equal(verifyCalls, 1);
          assert.equal(prepare.mock.callCount(), 0);
@@ -1402,7 +1408,103 @@ test('Wave A: readiness loss or exception during verification rejects before dur
    }
 });
 
-test('Wave A: healthy two-gate paid request shares one complete capability probe', async () => {
+test('Wave A follow-up: worker failure in the async readiness return gap is rejected by the synchronous guard', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+   const store = new RoundWatchStore(':memory:');
+   const spec = { ...SPEC, idempotencyKey: 'async-helper-return-gap', expectedSender: WATCH_SENDER };
+   const indexer = new MiddlewareIndexer();
+   const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+   }, TESTNET_USDC_ASSET_ID, () => 1_000);
+   const poller = new RoundWatchPoller(store, indexer, 60_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: ALGORAND_TESTNET, intervalMilliseconds: 60_000 }, undefined, probe);
+   let enterProvider!: () => void;
+   let rejectProvider!: (error: Error) => void;
+   const entered = new Promise<void>(resolve => { enterProvider = resolve; });
+   const held = new Promise<TransactionPage>((_resolve, reject) => { rejectProvider = reject; });
+   indexer.searchWatchPage = () => { enterProvider(); return held; };
+   const events: string[] = [];
+   const invalidate = probe.invalidateForProviderFailure.bind(probe);
+   t.mock.method(probe, 'invalidateForProviderFailure', () => {
+      events.push('worker failure published');
+      return invalidate();
+   });
+   facilitator.verify = async () => {
+      events.push('verification succeeded');
+      return { isValid: true, payer: PAYER };
+   };
+   const paidReadiness = createPaidAdmissionReadinessCheck({
+      storageReady: () => store.readinessCheck(), diskHeadroom: () => true,
+      poller, reconciler, healthProbe: probe, maximumEvidenceAgeMilliseconds: 30_000,
+   });
+   let readinessCalls = 0;
+   let guardCalls = 0;
+   const app = createApp({
+      avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store, indexer,
+      requireSettlementIntent: true,
+      paidAdmissionReadinessCheck: Object.assign(async () => {
+         readinessCalls += 1;
+         const snapshot = await paidReadiness();
+         if (readinessCalls === 2) {
+            assert.equal(snapshot.ready, true);
+            events.push('final refresh returned healthy');
+            // Return healthy through async promise adoption. Reject the real
+            // held worker operation in that return gap, before the handler resumes.
+            rejectProvider(new TypeError('synthetic return-gap provider failure'));
+            return Promise.resolve(snapshot);
+         }
+         return snapshot;
+      }, { validateCurrent: (snapshot: PaidReadinessSnapshot) => {
+         guardCalls += 1;
+         events.push('synchronous commitment guard');
+         assert.equal(poller.healthSnapshot().providerHealth, 'unhealthy');
+         assert.equal(poller.readinessCheck(), false);
+         const current = paidReadiness.validateCurrent(snapshot);
+         assert.equal(current.ready, false);
+         return current;
+      } }),
+   });
+   try {
+      poller.start(); reconciler.start();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(poller.readinessCheck(), true);
+      assert.equal(reconciler.readinessCheck(), true);
+      const existing = store.prepareWatch({ ...SPEC, idempotencyKey: 'return-gap-existing' }, intent('RETURN_GAP_EXISTING')).watch;
+      store.activateWatch(existing.id, { transaction: 'RETURN_GAP_EXISTING', network: ALGORAND_TESTNET, payer: PAYER }, 150);
+      t.mock.timers.tick(60_000);
+      await entered;
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+      readinessCalls = 0;
+      const prepare = t.mock.method(store, 'prepareWatch');
+      const before = probe.currentFailureEpoch();
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader },
+         body,
+      });
+      assert.equal(response.status, 503);
+      assert.deepEqual(events, ['verification succeeded', 'final refresh returned healthy',
+         'worker failure published', 'synchronous commitment guard']);
+      assert.equal(guardCalls, 1);
+      assert.equal(readinessCalls, 2);
+      assert.equal(probe.currentFailureEpoch(), before + 1);
+      assert.equal((await response.json() as { code: string }).code, 'service_not_ready');
+      assert.equal(prepare.mock.callCount(), 0);
+      assert.equal(facilitator.settleCalls, 0);
+      assert.equal(store.getByIdempotencyKey(spec.idempotencyKey), undefined);
+      assert.equal(store.listActiveWatches().length, 1);
+      assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+   } finally {
+      rejectProvider(new TypeError('test cleanup'));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      poller.stop(); reconciler.stop(); store.close();
+   }
+});
+
+test('Wave A: healthy two-gate paid request shares one complete capability probe', async t => {
    const store = new RoundWatchStore(':memory:');
    const spec = { ...SPEC, idempotencyKey: 'two-gate-capability-probe', expectedSender: WATCH_SENDER };
    const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
@@ -1437,14 +1539,27 @@ test('Wave A: healthy two-gate paid request shares one complete capability probe
    });
    let readinessCalls = 0;
    let countSignedRequest = false;
+   let guardRan = false;
+   let guardMicrotaskRan = false;
+   const prepare = store.prepareWatch.bind(store);
+   const prepared = t.mock.method(store, 'prepareWatch', (...args: Parameters<RoundWatchStore['prepareWatch']>) => {
+      assert.equal(guardRan, true);
+      assert.equal(guardMicrotaskRan, false, 'commit must occur before any queued guard microtask');
+      return prepare(...args);
+   });
    const app = createApp({
       avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store,
       indexer: new MiddlewareIndexer(), requireSettlementIntent: true,
-      paidAdmissionReadinessCheck: () => {
+      paidAdmissionReadinessCheck: Object.assign(() => {
          if (countSignedRequest) readinessCalls += 1;
          // Discovery is tested elsewhere; start this probe at the signed early gate.
          return countSignedRequest ? paidReadiness() : Promise.resolve({ ready: true, checks: {} });
-      },
+      }, { validateCurrent: (snapshot: PaidReadinessSnapshot) => {
+         const current = paidReadiness.validateCurrent(snapshot);
+         guardRan = true;
+         queueMicrotask(() => { guardMicrotaskRan = true; });
+         return current;
+      } }),
    });
    try {
       const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
@@ -1457,6 +1572,7 @@ test('Wave A: healthy two-gate paid request shares one complete capability probe
       assert.equal(response.status, 200);
       assert.equal(readinessCalls, 2);
       assert.equal(probeCalls, 1);
+      assert.equal(prepared.mock.callCount(), 1);
       assert.equal(paths.length, 5, 'one functional probe exercises all five provider routes');
       assert.equal(new Set(paths).size, 5);
       assert.equal(facilitator.settleCalls, 1);
@@ -1479,7 +1595,10 @@ test('Wave A: readiness loss after durable preparation preserves settlement and 
    const app = createApp({
       avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store,
       indexer: new MiddlewareIndexer(), requireSettlementIntent: true,
-      paidAdmissionReadinessCheck: async () => ({ ready, checks: { service: ready } }),
+      paidAdmissionReadinessCheck: Object.assign(
+         async () => ({ ready, checks: { service: ready } }),
+         { validateCurrent: () => ({ ready, checks: { service: ready } }) },
+      ),
    });
    try {
       const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
