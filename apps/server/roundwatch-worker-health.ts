@@ -68,6 +68,13 @@ export class WorkerHealthTracker {
       this.lastProgressAtMs = this.now();
    }
 
+   markProviderFailure(): void {
+      // A failed customer turn must be visible even while the sweep is still
+      // running. Cycle failure counters are recorded once at completion.
+      this.providerHealth = 'unhealthy';
+      this.lastErrorAtMs = this.now();
+   }
+
    markCycleCompleted(outcome: WorkerCycleOutcome): void {
       validateOutcome(outcome);
       this.running = false;

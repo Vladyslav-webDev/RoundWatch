@@ -1128,6 +1128,42 @@ export function createApp(dependencies: AppDependencies): Hono {
 
       let prepared;
 
+      // The authorization flow verifies before this handler and settles only
+      // after a successful response. Recheck after verification, then accept
+      // the obligation synchronously: no await may separate this decision
+      // from prepareWatch's durable commit. A 503 skips x402 settlement.
+      try {
+         const storageReady = store.readinessCheck();
+         const snapshot = paidAdmissionReadinessCheck
+            ? await paidAdmissionReadinessCheck()
+            : readinessCheck?.() ?? {
+                 ready: storageReady,
+                 checks: { storage: storageReady },
+              };
+
+         if (!snapshot.ready) {
+            return c.json(
+               {
+                  error:
+                     'RoundWatch is not ready to accept paid watch obligations',
+                  code: 'service_not_ready',
+                  checks: snapshot.checks,
+               },
+               503,
+            );
+         }
+      } catch {
+         return c.json(
+            {
+               error:
+                  'RoundWatch is not ready to accept paid watch obligations',
+               code: 'service_not_ready',
+               checks: { readinessCheck: false },
+            },
+            503,
+         );
+      }
+
       try {
          prepared = store.prepareWatch(spec, settlementIntent);
       } catch (error) {

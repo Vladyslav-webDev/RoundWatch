@@ -46,6 +46,8 @@ import {
    RoundWatchPoller,
 } from './roundwatch-poller.js';
 import { hasDatabaseDiskHeadroom } from './roundwatch-readiness.js';
+import { IndexerHealthProbe } from './roundwatch-health-probe.js';
+import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
 import { WorkerHealthTracker } from './roundwatch-worker-health.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
@@ -1311,6 +1313,187 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
    }
 });
 
+
+test('Wave A: readiness loss or exception during verification rejects before durable preparation and settlement', async t => {
+   for (const failure of ['worker', 'exception'] as const) {
+      const store = new RoundWatchStore(':memory:');
+      const spec = { ...SPEC, idempotencyKey: `verification-race-${failure}`, expectedSender: WATCH_SENDER };
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const indexer = new MiddlewareIndexer();
+      const tracker = new WorkerHealthTracker();
+      tracker.markStarted();
+      tracker.markProbeResult(true);
+      const worker = { healthSnapshot: () => tracker.snapshot(45_000) };
+      const probe = new IndexerHealthProbe({
+         async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+      }, TESTNET_USDC_ASSET_ID, () => 1_000);
+      const paidReadiness = createPaidAdmissionReadinessCheck({
+         storageReady: () => store.readinessCheck(), diskHeadroom: () => true,
+         poller: worker, reconciler: worker, healthProbe: probe,
+         maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      let throwReadiness = false;
+      let readinessCalls = 0;
+      let verifyCalls = 0;
+      let enterVerification!: () => void;
+      let releaseVerification!: () => void;
+      const entered = new Promise<void>(resolve => { enterVerification = resolve; });
+      const held = new Promise<void>(resolve => { releaseVerification = resolve; });
+      facilitator.verify = async () => {
+         verifyCalls += 1;
+         enterVerification();
+         await held;
+         return { isValid: true, payer: PAYER };
+      };
+      const prepare = t.mock.method(store, 'prepareWatch');
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store, indexer,
+         requireSettlementIntent: true,
+         paidAdmissionReadinessCheck: () => {
+            readinessCalls += 1;
+            if (throwReadiness) throw new Error('private readiness diagnostic');
+            return paidReadiness();
+         },
+      });
+      let pending: Promise<Response> | undefined;
+      try {
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         readinessCalls = 0; // Count the signed request's two decisions only.
+         pending = Promise.resolve(app.request('/spike/watch', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader },
+            body,
+         }));
+         await entered;
+         assert.equal(readinessCalls, 1);
+         assert.equal(prepare.mock.callCount(), 0);
+         assert.equal(facilitator.settleCalls, 0);
+
+         // Change health while the real x402 middleware awaits verify().
+         if (failure === 'worker') {
+            probe.invalidateForProviderFailure();
+            tracker.markCycleFailed();
+            assert.equal((await paidReadiness()).ready, false);
+         } else {
+            throwReadiness = true;
+         }
+         releaseVerification();
+         const response = await pending;
+         assert.equal(response.status, 503);
+         assert.equal(response.headers.get('cache-control'), 'no-store');
+         assert.equal(response.headers.get('payment-response'), null);
+         assert.equal(response.headers.get('x-roundwatch-id'), null);
+         const rejected = await response.json() as { code: string; checks: Record<string, boolean> };
+         assert.equal(rejected.code, 'service_not_ready');
+         assert.equal(rejected.checks[failure === 'worker' ? 'backgroundWorkers' : 'readinessCheck'], false);
+         assert.doesNotMatch(JSON.stringify(rejected), /private readiness diagnostic/);
+         assert.equal(readinessCalls, 2);
+         assert.equal(verifyCalls, 1);
+         assert.equal(prepare.mock.callCount(), 0);
+         assert.equal(facilitator.settleCalls, 0);
+         assert.equal(store.getByIdempotencyKey(spec.idempotencyKey), undefined);
+         assert.equal(store.listActiveWatches().length, 0);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+      } finally {
+         releaseVerification();
+         await pending;
+         store.close();
+      }
+   }
+});
+
+test('Wave A: healthy two-gate paid request shares one complete capability probe', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const spec = { ...SPEC, idempotencyKey: 'two-gate-capability-probe', expectedSender: WATCH_SENDER };
+   const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+   const paths: string[] = [];
+   const capabilitySource = new AlgorandIndexerClient('https://indexer.invalid',
+      new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+      async input => {
+         const path = new URL(String(input)).pathname;
+         paths.push(path);
+         if (path === '/health') return Response.json({ round: 101 });
+         if (path.startsWith('/v2/assets/')) return Response.json({ transactions: [], 'current-round': 101 });
+         if (path === '/v2/blocks/101') return Response.json({ round: 101, timestamp: 1_000 });
+         if (path.startsWith('/v2/transactions/')) return Response.json({}, { status: 404 });
+         if (path === '/v2/transactions') return Response.json({ transactions: [], 'current-round': 101 });
+         throw new Error(`unexpected synthetic capability path ${path}`);
+      });
+   let probeCalls = 0;
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities(assetId) {
+         probeCalls += 1;
+         return capabilitySource.probeReadinessCapabilities(assetId);
+      },
+   }, TESTNET_USDC_ASSET_ID, () => 1_000);
+   const tracker = new WorkerHealthTracker();
+   tracker.markStarted();
+   tracker.markProbeResult(true);
+   const worker = { healthSnapshot: () => tracker.snapshot(45_000) };
+   const paidReadiness = createPaidAdmissionReadinessCheck({
+      storageReady: () => store.readinessCheck(), diskHeadroom: () => true,
+      poller: worker, reconciler: worker, healthProbe: probe,
+      maximumEvidenceAgeMilliseconds: 30_000,
+   });
+   let readinessCalls = 0;
+   let countSignedRequest = false;
+   const app = createApp({
+      avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store,
+      indexer: new MiddlewareIndexer(), requireSettlementIntent: true,
+      paidAdmissionReadinessCheck: () => {
+         if (countSignedRequest) readinessCalls += 1;
+         // Discovery is tested elsewhere; start this probe at the signed early gate.
+         return countSignedRequest ? paidReadiness() : Promise.resolve({ ready: true, checks: {} });
+      },
+   });
+   try {
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+      countSignedRequest = true;
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader },
+         body,
+      });
+      assert.equal(response.status, 200);
+      assert.equal(readinessCalls, 2);
+      assert.equal(probeCalls, 1);
+      assert.equal(paths.length, 5, 'one functional probe exercises all five provider routes');
+      assert.equal(new Set(paths).size, 5);
+      assert.equal(facilitator.settleCalls, 1);
+      assert.deepEqual(facilitator.statesObservedAtSettle, ['settlement_pending']);
+      assert.equal(store.getByIdempotencyKey(spec.idempotencyKey)?.state, 'active');
+   } finally { store.close(); }
+});
+
+test('Wave A: readiness loss after durable preparation preserves settlement and activation', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const spec = { ...SPEC, idempotencyKey: 'readiness-after-commit', expectedSender: WATCH_SENDER };
+   const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+   let ready = true;
+   const settle = facilitator.settle.bind(facilitator);
+   facilitator.settle = async (payload, requirements) => {
+      assert.equal(store.getByIdempotencyKey(spec.idempotencyKey)?.state, 'settlement_pending');
+      ready = false;
+      return settle(payload, requirements);
+   };
+   const app = createApp({
+      avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store,
+      indexer: new MiddlewareIndexer(), requireSettlementIntent: true,
+      paidAdmissionReadinessCheck: async () => ({ ready, checks: { service: ready } }),
+   });
+   try {
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+      const response = await app.request('/spike/watch', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader },
+         body,
+      });
+      assert.equal(response.status, 200);
+      assert.equal(ready, false);
+      assert.equal(facilitator.settleCalls, 1);
+      assert.equal(store.getByIdempotencyKey(spec.idempotencyKey)?.state, 'active');
+   } finally { store.close(); }
+});
 
 test('SQLite readiness requires a real write-capable transaction and fails query-only mode', () => {
    const database = new DatabaseSync(':memory:');

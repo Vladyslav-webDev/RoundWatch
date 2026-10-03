@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { AlgorandIndexerClient, type RoundWatchIndexer, type TransactionPage } from './roundwatch-indexer.js';
+import { AlgorandIndexerClient, IndexerHttpError, type RoundWatchIndexer, type TransactionPage } from './roundwatch-indexer.js';
+import { createApp } from './app.js';
 import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
@@ -470,6 +471,173 @@ test('systemic poller and reconciler failures invalidate the shared provider epo
       }
    }
 });
+
+for (const scenario of ['poller systemic', 'reconciler systemic', 'poller isolated'] as const) {
+   test(`Wave A: ${scenario} failure readiness is observable while the second watch is pending`, async t => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+      const store = new RoundWatchStore(':memory:');
+      let probeNow = 1_000;
+      let probeCalls = 0;
+      const probe = new IndexerHealthProbe({
+         async probeReadinessCapabilities() {
+            probeCalls += 1;
+            return { polling: true, reconciliation: true };
+         },
+      }, ASSET, () => probeNow);
+      const held = deferredSignal();
+      const secondEntered = deferredSignal();
+      const isolated = scenario === 'poller isolated';
+      const reconciling = scenario === 'reconciler systemic';
+      let turns = 0;
+      let failedWatchId: string | undefined;
+      const customerOperation = async (watchId: string) => {
+         turns += 1;
+         if (turns === 1) {
+            failedWatchId = watchId;
+            if (isolated) {
+               throw new IndexerHttpError({
+                  status: 400, purpose: 'scan-page', providerHost: 'indexer.invalid',
+                  pathTemplate: '/v2/assets/:assetId/transactions', parameterNames: [],
+                  attemptId: 'wave-a-isolated', code: 'zero_address_sender_unsupported',
+                  retryDisposition: 'permanent', declaredBodyBytes: 0, capturedBodyBytes: 0,
+                  bodyTruncated: false, bodyReadFailed: false,
+               });
+            }
+            throw new TypeError('synthetic provider network failure');
+         }
+         secondEntered.release();
+         await held.promise;
+      };
+      const indexer = fakeIndexer({
+         async searchWatchPage(watch) {
+            await customerOperation(watch.id);
+            return { transactions: [], currentRound: 101 };
+         },
+         async lookupAssetTransfer(_transaction, _purpose, watchId) {
+            await customerOperation(watchId!);
+            return undefined;
+         },
+      });
+      const poller = new RoundWatchPoller(store, indexer, 60_000, 100, undefined,
+         undefined, undefined, undefined, probe);
+      const reconciler = new SettlementReconciler(store, indexer,
+         { network: NETWORK, intervalMilliseconds: 60_000 }, undefined, probe);
+      const affected = reconciling ? reconciler : poller;
+      const paidReadiness = createPaidAdmissionReadinessCheck({
+         storageReady: () => store.readinessCheck(), diskHeadroom: () => true,
+         poller, reconciler, healthProbe: probe, maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      const app = createApp({
+         avmAddress: ADDRESS, store, indexer, syncFacilitatorOnStart: false,
+         facilitatorClient: {
+            async getSupported() { return { kinds: [], extensions: [], signers: {} }; },
+            async verify() { throw new Error('unexpected verification'); },
+            async settle() { throw new Error('unexpected settlement'); },
+         },
+         paidAdmissionReadinessCheck: paidReadiness,
+         // This is the normal production /ready composition from index.ts.
+         readinessCheck: () => {
+            const storage = store.readinessCheck();
+            const pollerReady = poller.healthSnapshot().ready;
+            const reconcilerReady = reconciler.healthSnapshot().ready;
+            const backgroundWorkers = pollerReady && reconcilerReady;
+            const diskHeadroom = true;
+            return {
+               ready: storage && backgroundWorkers && diskHeadroom,
+               checks: { storage, poller: pollerReady, reconciler: reconcilerReady, backgroundWorkers, diskHeadroom },
+            };
+         },
+      });
+      try {
+         poller.start();
+         reconciler.start();
+         await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+         assert.equal(probeCalls, 1);
+         const healthySample = await probe.runIfDue(30_000);
+         const before = probe.currentFailureEpoch();
+         assert.equal((await paidReadiness()).ready, true);
+         assert.equal((await app.request('/ready')).status, 200);
+
+         for (const key of ['wave-a-first', 'wave-a-second']) {
+            if (reconciling) {
+               store.prepareWatch({ idempotencyKey: key, expectedSender: ADDRESS,
+                  expectedReceiver: OTHER, assetId: ASSET, atomicAmount: '1' }, service(key));
+            } else {
+               active(store, key);
+            }
+         }
+         t.mock.timers.tick(60_000);
+         await secondEntered.promise;
+
+         // The sweep has recognized watch one's failure but cannot finish yet.
+         const inFlight = affected.healthSnapshot();
+         assert.equal(turns, 2);
+         assert.equal(inFlight.running, true);
+         assert.equal(inFlight.cycleNotStalled, true);
+         assert.equal(probe.currentFailureEpoch(), before + (isolated ? 0 : 1));
+         assert.equal(probe.isSampleFreshForAdmission(healthySample, 30_000), isolated);
+         assert.equal(inFlight.providerHealth, isolated ? 'healthy' : 'unhealthy');
+         assert.equal(inFlight.ready, isolated);
+         if (!isolated) assert.ok(inFlight.lastErrorAtMs !== undefined);
+         assert.equal((await paidReadiness()).ready, isolated);
+         const publicResponse = await app.request('/ready');
+         assert.equal(publicResponse.status, isolated ? 200 : 503);
+         const publicBody = await publicResponse.json() as { checks: Record<string, boolean> };
+         assert.equal(publicBody.checks.backgroundWorkers, isolated);
+         assert.equal(probeCalls, 1, 'unhealthy worker must reject before starting another probe');
+         assert.ok(failedWatchId);
+         assert.equal(store.getWatch(failedWatchId)?.state,
+            isolated ? 'indeterminate' : reconciling ? 'settlement_pending' : 'active');
+
+         held.release();
+         await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+         assert.equal(probe.currentFailureEpoch(), before + (isolated ? 0 : 1),
+            'cycle completion must not publish the same failure a second time');
+         assert.equal(affected.healthSnapshot().providerHealth, isolated ? 'healthy' : 'unhealthy');
+         assert.equal(affected.healthSnapshot().consecutiveFailures, isolated ? 0 : 1);
+         if (!reconciling) {
+            const stats = poller.capacitySnapshot();
+            assert.equal(stats.watchesAttemptedLastCycle, 2);
+            assert.equal(stats.watchesFailedLastCycle, 1);
+            assert.equal(stats.watchesSucceededLastCycle, 1);
+         }
+
+         // Independent functional evidence still provides bounded recovery.
+         probeNow += 15_000;
+         t.mock.timers.tick(60_000);
+         await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+         assert.equal(probe.currentFailureEpoch(), before + (isolated ? 0 : 1));
+         assert.equal(probeCalls, 2);
+         assert.equal((await paidReadiness()).ready, true);
+         assert.equal((await app.request('/ready')).status, 200);
+      } finally {
+         held.release();
+         await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+         poller.stop();
+         reconciler.stop();
+         store.close();
+      }
+   });
+}
+
+function deferredSignal(): { promise: Promise<void>; release: () => void } {
+   let release!: () => void;
+   const promise = new Promise<void>(resolve => { release = resolve; });
+   return { promise, release };
+}
+
+async function flushUntil(condition: () => boolean): Promise<void> {
+   for (let i = 0; i < 200; i += 1) {
+      if (condition()) {
+         // Drain the scheduler's promise finally handlers as well as the
+         // observable cycle completion before advancing the mocked timers.
+         for (let j = 0; j < 10; j += 1) await Promise.resolve();
+         return;
+      }
+      await Promise.resolve();
+   }
+   assert.fail('worker did not reach the expected state after draining microtasks');
+}
 
 test('paid readiness refreshes after a newer provider-failure epoch instead of reusing cached success', async () => {
    let now = 0;
