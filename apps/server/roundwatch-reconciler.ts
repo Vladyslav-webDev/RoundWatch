@@ -93,10 +93,6 @@ export class SettlementReconciler {
          )
             .then(async outcome => {
                if (generation !== this.generation) return;
-               if (outcome.failed > 0) {
-                  this.healthProbe?.invalidateForProviderFailure();
-                  this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
-               }
                if (this.healthProbe && outcome.failed === 0) {
                   const probeAge =
                      outcome.attempted === 0
@@ -104,7 +100,13 @@ export class SettlementReconciler {
                         : this.healthProbe.activeIntervalMilliseconds();
                   const sample = await this.healthProbe.runIfDue(probeAge);
                   if (generation !== this.generation) return;
-                  if (sample.revision > this.lastObservedProbeRevision) {
+                  if (
+                     sample.revision > this.lastObservedProbeRevision &&
+                     this.healthProbe.isSampleCurrent(sample) &&
+                     // Current negative evidence counts even when the probe was slow.
+                     (!sample.evidence.reconciliation ||
+                        this.healthProbe.isSampleFreshForAdmission(sample, probeAge))
+                  ) {
                      this.lastObservedProbeRevision = sample.revision;
                      this.workerHealth.markProbeResult(sample.evidence.reconciliation);
                   }
@@ -160,6 +162,7 @@ export class SettlementReconciler {
          failed: 0,
       };
       if (this.running) return outcome;
+      const generation = this.generation;
       this.running = true;
       try {
          for (const watch of this.store.listSettlementReconciliationCandidates()) {
@@ -175,6 +178,13 @@ export class SettlementReconciler {
                onProgress?.();
             } catch (error) {
                outcome.failed += 1;
+               if (generation === this.generation) {
+                  // Invalidate before the next customer turn; the sweep's
+                  // completion must not republish this provider failure.
+                  this.healthProbe?.invalidateForProviderFailure();
+                  this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
+                  this.workerHealth.markProviderFailure();
+               }
                this.absenceProofSessions.delete(watch.id);
                this.defer(watch);
                console.error(`RoundWatch settlement reconciliation failed for watch ${watch.id}:`, safeErrorMessage(error));

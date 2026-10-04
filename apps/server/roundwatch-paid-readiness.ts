@@ -4,6 +4,12 @@ import type { WorkerHealthSnapshot } from './roundwatch-worker-health.js';
 export interface PaidReadinessSnapshot {
    ready: boolean;
    checks: Record<string, boolean>;
+   workerGenerations?: { poller?: number; reconciler?: number };
+}
+
+export interface PaidAdmissionReadinessCheck {
+   (): Promise<PaidReadinessSnapshot>;
+   validateCurrent(refreshed: PaidReadinessSnapshot): PaidReadinessSnapshot;
 }
 
 export interface PaidReadinessWorker {
@@ -29,29 +35,18 @@ interface LocalReadiness {
 
 export function createPaidAdmissionReadinessCheck(
    dependencies: PaidAdmissionReadinessDependencies,
-): () => Promise<PaidReadinessSnapshot> {
-   return async () => {
-      const before = readLocalReadiness(dependencies);
-
-      if (!before.storage || !before.diskHeadroom || !before.workersOperational) {
-         return localFailureSnapshot(before);
-      }
-
-      const sample = await dependencies.healthProbe.runIfDue(
-         dependencies.maximumEvidenceAgeMilliseconds,
-      );
-
-      // An asynchronous capability probe is a scheduling boundary. Local
-      // storage/disk/worker state and worker generation must be re-read after
-      // it completes instead of authorizing from the pre-await snapshot.
+): PaidAdmissionReadinessCheck {
+   // This consumer is entirely synchronous: re-read current local state and
+   // current shared evidence in the handler's commitment turn, without probing.
+   const currentSnapshot = (generations: PaidReadinessSnapshot['workerGenerations']) => {
       const after = readLocalReadiness(dependencies);
 
       if (
          !after.storage ||
          !after.diskHeadroom ||
          !after.workersOperational ||
-         workerGenerationChanged(before.poller, after.poller) ||
-         workerGenerationChanged(before.reconciler, after.reconciler)
+         generations?.poller !== after.poller.generation ||
+         generations?.reconciler !== after.reconciler.generation
       ) {
          return localFailureSnapshot(after);
       }
@@ -60,12 +55,14 @@ export function createPaidAdmissionReadinessCheck(
       // failure epoch and was still fresh when the paid decision consumed it.
       // This prevents both stale in-flight results and cached success that
       // predates a newer systemic worker failure.
-      const sampleFresh = dependencies.healthProbe.isSampleFreshForAdmission(
-         sample,
-         dependencies.maximumEvidenceAgeMilliseconds,
-      );
-      const pollerReady = sampleFresh && sample.evidence.polling;
-      const reconcilerReady = sampleFresh && sample.evidence.reconciliation;
+      const sample = dependencies.healthProbe.currentSample();
+      const sampleFresh = sample !== undefined &&
+         dependencies.healthProbe.isSampleFreshForAdmission(
+            sample,
+            dependencies.maximumEvidenceAgeMilliseconds,
+         );
+      const pollerReady = sampleFresh && sample?.evidence.polling === true;
+      const reconcilerReady = sampleFresh && sample?.evidence.reconciliation === true;
       const backgroundWorkers = pollerReady && reconcilerReady;
 
       return {
@@ -82,8 +79,33 @@ export function createPaidAdmissionReadinessCheck(
             diskHeadroom: after.diskHeadroom,
             capabilityEvidenceFresh: sampleFresh,
          },
+         workerGenerations: {
+            poller: after.poller.generation,
+            reconciler: after.reconciler.generation,
+         },
       };
    };
+
+   const refresh = async () => {
+      const before = readLocalReadiness(dependencies);
+      if (!before.storage || !before.diskHeadroom || !before.workersOperational) {
+         return localFailureSnapshot(before);
+      }
+      await dependencies.healthProbe.runIfDue(
+         dependencies.maximumEvidenceAgeMilliseconds,
+      );
+      return currentSnapshot({
+         poller: before.poller.generation,
+         reconciler: before.reconciler.generation,
+      });
+   };
+
+   return Object.assign(refresh, {
+      validateCurrent: (refreshed: PaidReadinessSnapshot) =>
+         refreshed.ready
+            ? currentSnapshot(refreshed.workerGenerations)
+            : localFailureSnapshot(readLocalReadiness(dependencies)),
+   });
 }
 
 function readLocalReadiness(
@@ -130,15 +152,4 @@ function localFailureSnapshot(local: LocalReadiness): PaidReadinessSnapshot {
          diskHeadroom: local.diskHeadroom,
       },
    };
-}
-
-function workerGenerationChanged(
-   before: WorkerHealthSnapshot,
-   after: WorkerHealthSnapshot,
-): boolean {
-   return (
-      before.generation !== undefined &&
-      after.generation !== undefined &&
-      before.generation !== after.generation
-   );
 }

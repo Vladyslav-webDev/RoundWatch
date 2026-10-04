@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { AlgorandIndexerClient, type RoundWatchIndexer, type TransactionPage } from './roundwatch-indexer.js';
+import { AlgorandIndexerClient, IndexerHttpError, type RoundWatchIndexer, type TransactionPage } from './roundwatch-indexer.js';
+import { createApp } from './app.js';
 import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
@@ -471,6 +472,631 @@ test('systemic poller and reconciler failures invalidate the shared provider epo
    }
 });
 
+for (const scenario of ['poller systemic', 'reconciler systemic', 'poller isolated'] as const) {
+   test(`Wave A: ${scenario} failure readiness is observable while the second watch is pending`, async t => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+      const store = new RoundWatchStore(':memory:');
+      let probeNow = 1_000;
+      let probeCalls = 0;
+      const probe = new IndexerHealthProbe({
+         async probeReadinessCapabilities() {
+            probeCalls += 1;
+            return { polling: true, reconciliation: true };
+         },
+      }, ASSET, () => probeNow);
+      const held = deferredSignal();
+      const secondEntered = deferredSignal();
+      const isolated = scenario === 'poller isolated';
+      const reconciling = scenario === 'reconciler systemic';
+      let turns = 0;
+      let failedWatchId: string | undefined;
+      const customerOperation = async (watchId: string) => {
+         turns += 1;
+         if (turns === 1) {
+            failedWatchId = watchId;
+            if (isolated) {
+               throw new IndexerHttpError({
+                  status: 400, purpose: 'scan-page', providerHost: 'indexer.invalid',
+                  pathTemplate: '/v2/assets/:assetId/transactions', parameterNames: [],
+                  attemptId: 'wave-a-isolated', code: 'zero_address_sender_unsupported',
+                  retryDisposition: 'permanent', declaredBodyBytes: 0, capturedBodyBytes: 0,
+                  bodyTruncated: false, bodyReadFailed: false,
+               });
+            }
+            throw new TypeError('synthetic provider network failure');
+         }
+         secondEntered.release();
+         await held.promise;
+      };
+      const indexer = fakeIndexer({
+         async searchWatchPage(watch) {
+            await customerOperation(watch.id);
+            return { transactions: [], currentRound: 101 };
+         },
+         async lookupAssetTransfer(_transaction, _purpose, watchId) {
+            await customerOperation(watchId!);
+            return undefined;
+         },
+      });
+      const poller = new RoundWatchPoller(store, indexer, 60_000, 100, undefined,
+         undefined, undefined, undefined, probe);
+      const reconciler = new SettlementReconciler(store, indexer,
+         { network: NETWORK, intervalMilliseconds: 60_000 }, undefined, probe);
+      const affected = reconciling ? reconciler : poller;
+      const paidReadiness = createPaidAdmissionReadinessCheck({
+         storageReady: () => store.readinessCheck(), diskHeadroom: () => true,
+         poller, reconciler, healthProbe: probe, maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      const app = createApp({
+         avmAddress: ADDRESS, store, indexer, syncFacilitatorOnStart: false,
+         facilitatorClient: {
+            async getSupported() { return { kinds: [], extensions: [], signers: {} }; },
+            async verify() { throw new Error('unexpected verification'); },
+            async settle() { throw new Error('unexpected settlement'); },
+         },
+         paidAdmissionReadinessCheck: paidReadiness,
+         // This is the normal production /ready composition from index.ts.
+         readinessCheck: () => {
+            const storage = store.readinessCheck();
+            const pollerReady = poller.healthSnapshot().ready;
+            const reconcilerReady = reconciler.healthSnapshot().ready;
+            const backgroundWorkers = pollerReady && reconcilerReady;
+            const diskHeadroom = true;
+            return {
+               ready: storage && backgroundWorkers && diskHeadroom,
+               checks: { storage, poller: pollerReady, reconciler: reconcilerReady, backgroundWorkers, diskHeadroom },
+            };
+         },
+      });
+      try {
+         poller.start();
+         reconciler.start();
+         await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+         assert.equal(probeCalls, 1);
+         const healthySample = await probe.runIfDue(30_000);
+         const before = probe.currentFailureEpoch();
+         assert.equal((await paidReadiness()).ready, true);
+         assert.equal((await app.request('/ready')).status, 200);
+
+         for (const key of ['wave-a-first', 'wave-a-second']) {
+            if (reconciling) {
+               store.prepareWatch({ idempotencyKey: key, expectedSender: ADDRESS,
+                  expectedReceiver: OTHER, assetId: ASSET, atomicAmount: '1' }, service(key));
+            } else {
+               active(store, key);
+            }
+         }
+         t.mock.timers.tick(60_000);
+         await secondEntered.promise;
+
+         // The sweep has recognized watch one's failure but cannot finish yet.
+         const inFlight = affected.healthSnapshot();
+         assert.equal(turns, 2);
+         assert.equal(inFlight.running, true);
+         assert.equal(inFlight.cycleNotStalled, true);
+         assert.equal(probe.currentFailureEpoch(), before + (isolated ? 0 : 1));
+         assert.equal(probe.isSampleFreshForAdmission(healthySample, 30_000), isolated);
+         assert.equal(inFlight.providerHealth, isolated ? 'healthy' : 'unhealthy');
+         assert.equal(inFlight.ready, isolated);
+         if (!isolated) assert.ok(inFlight.lastErrorAtMs !== undefined);
+         assert.equal((await paidReadiness()).ready, isolated);
+         const publicResponse = await app.request('/ready');
+         assert.equal(publicResponse.status, isolated ? 200 : 503);
+         const publicBody = await publicResponse.json() as { checks: Record<string, boolean> };
+         assert.equal(publicBody.checks.backgroundWorkers, isolated);
+         assert.equal(probeCalls, 1, 'unhealthy worker must reject before starting another probe');
+         assert.ok(failedWatchId);
+         assert.equal(store.getWatch(failedWatchId)?.state,
+            isolated ? 'indeterminate' : reconciling ? 'settlement_pending' : 'active');
+
+         held.release();
+         await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+         assert.equal(probe.currentFailureEpoch(), before + (isolated ? 0 : 1),
+            'cycle completion must not publish the same failure a second time');
+         assert.equal(affected.healthSnapshot().providerHealth, isolated ? 'healthy' : 'unhealthy');
+         assert.equal(affected.healthSnapshot().consecutiveFailures, isolated ? 0 : 1);
+         if (!reconciling) {
+            const stats = poller.capacitySnapshot();
+            assert.equal(stats.watchesAttemptedLastCycle, 2);
+            assert.equal(stats.watchesFailedLastCycle, 1);
+            assert.equal(stats.watchesSucceededLastCycle, 1);
+         }
+
+         // Independent functional evidence still provides bounded recovery.
+         probeNow += 15_000;
+         t.mock.timers.tick(60_000);
+         await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+         assert.equal(probe.currentFailureEpoch(), before + (isolated ? 0 : 1));
+         assert.equal(probeCalls, 2);
+         assert.equal((await paidReadiness()).ready, true);
+         assert.equal((await app.request('/ready')).status, 200);
+      } finally {
+         held.release();
+         await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+         poller.stop();
+         reconciler.stop();
+         store.close();
+      }
+   });
+}
+
+function deferredSignal(): { promise: Promise<void>; release: () => void } {
+   let release!: () => void;
+   const promise = new Promise<void>(resolve => { release = resolve; });
+   return { promise, release };
+}
+
+async function flushUntil(condition: () => boolean): Promise<void> {
+   for (let i = 0; i < 200; i += 1) {
+      if (condition()) {
+         // Drain the scheduler's promise finally handlers as well as the
+         // observable cycle completion before advancing the mocked timers.
+         for (let j = 0; j < 10; j += 1) await Promise.resolve();
+         return;
+      }
+      await Promise.resolve();
+   }
+   assert.fail('worker did not reach the expected state after draining microtasks');
+}
+
+for (const kind of ['poller', 'reconciler'] as const) {
+   test(`Wave A worker evidence: ${kind} counts slow current failures but rejects slow healthy recovery`, async t => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+      const store = new RoundWatchStore(':memory:');
+      let probeNow = 1_000;
+      let probeCalls = 0;
+      let releaseProbe: ((evidence: IndexerCapabilityEvidence) => void) | undefined;
+      const probe = new IndexerHealthProbe({ probeReadinessCapabilities() {
+         probeCalls += 1;
+         if (probeCalls === 1) return Promise.resolve({ polling: true, reconciliation: true });
+         return new Promise<IndexerCapabilityEvidence>(resolve => { releaseProbe = resolve; });
+      } }, ASSET, () => probeNow, 15_000, 120_000);
+      let tip = 100;
+      let customerTurns = 0;
+      const indexer = fakeIndexer({
+         async getCurrentRound() { return kind === 'poller' ? ++tip : 101; },
+         async searchWatchPage() {
+            customerTurns += 1;
+            return { transactions: [], currentRound: tip };
+         },
+         async lookupAssetTransfer() { customerTurns += 1; return undefined; },
+      });
+      const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+         undefined, undefined, undefined, probe);
+      const reconciler = new SettlementReconciler(store, indexer,
+         { network: NETWORK, intervalMilliseconds: 5_000,
+            baseBackoffMilliseconds: 1, maxBackoffMilliseconds: 1 }, undefined, probe);
+      const affected = kind === 'poller' ? poller : reconciler;
+      const companion = kind === 'poller' ? reconciler : poller;
+      const app = createApp({
+         avmAddress: ADDRESS, store, indexer, syncFacilitatorOnStart: false,
+         facilitatorClient: {
+            async getSupported() { return { kinds: [], extensions: [], signers: {} }; },
+            async verify() { throw new Error('unexpected verification'); },
+            async settle() { throw new Error('unexpected settlement'); },
+         },
+         // Normal production composition, with an in-memory store and available disk.
+         readinessCheck: () => {
+            const storage = store.readinessCheck();
+            const pollerReady = poller.healthSnapshot().ready;
+            const reconcilerReady = reconciler.healthSnapshot().ready;
+            const backgroundWorkers = pollerReady && reconcilerReady;
+            const diskHeadroom = true;
+            return {
+               ready: storage && backgroundWorkers && diskHeadroom,
+               checks: { storage, poller: pollerReady, reconciler: reconcilerReady, backgroundWorkers, diskHeadroom },
+            };
+         },
+      });
+      try {
+         poller.start(); reconciler.start();
+         await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+         assert.equal(probeCalls, 1);
+         assert.equal((await app.request('/ready')).status, 200);
+         const key = `slow-current-${kind}`;
+         const watch = kind === 'poller' ? active(store, key)
+            : store.prepareWatch({ idempotencyKey: key, expectedSender: ADDRESS,
+               expectedReceiver: OTHER, assetId: ASSET, atomicAmount: '1' }, service(key)).watch;
+
+         // Two slow negative samples establish unhealthy state; a subsequent
+         // slow complete success must not recover it under the active policy.
+         for (const cycle of [1, 2, 3]) {
+            releaseProbe = undefined;
+            probeNow += 15_000;
+            t.mock.timers.tick(5_000);
+            await flushUntil(() => releaseProbe !== undefined);
+            assert.equal(customerTurns, cycle, 'customer work completes before the held probe');
+            assert.equal(store.getWatch(watch.id)?.workUnitsUsed, cycle);
+            assert.equal(affected.healthSnapshot().running, true);
+            probeNow += 16_001;
+            t.mock.timers.tick(16_001);
+            releaseProbe!({ polling: cycle === 3 || kind !== 'poller',
+               reconciliation: cycle === 3 || kind !== 'reconciler' });
+            await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+
+            const sample = probe.currentSample()!;
+            assert.equal(sample.completedAtMs - sample.attemptedAtMs, 16_001);
+            assert.equal(probe.isSampleCurrent(sample), true);
+            assert.equal(probe.isSampleFreshForAdmission(sample, 15_000), false);
+            const health = affected.healthSnapshot();
+            assert.equal(health.consecutiveFailures, Math.min(cycle, 2),
+               'successful customer work must not reset or hide complete-probe failures');
+            assert.equal(health.providerHealth, cycle === 1 ? 'healthy' : 'unhealthy');
+            assert.equal(health.ready, cycle === 1);
+            assert.equal(companion.readinessCheck(), true, 'the other capability remains healthy');
+            const response = await app.request('/ready');
+            assert.equal(response.status, cycle === 1 ? 200 : 503);
+            assert.equal((await response.json() as { checks: Record<string, boolean> }).checks[kind], cycle === 1);
+            assert.equal(probeCalls, cycle + 1);
+            if (kind === 'poller') {
+               assert.equal(poller.capacitySnapshot().watchesSucceededLastCycle, 1);
+               assert.equal(poller.capacitySnapshot().watchesFailedLastCycle, 0);
+            }
+         }
+      } finally {
+         poller.stop(); reconciler.stop();
+         releaseProbe?.({ polling: false, reconciliation: false });
+         await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+         store.close();
+      }
+   });
+}
+
+test('Wave A worker evidence: both workers consume a cached negative physical sample only once', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+   const store = new RoundWatchStore(':memory:');
+   let probeNow = 1_000;
+   let healthy = true;
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      return { polling: healthy, reconciliation: healthy };
+   } }, ASSET, () => probeNow);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: NETWORK, intervalMilliseconds: 5_000 }, undefined, probe);
+   try {
+      poller.start(); reconciler.start();
+      await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+      healthy = false;
+      probeNow += 15_000;
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      assert.equal(calls, 2);
+      for (const worker of [poller, reconciler]) assert.equal(worker.healthSnapshot().consecutiveFailures, 1);
+      const revision = probe.currentSample()!.revision;
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      assert.equal(calls, 2);
+      assert.equal(probe.currentSample()!.revision, revision);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().consecutiveFailures, 1);
+         assert.equal(worker.readinessCheck(), true);
+      }
+      probeNow += 15_000;
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      assert.equal(calls, 3);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().consecutiveFailures, 2);
+         assert.equal(worker.healthSnapshot().providerHealth, 'unhealthy');
+         assert.equal(worker.readinessCheck(), false);
+      }
+   } finally { poller.stop(); reconciler.stop(); store.close(); }
+});
+
+test('Wave A worker evidence: both workers ignore a negative probe made obsolete by a newer coalesced failure', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+   const store = new RoundWatchStore(':memory:');
+   const held = deferredSignal();
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      if (calls === 2) {
+         await held.promise;
+         return { polling: false, reconciliation: false };
+      }
+      return { polling: true, reconciliation: true };
+   } }, ASSET, () => 1_000);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: NETWORK, intervalMilliseconds: 5_000 }, undefined, probe);
+   try {
+      await probe.runIfDue(30_000);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      poller.start(); reconciler.start();
+      await flushUntil(() => calls === 2);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      held.release();
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      const obsolete = probe.currentSample()!;
+      assert.equal(obsolete.failureEpoch, probe.currentFailureEpoch());
+      assert.equal(obsolete.providerFailureRevision, 1);
+      assert.equal(probe.isSampleCurrent(obsolete), false);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().providerHealth, 'unknown');
+         assert.equal(worker.healthSnapshot().consecutiveFailures, 0);
+         assert.equal(worker.readinessCheck(), false);
+      }
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+      assert.equal(calls, 3);
+      assert.equal(probe.currentSample()?.providerFailureRevision, 2);
+      assert.equal(probe.invalidateForProviderFailure(), 2);
+   } finally { poller.stop(); reconciler.stop(); held.release(); store.close(); }
+});
+
+test('Wave A follow-up: two failed customer turns sharing one physical tip request invalidate evidence once', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+   }, ASSET, () => 1_000);
+   const entered = deferredSignal();
+   let rejectTip!: (error: Error) => void;
+   const held = new Promise<number>((_resolve, reject) => { rejectTip = reject; });
+   let physicalRequests = 0;
+   const indexer = fakeIndexer({ getCurrentRound() {
+      physicalRequests += 1;
+      entered.release();
+      return held;
+   } });
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   let sweep: Promise<unknown> | undefined;
+   try {
+      active(store, 'shared-failure-first');
+      active(store, 'shared-failure-second');
+      const healthy = await probe.runIfDue(30_000);
+      const before = probe.currentFailureEpoch();
+      sweep = poller.runOnce();
+      await entered.promise;
+      rejectTip(new TypeError('one shared physical provider failure'));
+      const outcome = await sweep;
+      assert.deepEqual(outcome, { attempted: 2, succeeded: 0, failed: 2 });
+      assert.equal(physicalRequests, 1);
+      assert.equal(probe.currentFailureEpoch(), before + 1);
+      assert.equal(probe.isSampleFreshForAdmission(healthy, 30_000), false);
+      assert.equal(poller.healthSnapshot().providerHealth, 'unhealthy');
+      assert.equal(poller.capacitySnapshot().watchesFailedLastCycle, 2);
+      assert.ok(store.listActiveWatches().every(watch => watch.pollingFailureCount === 1));
+   } finally {
+      rejectTip(new TypeError('test cleanup'));
+      await sweep;
+      store.close();
+   }
+});
+
+test('Wave A P2 revision: a newer coalesced failure obsoletes held recovery before paid consumption', async () => {
+   let now = 1_000;
+   let calls = 0;
+   const held = deferredSignal();
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      if (calls === 2) await held.promise;
+      return { polling: true, reconciliation: true };
+   } }, ASSET, () => now);
+   const worker = { healthSnapshot: () => ({ started: true, running: false,
+      ready: true, cycleNotStalled: true, providerHealth: 'healthy' as const,
+      consecutiveFailures: 0, generation: 1 }) };
+   const paid = createPaidAdmissionReadinessCheck({
+      storageReady: () => true, diskHeadroom: () => true,
+      poller: worker, reconciler: worker, healthProbe: probe,
+      maximumEvidenceAgeMilliseconds: 30_000,
+   });
+
+   const initial = await paid();
+   assert.equal(initial.ready, true);
+   assert.equal(calls, 1);
+   assert.equal(probe.currentSample()?.providerFailureRevision, 0);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   const recovery = probe.runIfDue(30_000);
+   const pendingAdmission = paid();
+   assert.equal(calls, 2, 'paid admission shares the held physical recovery probe');
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   assert.equal(probe.currentFailureEpoch(), 1);
+   now += 1;
+   held.release();
+   const obsolete = await recovery;
+   const rejected = await pendingAdmission;
+   assert.equal(obsolete.failureEpoch, 1);
+   assert.equal(obsolete.providerFailureRevision, 1);
+   assert.deepEqual(obsolete.evidence, { polling: true, reconciliation: true });
+   assert.equal(probe.isSampleFreshForAdmission(obsolete, 30_000), false);
+   assert.equal(rejected.ready, false);
+   assert.equal(rejected.checks.capabilityEvidenceFresh, false);
+   assert.equal(paid.validateCurrent(initial).ready, false);
+
+   // No interval has elapsed: the later failure must defeat healthy cache reuse.
+   const recovered = await probe.runIfDue(30_000);
+   assert.equal(calls, 3);
+   assert.equal(recovered.failureEpoch, 1);
+   assert.equal(recovered.providerFailureRevision, 2);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+   assert.equal((await paid()).ready, true);
+   assert.equal(calls, 3, 'the new current sample remains reusable');
+   assert.equal(probe.invalidateForProviderFailure(), 2);
+});
+
+test('Wave A P2 revision: workers reject obsolete recovery and it cannot rearm public invalidation', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+   const store = new RoundWatchStore(':memory:');
+   const held = deferredSignal();
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      if (calls === 2) await held.promise;
+      return { polling: true, reconciliation: true };
+   } }, ASSET, () => 1_000);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: NETWORK, intervalMilliseconds: 5_000 }, undefined, probe);
+   try {
+      await probe.runIfDue(30_000);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      poller.start();
+      reconciler.start();
+      await flushUntil(() => calls === 2);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      held.release();
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().providerHealth, 'unknown');
+         assert.equal(worker.readinessCheck(), false);
+      }
+      assert.equal(probe.invalidateForProviderFailure(), 1,
+         'obsolete complete recovery must not rearm public epoch publication');
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+      assert.equal(calls, 3, 'both workers share a new probe despite the unchanged public epoch');
+      assert.equal(probe.currentSample()?.providerFailureRevision, 3);
+      assert.equal(probe.invalidateForProviderFailure(), 2);
+   } finally {
+      poller.stop();
+      reconciler.stop();
+      held.release();
+      store.close();
+   }
+});
+
+test('Wave A P2 revision: recovery rearming uses the physical probe age policy while paid admission keeps its own', async () => {
+   for (const [maximumAge, duration] of [
+      [15_000, 15_000], [15_000, 15_001],
+      [60_000, 45_000], [60_000, 60_001],
+   ] as const) {
+      let now = 1_000;
+      let calls = 0;
+      const held = deferredSignal();
+      const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+         calls += 1;
+         if (calls === 2) await held.promise;
+         return { polling: true, reconciliation: true };
+      } }, ASSET, () => now);
+      const worker = { healthSnapshot: () => ({ started: true, running: false,
+         ready: true, cycleNotStalled: true, providerHealth: 'healthy' as const,
+         consecutiveFailures: 0, generation: 1 }) };
+      const paid = createPaidAdmissionReadinessCheck({
+         storageReady: () => true, diskHeadroom: () => true,
+         poller: worker, reconciler: worker, healthProbe: probe,
+         maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      const initial = await paid();
+      assert.equal(initial.ready, true);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      const recovery = probe.runIfDue(maximumAge);
+      now += duration;
+      held.release();
+      const sample = await recovery;
+      assert.equal(probe.isSampleFreshForAdmission(sample, maximumAge), duration <= maximumAge);
+      assert.equal(paid.validateCurrent(initial).ready, duration <= 30_000,
+         'the paid freshness policy is independent of the physical probe policy');
+      assert.equal(probe.invalidateForProviderFailure(), duration <= maximumAge ? 2 : 1,
+         `rearm at duration ${duration} must use the requested ${maximumAge}ms policy`);
+   }
+});
+
+test('Wave A follow-up: repeated failures coalesce until fresh complete capability recovery', async () => {
+   let now = 1_000;
+   let evidence = { polling: true, reconciliation: true };
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return evidence; },
+   }, ASSET, () => now);
+   const healthy = await probe.runIfDue(30_000);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   assert.equal(probe.isSampleFreshForAdmission(healthy, 30_000), false);
+
+   // Failed and partially healthy probes do not establish complete recovery.
+   for (const partial of [{ polling: false, reconciliation: false },
+      { polling: true, reconciliation: false }]) {
+      now += 15_000;
+      evidence = partial;
+      await probe.runIfDue(30_000);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+   }
+   now += 15_000;
+   evidence = { polling: true, reconciliation: true };
+   const recovered = await probe.runIfDue(30_000);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+   assert.equal(probe.currentFailureEpoch(), 1);
+   assert.equal(probe.invalidateForProviderFailure(), 2);
+   assert.equal(probe.invalidateForProviderFailure(), 2);
+   assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), false);
+});
+
+test('Wave A follow-up: over-age complete probe cannot rearm failure invalidation', async () => {
+   let now = 1_000;
+   let release!: (evidence: IndexerCapabilityEvidence) => void;
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ probeReadinessCapabilities() {
+      calls += 1;
+      return calls === 1
+         ? Promise.resolve({ polling: true, reconciliation: true })
+         : new Promise<IndexerCapabilityEvidence>(resolve => { release = resolve; });
+   } }, ASSET, () => now);
+   await probe.runIfDue(30_000);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+   const slow = probe.runIfDue(30_000);
+   now += 30_001;
+   release({ polling: true, reconciliation: true });
+   assert.equal(probe.isSampleFreshForAdmission(await slow, 30_000), false);
+   assert.equal(probe.invalidateForProviderFailure(), 1);
+});
+
+test('Wave A follow-up: synchronous consumption rechecks all current admission inputs without probing', async () => {
+   for (const failure of ['storage', 'disk', 'poller', 'reconciler', 'poller-generation',
+      'reconciler-generation', 'epoch', 'age', 'capabilities'] as const) {
+      let now = 1_000;
+      let storage = true;
+      let disk = true;
+      let probeCalls = 0;
+      let evidence = { polling: true, reconciliation: true };
+      const poller = { started: true, running: false, ready: true, cycleNotStalled: true,
+         providerHealth: 'healthy' as 'healthy' | 'unhealthy', consecutiveFailures: 0, generation: 1 };
+      const reconciler = { ...poller };
+      const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+         probeCalls += 1; return evidence;
+      } }, ASSET, () => now);
+      const paid = createPaidAdmissionReadinessCheck({
+         storageReady: () => storage, diskHeadroom: () => disk,
+         poller: { healthSnapshot: () => poller }, reconciler: { healthSnapshot: () => reconciler },
+         healthProbe: probe, maximumEvidenceAgeMilliseconds: 30_000,
+      });
+      const absent = paid.validateCurrent({ ready: true, checks: {}, workerGenerations: { poller: 1, reconciler: 1 } });
+      assert.equal(absent.ready, false);
+      assert.equal(absent.checks.capabilityEvidenceFresh, false);
+      assert.equal(probeCalls, 0);
+      const refreshed = await paid();
+      assert.equal(refreshed.ready, true);
+      assert.equal(paid.validateCurrent(refreshed).ready, true);
+      if (failure === 'storage') storage = false;
+      else if (failure === 'disk') disk = false;
+      else if (failure === 'poller') poller.providerHealth = 'unhealthy';
+      else if (failure === 'reconciler') reconciler.providerHealth = 'unhealthy';
+      else if (failure === 'poller-generation') poller.generation += 1;
+      else if (failure === 'reconciler-generation') reconciler.generation += 1;
+      else if (failure === 'epoch') probe.invalidateForProviderFailure();
+      else if (failure === 'age') {
+         now += 30_000;
+         assert.equal(paid.validateCurrent(refreshed).ready, true);
+         now += 1;
+      } else {
+         now += 15_000;
+         evidence = { polling: true, reconciliation: false };
+         await probe.runIfDue(15_000);
+      }
+      const calls = probeCalls;
+      assert.equal(paid.validateCurrent(refreshed).ready, false, failure);
+      assert.equal(probeCalls, calls, 'synchronous guard must perform zero provider probes');
+   }
+});
+
 test('paid readiness refreshes after a newer provider-failure epoch instead of reusing cached success', async () => {
    let now = 0;
    let healthy = true;
@@ -545,13 +1171,16 @@ test('provider failure during an in-flight probe invalidates that sample and the
 
    const first = probe.runIfDue(30_000);
    probe.invalidateForProviderFailure();
+   assert.equal(probe.invalidateForProviderFailure(), 1);
    resolveFirst({ polling: true, reconciliation: true });
    const stale = await first;
 
    assert.equal(probe.isSampleFreshForAdmission(stale, 30_000), false);
+   assert.equal(probe.invalidateForProviderFailure(), 1, 'obsolete in-flight success cannot rearm invalidation');
    const recovered = await probe.runIfDue(30_000);
    assert.equal(calls, 2);
    assert.equal(probe.isSampleFreshForAdmission(recovered, 30_000), true);
+   assert.equal(probe.invalidateForProviderFailure(), 2);
 });
 
 test('paid readiness rejects a probe whose aggregate duration exceeds its evidence-age policy', async () => {

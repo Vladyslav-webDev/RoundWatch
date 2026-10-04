@@ -16,20 +16,23 @@ export interface IndexerCapabilitySource {
 export interface IndexerProbeSample {
    revision: number;
    failureEpoch: number;
+   providerFailureRevision: number;
    attemptedAtMs: number;
    completedAtMs: number;
    evidence: IndexerCapabilityEvidence;
 }
 
 // Both workers and paid admission share one probe and one in-flight promise.
-// Provider failures invalidate cached evidence by epoch rather than by comparing
-// worker Date.now() timestamps with this probe's monotonic performance clock.
+// Every provider failure invalidates earlier probes by observation revision.
+// The public epoch coalesces failures until complete, current, fresh recovery.
 export class IndexerHealthProbe {
    private lastAttemptAtMs?: number;
    private pending?: Promise<IndexerProbeSample>;
    private latest?: IndexerProbeSample;
    private revision = 0;
    private failureEpoch = 0;
+   private providerFailureRevision = 0;
+   private providerEvidenceInvalidated = false;
 
    constructor(
       private readonly source: IndexerCapabilitySource,
@@ -56,8 +59,17 @@ export class IndexerHealthProbe {
 
    currentFailureEpoch(): number { return this.failureEpoch; }
 
+   currentSample(): IndexerProbeSample | undefined { return this.latest; }
+
    invalidateForProviderFailure(): number {
-      this.failureEpoch += 1;
+      // Even a coalesced observation makes an earlier in-flight probe obsolete.
+      this.providerFailureRevision += 1;
+      // Epochs invalidate evidence generations, not each watch observing a
+      // failed shared request. Only fresh complete recovery rearms publication.
+      if (!this.providerEvidenceInvalidated) {
+         this.providerEvidenceInvalidated = true;
+         this.failureEpoch += 1;
+      }
       return this.failureEpoch;
    }
 
@@ -83,7 +95,7 @@ export class IndexerHealthProbe {
       this.assertMaximumEvidenceAge(maximumEvidenceAgeMs);
       const at = this.now();
       return (
-         sample.failureEpoch === this.failureEpoch &&
+         this.isSampleCurrent(sample) &&
          sample.completedAtMs >= sample.attemptedAtMs &&
          sample.completedAtMs - sample.attemptedAtMs <= maximumEvidenceAgeMs &&
          at >= sample.attemptedAtMs &&
@@ -102,14 +114,14 @@ export class IndexerHealthProbe {
       const latestHealthy =
          this.latest?.evidence.polling === true &&
          this.latest.evidence.reconciliation === true;
-      const latestMatchesFailureEpoch =
-         this.latest?.failureEpoch === this.failureEpoch;
-      const effectiveMaximumAgeMs = latestHealthy && latestMatchesFailureEpoch
+      const latestCurrent = this.latest !== undefined &&
+         this.isSampleCurrent(this.latest);
+      const effectiveMaximumAgeMs = latestHealthy && latestCurrent
          ? maximumEvidenceAgeMs
          : Math.min(maximumEvidenceAgeMs, this.minimumIntervalMs);
 
       if (
-         latestMatchesFailureEpoch &&
+         latestCurrent &&
          this.lastAttemptAtMs !== undefined &&
          at - this.lastAttemptAtMs < effectiveMaximumAgeMs
       ) {
@@ -119,22 +131,36 @@ export class IndexerHealthProbe {
       this.lastAttemptAtMs = at;
       const revision = ++this.revision;
       const failureEpoch = this.failureEpoch;
+      const providerFailureRevision = this.providerFailureRevision;
       const pending = this.source.probeReadinessCapabilities(this.assetId)
          .catch(() => ({ polling: false, reconciliation: false }))
          .then(evidence => {
             const sample = {
                revision,
                failureEpoch,
+               providerFailureRevision,
                attemptedAtMs: at,
                completedAtMs: this.now(),
                evidence,
             };
             this.latest = sample;
+            if (
+               evidence.polling && evidence.reconciliation &&
+               this.isSampleFreshForAdmission(sample, maximumEvidenceAgeMs)
+            ) {
+               this.providerEvidenceInvalidated = false;
+            }
             return sample;
          })
          .finally(() => { this.pending = undefined; });
       this.pending = pending;
       return pending;
+   }
+
+   // Causal currentness is independent of age; positive evidence also needs freshness.
+   isSampleCurrent(sample: IndexerProbeSample): boolean {
+      return sample.failureEpoch === this.failureEpoch &&
+         sample.providerFailureRevision === this.providerFailureRevision;
    }
 
    private assertMaximumEvidenceAge(maximumEvidenceAgeMs: number): void {
