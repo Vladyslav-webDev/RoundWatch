@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -726,7 +727,9 @@ function buildSyntheticTransaction(
          : 'global';
 
    return {
-      id: `BENCH_TX_${collisionStreamKey}_${minRound}_${maxRound}_${index}`,
+      id: syntheticTransactionId(
+         `BENCH_TX_${collisionStreamKey}_${minRound}_${maxRound}_${index}`,
+      ),
       'tx-type': 'axfer',
       sender: EXPECTED_SENDER,
       note: Buffer.from(noteText, 'utf8').toString('base64'),
@@ -752,6 +755,18 @@ function buildSyntheticTransaction(
          'asset-id': TESTNET_USDC_ASSET_ID,
       },
    };
+}
+
+function syntheticTransactionId(seed: string): string {
+   const digest = createHash('sha256').update(seed).digest('hex');
+   // Encode the 256-bit fixture digest with four unused zero bits, then map
+   // JavaScript's radix-32 digits to the unpadded RFC4648 Base32 alphabet.
+   return (BigInt(`0x${digest}`) << 4n)
+      .toString(32)
+      .padStart(52, '0')
+      .replace(/[0-9a-v]/g, digit =>
+         'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[Number.parseInt(digit, 32)]!,
+      );
 }
 
 interface SyntheticTransaction {
