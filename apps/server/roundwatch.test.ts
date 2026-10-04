@@ -51,6 +51,7 @@ import { IndexerHealthProbe } from './roundwatch-health-probe.js';
 import { createPaidAdmissionReadinessCheck, type PaidReadinessSnapshot } from './roundwatch-paid-readiness.js';
 import { WorkerHealthTracker } from './roundwatch-worker-health.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
+import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 import { MAX_INDEXER_REQUESTS_PER_ACTIVE_WORK_TURN } from './roundwatch-work-budget.js';
 import {
@@ -3154,6 +3155,288 @@ test('paid x402 middleware persists signed purchase terms and activates from the
       store.close();
    }
 });
+
+for (const captureMethod of ['captureWatch', 'captureExistingWatch'] as const) {
+   test(`B3 telemetry ${captureMethod} failure preserves the real settled app workflow`, async t => {
+      const store = new RoundWatchStore(':memory:');
+      const metrics = new RoundWatchEconomicsMetrics();
+      const spec = { ...SPEC, idempotencyKey: `telemetry-${captureMethod}`, expectedSender: WATCH_SENDER };
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const warnings: string[] = [];
+      t.mock.method(console, 'warn', (...args: unknown[]) => warnings.push(args.map(String).join(' ')));
+      const originalCapture = metrics[captureMethod].bind(metrics);
+      let captures = 0;
+      t.mock.method(metrics, captureMethod, (id: string) => {
+         captures += 1;
+         if (captures === 1) throw new Error('synthetic telemetry capture failure');
+         return originalCapture(id);
+      });
+      if (captureMethod === 'captureExistingWatch') {
+         const settle = facilitator.settle.bind(facilitator);
+         t.mock.method(facilitator, 'settle', async (payload: PaymentPayload, requirements: PaymentRequirements) => {
+            const result = await settle(payload, requirements);
+            const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+            store.activateWatch(watch.id, {
+               transaction: result.transaction, network: result.network, payer: PAYER,
+            }, 150);
+            store.markMatched(watch.id, INDEXER_TX_ID, 151);
+            metrics.recordLifecycle(watch.id, { finalState: 'matched' });
+            metrics.finishWatch(watch.id);
+            return result;
+         });
+      }
+      let lookups = 0;
+      const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher, async input => {
+         assert.equal(new URL(String(input)).pathname, `/v2/transactions/${SIGNED_SERVICE_TX_ID}`);
+         lookups += 1;
+         return syntheticServiceTransferResponse();
+      }, 1_000, metrics);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer, economicsMetrics: metrics, requireSettlementIntent: true,
+      });
+      try {
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         const paid = await app.request('/spike/watch', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+         });
+         const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+         assert.equal(watch.state, captureMethod === 'captureWatch' ? 'active' : 'matched');
+         assert.equal(paid.status, 200);
+         assert.equal(watch.activationRound, 150);
+         assert.equal(lookups, 1);
+         assert.equal(captures, 1, 'failed capture must not be retried by Indexer fallback');
+         assert.equal(dispatcher.snapshot().failures, 0);
+         assert.ok(warnings.some(message => message.includes('economics') && message.includes('synthetic telemetry')));
+         assert.equal(warnings.some(message => message.includes('could not confirm')), false);
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         assert.equal(metrics.snapshotWatch(watch.id), undefined);
+         const duplicate = await app.request('/spike/watch', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+         });
+         assert.equal(duplicate.status, 409);
+         assert.equal(facilitator.settleCalls, 1, 'capture failure must not require another settlement');
+      } finally {
+         store.close();
+      }
+   });
+}
+
+for (const outcome of ['success', 'failure', 'timeout'] as const) {
+   test(`B3 held post-settlement app lookup ${outcome} cannot resurrect worker-finished metrics`, async t => {
+      const store = new RoundWatchStore(':memory:', { workUnitBudget: 1 });
+      const metrics = new RoundWatchEconomicsMetrics();
+      const spec = { ...SPEC, idempotencyKey: `held-app-${outcome}`, expectedSender: WATCH_SENDER };
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const logs: string[] = [];
+      t.mock.method(console, 'info', (message: string) => {
+         if (message.startsWith('RoundWatch economics watch-terminal ')) logs.push(message);
+      });
+      let started!: () => void;
+      const requestStarted = new Promise<void>(resolve => { started = resolve; });
+      let release!: (response: Response) => void;
+      let reject!: (error: unknown) => void;
+      const held = new Promise<Response>((resolve, rejectPromise) => { release = resolve; reject = rejectPromise; });
+      const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher,
+         async () => { started(); return held; }, 1_000, metrics);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer, economicsMetrics: metrics, requireSettlementIntent: true,
+      });
+      let pending: Promise<Response> | undefined;
+      try {
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         pending = Promise.resolve(app.request('/spike/watch', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+         }));
+         await requestStarted;
+         const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+         assert.equal(watch.state, 'settlement_pending');
+         assert.equal(facilitator.settleCalls, 1);
+         assert.equal(metrics.activeWatchMetricCount(), 1);
+         assert.equal(store.claimWorkUnit(watch.id), 'claimed');
+         metrics.recordWorkUnit(watch.id);
+         await new SettlementReconciler(store, indexer, {
+            network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+         }, metrics).reconcileOnce();
+         assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         assert.equal(logs.length, 1);
+         const savedLogs = [...logs];
+
+         if (outcome === 'success') release(syntheticServiceTransferResponse());
+         else reject(outcome === 'timeout'
+            ? new DOMException('synthetic held timeout', 'TimeoutError')
+            : new Error('synthetic held failure'));
+         assert.equal((await pending).status, 500); // Existing fail-closed terminal behavior.
+         assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
+         assert.equal(facilitator.settleCalls, 1);
+         assert.equal(dispatcher.snapshot().successes, outcome === 'success' ? 1 : 0);
+         assert.equal(dispatcher.snapshot().failures, outcome === 'success' ? 0 : 1);
+         assert.equal(dispatcher.snapshot().timeouts, outcome === 'timeout' ? 1 : 0);
+         assert.deepEqual(logs, savedLogs);
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         assert.equal(metrics.snapshotWatch(watch.id), undefined);
+      } finally {
+         release(syntheticServiceTransferResponse());
+         await pending;
+         store.close();
+      }
+   });
+}
+
+for (const entry of ['existing', 'partial-capture', 'cleanup-error'] as const) {
+   test(`B3 terminal cleanup app mismatch after ${entry} capture failure`, async t => {
+      const store = new RoundWatchStore(':memory:');
+      const metrics = new RoundWatchEconomicsMetrics();
+      const spec = { ...SPEC, idempotencyKey: `terminal-app-${entry}`, expectedSender: WATCH_SENDER };
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const capture = metrics.captureWatch.bind(metrics);
+      const settle = facilitator.settle.bind(facilitator);
+      t.mock.method(facilitator, 'settle', async (payload: PaymentPayload, requirements: PaymentRequirements) => {
+         const result = await settle(payload, requirements);
+         if (entry !== 'partial-capture') {
+            capture(store.getByIdempotencyKey(spec.idempotencyKey)!.id).recordWorkUnit();
+         }
+         return result;
+      });
+      let captures = 0;
+      t.mock.method(metrics, 'captureWatch', (id: string) => {
+         captures += 1;
+         if (entry === 'partial-capture') {
+            assert.equal(metrics.snapshotWatch(id), undefined);
+            capture(id).recordWorkUnit();
+         }
+         assert.equal(metrics.snapshotWatch(id)?.workUnitsClaimed, 1);
+         throw new Error('synthetic terminal capture failure');
+      });
+      const finish = metrics.finishWatch.bind(metrics);
+      let cleanups = 0;
+      t.mock.method(metrics, 'finishWatch', (id: string) => {
+         cleanups += 1;
+         const snapshot = finish(id);
+         if (entry === 'cleanup-error') throw new Error('synthetic terminal cleanup failure');
+         return snapshot;
+      });
+      const logs: string[] = [];
+      const warnings: string[] = [];
+      t.mock.method(console, 'info', (message: string) => {
+         if (message.startsWith('RoundWatch economics watch-terminal ')) logs.push(message);
+      });
+      t.mock.method(console, 'warn', (...args: unknown[]) => warnings.push(args.map(String).join(' ')));
+      const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+      let lookups = 0;
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher, async () => {
+         lookups += 1;
+         const response = await syntheticServiceTransferResponse().json();
+         response.transaction['asset-transfer-transaction'].amount += 1;
+         return Response.json(response);
+      }, 1_000, metrics);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer, economicsMetrics: metrics, requireSettlementIntent: true,
+      });
+      try {
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         const request = { method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body };
+         assert.equal((await app.request('/spike/watch', request)).status, 500);
+         const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+         assert.equal(watch.state, 'settlement_unknown');
+         assert.equal(watch.settlementReconciliationTerminal, true);
+         assert.equal(captures, 1, 'cleanup and Indexer must not retry capture');
+         assert.equal(lookups, 1);
+         assert.equal(dispatcher.snapshot().failures, 0);
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         assert.equal(metrics.snapshotWatch(watch.id), undefined);
+         assert.equal(cleanups, 1);
+         assert.deepEqual(logs, [], 'fallback must not publish an incomplete terminal snapshot');
+         assert.equal(warnings.some(message => message.includes('could not confirm')), false);
+         if (entry === 'cleanup-error') {
+            assert.ok(warnings.some(message => message.includes('economics') && message.includes('synthetic terminal cleanup failure')));
+         }
+         assert.equal((await app.request('/spike/watch', request)).status, 409);
+         assert.equal(facilitator.settleCalls, 1);
+         assert.equal(cleanups, 1);
+      } finally {
+         store.close();
+      }
+   });
+}
+
+for (const outcome of ['valid', 'stale-mismatch', 'stale-mismatch-with-recorder'] as const) {
+   test(`B3 terminal cleanup app preserves live metrics after ${outcome}`, async t => {
+      const store = new RoundWatchStore(':memory:');
+      const metrics = new RoundWatchEconomicsMetrics();
+      const spec = { ...SPEC, idempotencyKey: `live-app-${outcome}`, expectedSender: WATCH_SENDER };
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const capture = metrics.captureWatch.bind(metrics);
+      let recorder: ReturnType<typeof capture> | undefined;
+      const settle = facilitator.settle.bind(facilitator);
+      t.mock.method(facilitator, 'settle', async (payload: PaymentPayload, requirements: PaymentRequirements) => {
+         const result = await settle(payload, requirements);
+         recorder = capture(store.getByIdempotencyKey(spec.idempotencyKey)!.id);
+         recorder.recordWorkUnit();
+         return result;
+      });
+      let captures = 0;
+      t.mock.method(metrics, 'captureWatch', (id: string) => {
+         captures += 1;
+         if (outcome === 'stale-mismatch-with-recorder') return capture(id);
+         throw new Error('synthetic live capture failure');
+      });
+      const logs: string[] = [];
+      t.mock.method(console, 'info', (message: string) => {
+         if (message.startsWith('RoundWatch economics watch-terminal ')) logs.push(message);
+      });
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test',
+         new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+         async () => {
+            const response = await syntheticServiceTransferResponse().json();
+            if (outcome !== 'valid') {
+               // Another worker activates while this hook's lookup is pending.
+               const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+               store.activateWatch(watch.id, { transaction: SIGNED_SERVICE_TX_ID, network: ALGORAND_TESTNET, payer: PAYER }, 150);
+               response.transaction['asset-transfer-transaction'].amount += 1;
+            }
+            return Response.json(response);
+         }, 1_000, metrics);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer, economicsMetrics: metrics, requireSettlementIntent: true,
+      });
+      try {
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         assert.equal((await app.request('/spike/watch', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+         })).status, 200);
+         const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+         assert.equal(watch.state, 'active');
+         assert.equal(watch.settlementReconciliationTerminal, false);
+         assert.equal(captures, 1);
+         assert.equal(metrics.activeWatchMetricCount(), 1);
+         assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 1);
+         recorder!.recordWorkUnit();
+         assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 2, 'an earlier good recorder stays attached');
+         assert.deepEqual(logs, []);
+         assert.equal(facilitator.settleCalls, 1);
+      } finally {
+         store.close();
+      }
+   });
+}
+
+function syntheticServiceTransferResponse(): Response {
+   return Response.json({ transaction: {
+      id: SIGNED_SERVICE_TX_ID, sender: PAYER, 'tx-type': 'axfer',
+      'confirmed-round': 150, 'round-time': 1_800_000_000,
+      'asset-transfer-transaction': {
+         'asset-id': TESTNET_USDC_ASSET_ID,
+         amount: Number(ROUNDWATCH_SERVICE_ATOMIC_AMOUNT), receiver: SERVICE_RECEIVER,
+      },
+   } });
+}
 
 test('settled payment survives activation lookup failure and reconciles without a second settlement', async () => {
    const store = new RoundWatchStore(':memory:');

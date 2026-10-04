@@ -31,9 +31,11 @@ import {
 } from './free-payment-gate.js';
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
 import type { PaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
-import type {
-   FreeRequestCategory,
-   RoundWatchEconomicsMetrics,
+import {
+   INERT_WATCH_ECONOMICS_RECORDER,
+   type FreeRequestCategory,
+   type RoundWatchEconomicsMetrics,
+   type WatchEconomicsRecorder,
 } from './roundwatch-metrics.js';
 import {
    TESTNET_NETWORK_CONFIG,
@@ -494,13 +496,31 @@ export function createApp(dependencies: AppDependencies): Hono {
          ...(context.result.payer ? { payer: context.result.payer } : {}),
       };
 
-      store.recordSettlementCandidate(watchId, settlementEvidence);
+      const settlementWatch = store.recordSettlementCandidate(watchId, settlementEvidence);
+
+      let watchMetrics: WatchEconomicsRecorder | undefined;
+      if (economicsMetrics) {
+         // Reconciliation/polling may finish the watch before this hook starts.
+         // Keep capture failures outside activation control flow and explicitly
+         // disable Indexer's fallback for this entire lookup/terminal path.
+         watchMetrics = INERT_WATCH_ECONOMICS_RECORDER;
+         try {
+            const metricWasTerminal = settlementWatch.state === 'matched' ||
+               settlementWatch.settlementReconciliationTerminal;
+            watchMetrics = (metricWasTerminal
+               ? economicsMetrics.captureExistingWatch(watchId)
+               : economicsMetrics.captureWatch(watchId)) ?? INERT_WATCH_ECONOMICS_RECORDER;
+         } catch (error) {
+            console.warn('RoundWatch economics activation metric failed:', safeErrorMessage(error));
+         }
+      }
 
       try {
          const transfer = await indexer.lookupAssetTransfer(
             settlementEvidence.transaction,
             'activation',
             watchId,
+            watchMetrics,
          );
          const watch = store.getWatch(watchId);
          if (!transfer || !watch) return;
@@ -514,7 +534,9 @@ export function createApp(dependencies: AppDependencies): Hono {
             transfer.round <= (watch.serviceLastValid ?? -1);
          if (!matches) {
             store.markSettlementInvalid(watchId);
-            finishTerminalMetric(economicsMetrics, watch, 'settlement_unknown');
+            finishTerminalMetric(
+               watchMetrics, store.getWatch(watchId), 'settlement_unknown', economicsMetrics,
+            );
             return;
          }
          store.activateWatch(watchId, settlementEvidence, transfer.round);
@@ -1598,21 +1620,35 @@ async function responseByteLength(response: Response): Promise<number> {
 }
 
 function finishTerminalMetric(
-   economicsMetrics: RoundWatchEconomicsMetrics | undefined,
-   watch: WatchRecord,
+   watchMetrics: WatchEconomicsRecorder | undefined,
+   watch: WatchRecord | undefined,
    finalState: WatchRecord['state'],
+   economicsMetrics: RoundWatchEconomicsMetrics | undefined,
 ): void {
-   if (!economicsMetrics) return;
+   if (!watchMetrics || !watch) return;
 
    try {
+      // Use the durable result after markSettlementInvalid: a stale mismatch
+      // can be a no-op on an already active watch whose metrics are still live.
+      const terminal = watch.state === 'matched' || watch.state === 'expired' ||
+         watch.state === 'indeterminate' ||
+         (watch.state === 'settlement_unknown' && watch.settlementReconciliationTerminal);
+      if (!terminal) return;
+      if (watchMetrics === INERT_WATCH_ECONOMICS_RECORDER) {
+         // Release only: finishWatch never creates/captures an entry. Discard
+         // its snapshot because failed capture left this turn uninstrumented.
+         economicsMetrics?.finishWatch(watch.id);
+         return;
+      }
+
       const createdAt = Date.parse(watch.createdAt);
-      economicsMetrics.recordLifecycle(watch.id, {
+      watchMetrics.recordLifecycle({
          finalState,
          ...(Number.isFinite(createdAt)
             ? { timeToTerminalMs: Math.max(0, Date.now() - createdAt) }
             : {}),
       });
-      const snapshot = economicsMetrics.finishWatch(watch.id);
+      const snapshot = watchMetrics.finishWatch();
       if (snapshot) {
          console.info(
             `RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`,

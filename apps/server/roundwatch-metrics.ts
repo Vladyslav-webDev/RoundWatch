@@ -60,6 +60,33 @@ export interface WatchLifecycleObservation {
    finalState?: WatchState;
 }
 
+/** A recorder bound to one process-local watch metrics lifecycle. */
+export interface WatchEconomicsRecorder {
+   recordIndexerRequest(
+      purpose: IndexerRequestPurpose,
+      observation: IndexerRequestObservation,
+   ): void;
+   recordScanPage(observation: ScanPageObservation): void;
+   recordCoverage(roundsCovered: number): void;
+   recordReconciliationAttempt(): void;
+   recordClosingRequest(): void;
+   recordWorkUnit(): void;
+   recordLifecycle(observation: WatchLifecycleObservation): void;
+   finishWatch(): WatchWorkSnapshot | undefined;
+}
+
+/** Explicitly disabled telemetry: a supplied recorder suppresses ID fallback. */
+export const INERT_WATCH_ECONOMICS_RECORDER: WatchEconomicsRecorder = Object.freeze({
+   recordIndexerRequest: () => {},
+   recordScanPage: () => {},
+   recordCoverage: () => {},
+   recordReconciliationAttempt: () => {},
+   recordClosingRequest: () => {},
+   recordWorkUnit: () => {},
+   recordLifecycle: () => {},
+   finishWatch: () => undefined,
+});
+
 export const FREE_REQUEST_CATEGORIES = [
    'health',
    'watch-status',
@@ -149,10 +176,27 @@ interface MutableFreeWork {
  * It is not wired into production behavior by defining it. Callers are
  * responsible for flushing/recording a terminal snapshot and then releasing
  * the corresponding watch entry.
+ *
+ * Watch IDs are durable randomUUID() primary keys, not reusable job names.
+ * ID-based record methods start/record live work synchronously. Async callers
+ * must capture a recorder before awaiting and carry it through the whole turn,
+ * including subsequent requests and terminal handling. A captured recorder
+ * becomes inert when its entry is removed, even if the ID is later reused.
+ * Restart recovery starts fresh process-local metrics only for unfinished work;
+ * no historical finished-ID state is retained here.
  */
 export class RoundWatchEconomicsMetrics {
    private readonly watches = new Map<string, MutableWatchWork>();
    private readonly freeWork = new Map<FreeRequestCategory, MutableFreeWork>();
+
+   captureWatch(watchId: string): WatchEconomicsRecorder {
+      return this.recorder(watchId, this.watch(watchId));
+   }
+
+   captureExistingWatch(watchId: string): WatchEconomicsRecorder | undefined {
+      const metric = this.watches.get(watchId);
+      return metric ? this.recorder(watchId, metric) : undefined;
+   }
 
    recordIndexerRequest(
       watchId: string,
@@ -309,6 +353,33 @@ export class RoundWatchEconomicsMetrics {
             this.snapshotFreeWork(category),
          ]),
       ) as Record<FreeRequestCategory, FreeWorkSnapshot>;
+   }
+
+   private recorder(
+      watchId: string,
+      metric: MutableWatchWork,
+   ): WatchEconomicsRecorder {
+      // Identity, rather than ID alone, fences every late observation. These
+      // closures belong to outstanding work; the accumulator retains no handle
+      // or tombstone after finishWatch deletes the entry.
+      const record = <Args extends unknown[]>(operation: (...args: Args) => void) =>
+         (...args: Args): void => {
+            if (this.watches.get(watchId) === metric) operation(...args);
+         };
+
+      return {
+         recordIndexerRequest: record((purpose, observation) =>
+            this.recordIndexerRequest(watchId, purpose, observation)),
+         recordScanPage: record(observation => this.recordScanPage(watchId, observation)),
+         recordCoverage: record(rounds => this.recordCoverage(watchId, rounds)),
+         recordReconciliationAttempt: record(() => this.recordReconciliationAttempt(watchId)),
+         recordClosingRequest: record(() => this.recordClosingRequest(watchId)),
+         recordWorkUnit: record(() => this.recordWorkUnit(watchId)),
+         recordLifecycle: record(observation => this.recordLifecycle(watchId, observation)),
+         finishWatch: () => this.watches.get(watchId) === metric
+            ? this.finishWatch(watchId)
+            : undefined,
+      };
    }
 
    private watch(watchId: string): MutableWatchWork {
