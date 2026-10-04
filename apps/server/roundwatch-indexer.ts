@@ -224,6 +224,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       purpose: IndexerRequestPurpose = 'reconciliation',
       watchId?: string,
    ): Promise<IndexedAssetTransfer | undefined> {
+      parseCanonicalAlgorandTransactionId(transactionId, 'requested transaction ID');
       return this.request(
          purpose,
          `/v2/transactions/${encodeURIComponent(transactionId)}`,
@@ -426,6 +427,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       nextToken?: string,
       watchId?: string,
    ): Promise<TransactionIdPage> {
+      parseCanonicalAlgorandTransactionId(transactionId, 'requested transaction ID');
       const url = new URL('/v2/transactions', this.baseUrl);
       url.searchParams.set('txid', transactionId);
       url.searchParams.set('limit', '1000');
@@ -681,9 +683,9 @@ function parseTransactionCommon(
    let transactionId: string | undefined;
 
    if (requireTransactionId) {
-      transactionId = nonEmptyString(transaction.id, `${label} id`);
+      transactionId = parseCanonicalAlgorandTransactionId(transaction.id, `${label} id`);
    } else if (transaction.id !== undefined) {
-      transactionId = nonEmptyString(transaction.id, `${label} id`);
+      transactionId = parseCanonicalAlgorandTransactionId(transaction.id, `${label} id`);
    }
 
    const note = parseOptionalNote(transaction.note, label);
@@ -1226,6 +1228,25 @@ function safeAmount(value: unknown, label: string): string {
 }
 function nonEmptyString(value: unknown, label: string): string {
    if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is not a non-empty string`);
+   return value;
+}
+
+export function parseCanonicalAlgorandTransactionId(
+   value: unknown,
+   label = 'transaction ID',
+): string {
+   // 51 Base32 symbols carry 255 bits; the 52nd carries the final digest bit
+   // followed by four unused zero bits. Only indices 0 (A) and 16 (Q) satisfy
+   // that constraint. Together with length/alphabet, this proves a canonical,
+   // unpadded RFC4648 Base32 encoding of exactly 32 bytes without a decoder.
+   if (
+      typeof value !== 'string' ||
+      value.length !== 52 ||
+      !/^[A-Z2-7]{52}$/.test(value) ||
+      (value[51] !== 'A' && value[51] !== 'Q')
+   ) {
+      throw new Error(`${label} is not a canonical Algorand transaction ID`);
+   }
    return value;
 }
 

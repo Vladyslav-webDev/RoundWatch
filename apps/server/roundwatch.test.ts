@@ -32,6 +32,7 @@ import {
    matchesWatch,
    MAX_INDEXER_ERROR_BODY_BYTES,
    MAX_INDEXER_NEXT_TOKEN_BYTES,
+   parseCanonicalAlgorandTransactionId,
    resolveScanQueryVariant,
    type IndexedBlock,
    type IndexedWatchTransaction,
@@ -70,6 +71,9 @@ import {
 const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
 const WATCH_SENDER = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4';
 const RECEIVER = 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
+// Canonical encodings of 32-byte digests with either possible final data bit.
+const INDEXER_TX_ID = 'A'.repeat(51) + 'Q';
+const OTHER_INDEXER_TX_ID = '7'.repeat(51) + 'A';
 const SPEC: WatchSpec = {
    idempotencyKey: 'invoice-0001', expectedSender: PAYER, expectedReceiver: RECEIVER,
    assetId: TESTNET_USDC_ASSET_ID, atomicAmount: '2500000', invoiceNote: 'invoice:1',
@@ -3961,6 +3965,181 @@ test('cursor updates are monotonic and stale competing work cannot overwrite pro
    } finally { store.close(); }
 });
 
+const malformedIndexerTransactionIds: unknown[] = [
+   undefined, null, 42, {}, '',
+   'A'.repeat(51), 'A'.repeat(53),
+   INDEXER_TX_ID.toLowerCase(),
+   '0' + INDEXER_TX_ID.slice(1),
+   '1' + INDEXER_TX_ID.slice(1),
+   '8' + INDEXER_TX_ID.slice(1),
+   INDEXER_TX_ID.slice(0, 51) + '=',
+   INDEXER_TX_ID + '=',
+   ' ' + INDEXER_TX_ID,
+   INDEXER_TX_ID + '\n',
+   'A'.repeat(51) + 'B',
+   'A'.repeat(51) + 'R',
+   'A'.repeat(51) + '7',
+];
+
+test('canonical Algorand transaction-ID parser accepts both final data bits and a signed transaction ID', () => {
+   for (const id of ['A'.repeat(52), INDEXER_TX_ID, OTHER_INDEXER_TX_ID, SIGNED_SERVICE_TX_ID]) {
+      assert.equal(parseCanonicalAlgorandTransactionId(id), id);
+   }
+});
+
+test('canonical Algorand transaction-ID parser rejects malformed representations', () => {
+   for (const id of malformedIndexerTransactionIds) {
+      assert.throws(
+         () => parseCanonicalAlgorandTransactionId(id),
+         /not a canonical Algorand transaction ID/,
+      );
+   }
+});
+
+test('canonical Algorand transaction-ID parser rejects every non-zero trailing-bit value', () => {
+   // Both final data bits have fifteen forbidden encodings with unused bits set.
+   for (const finalSymbol of 'BCDEFGHIJKLMNOPRSTUVWXYZ234567') {
+      assert.throws(
+         () => parseCanonicalAlgorandTransactionId('A'.repeat(51) + finalSymbol),
+         /not a canonical Algorand transaction ID/,
+      );
+   }
+});
+
+test('Indexer rejects malformed transaction IDs at watch-page, lookup, and search response boundaries', async () => {
+   for (const id of malformedIndexerTransactionIds) {
+      const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+      const client = new AlgorandIndexerClient('https://indexer.invalid', dispatcher, async input => {
+         const transaction = { ...rawTx(11), id };
+         return new URL(String(input)).pathname === `/v2/transactions/${INDEXER_TX_ID}`
+            ? Response.json({ transaction })
+            : Response.json({ transactions: [transaction], 'current-round': 20 });
+      });
+      await assert.rejects(client.searchWatchPage(watchRecord({}), 10, 20), /transaction page item 0 id is not a canonical/);
+      await assert.rejects(client.lookupAssetTransfer(INDEXER_TX_ID), /lookup transaction id is not a canonical/);
+      await assert.rejects(client.searchTransactionPage(INDEXER_TX_ID), /transaction search item 0 id is not a canonical/);
+      assert.equal(dispatcher.snapshot().failures, 3);
+      assert.equal(dispatcher.snapshot().successes, 0);
+   }
+});
+
+test('Indexer rejects malformed lookup and transaction-search query IDs before provider dispatch', async () => {
+   let calls = 0;
+   const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+   const client = new AlgorandIndexerClient('https://indexer.invalid', dispatcher, async () => {
+      calls += 1;
+      throw new Error('malformed query must not reach the provider');
+   });
+   for (const id of malformedIndexerTransactionIds) {
+      if (typeof id !== 'string') continue;
+      await assert.rejects(client.lookupAssetTransfer(id), /requested transaction ID is not a canonical/);
+      await assert.rejects(client.searchTransactionPage(id, 'page-2'), /requested transaction ID is not a canonical/);
+   }
+   assert.equal(calls, 0);
+   assert.deepEqual(dispatcher.snapshot().requests, {});
+});
+
+test('Indexer preserves canonical watch-page, lookup, and search evidence with either final data bit', async () => {
+   for (const id of [INDEXER_TX_ID, OTHER_INDEXER_TX_ID, SIGNED_SERVICE_TX_ID]) {
+      const client = new AlgorandIndexerClient('https://indexer.invalid',
+         new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+         async input => {
+            const url = new URL(String(input));
+            const transaction = { ...rawTx(11), id };
+            if (url.pathname === `/v2/transactions/${id}`) return Response.json({ transaction });
+            if (url.pathname === '/v2/transactions') assert.equal(url.searchParams.get('txid'), id);
+            return Response.json({ transactions: [transaction], 'current-round': 20, 'next-token': 'page-2' });
+         });
+      const expected = { transaction: id, sender: PAYER, receiver: RECEIVER,
+         assetId: TESTNET_USDC_ASSET_ID, atomicAmount: '1', round: 11 };
+      assert.deepEqual(await client.lookupAssetTransfer(id), expected);
+      assert.deepEqual(await client.searchTransactionPage(id), {
+         transactions: [expected], currentRound: 20, nextToken: 'page-2',
+      });
+      assert.deepEqual(await client.searchWatchPage(watchRecord({}), 10, 20), {
+         transactions: [{ ...expected, roundTime: 1 }], currentRound: 20, nextToken: 'page-2',
+      });
+   }
+});
+
+test('malformed transaction IDs cannot persist a match or coverage and invalidate provider readiness', async () => {
+   for (const id of ['MALFORMED_TX', 'A'.repeat(51) + 'B', 'A'.repeat(51) + 'R']) {
+      const directory = mkdtempSync(join(tmpdir(), 'roundwatch-malformed-txid-'));
+      const path = join(directory, 'watch.sqlite');
+      let now = new Date(1_800_000_000_000);
+      let store = new RoundWatchStore(path, { watchTtlMilliseconds: 1_000, workUnitBudget: 5, now: () => now });
+      try {
+         const watch = store.prepareWatch(SPEC, intent()).watch;
+         store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+         now = new Date(1_800_000_002_000);
+         const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+         const client = new AlgorandIndexerClient('https://indexer.invalid', dispatcher, async input => {
+            const url = new URL(String(input));
+            if (url.pathname === '/health') return Response.json({ round: 101 });
+            if (url.pathname === '/v2/blocks/101') return Response.json({ round: 101, timestamp: 1_800_000_002 });
+            assert.equal(url.pathname, `/v2/assets/${TESTNET_USDC_ASSET_ID}/transactions`);
+            return Response.json({ transactions: [{
+               ...rawTx(101), id, 'round-time': 1_800_000_000,
+               note: Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64'),
+               'asset-transfer-transaction': { receiver: RECEIVER, 'asset-id': SPEC.assetId, amount: Number(SPEC.atomicAmount) },
+            }], 'current-round': 101 });
+         }, 1_000, undefined, 'C');
+         const probe = new IndexerHealthProbe({
+            async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+         }, SPEC.assetId, () => 0);
+         const healthy = await probe.runIfDue();
+         const poller = new RoundWatchPoller(store, client, 5_000, 100, () => now, undefined, undefined, undefined, probe);
+         assert.deepEqual(await poller.runOnce(), { attempted: 1, succeeded: 0, failed: 1 });
+         assert.equal(dispatcher.snapshot().failures, 1);
+         assert.equal(poller.healthSnapshot().providerHealth, 'unhealthy');
+         assert.equal(poller.readinessCheck(), false);
+         assert.equal(probe.currentFailureEpoch(), 1);
+         assert.equal(probe.isSampleCurrent(healthy), false);
+
+         const after = store.getWatch(watch.id)!;
+         assert.equal(after.state, 'active');
+         assert.equal(after.matchedTransaction, undefined);
+         assert.equal(after.matchedRound, undefined);
+         assert.equal(after.scanAfterRound, 100);
+         assert.equal(after.closingRound, 101);
+         assert.equal(after.pollingFailureCode, 'indexer_protocol_failure');
+         assert.equal(after.pollingFailureDisposition, 'unknown');
+         assert.equal(after.pollingFailureCount, 1);
+         assert.ok(after.pollingRetryAt);
+         assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+         store.close();
+         store = new RoundWatchStore(path, { now: () => now });
+         assert.deepEqual(store.getWatch(watch.id), after);
+      } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+   }
+});
+
+test('canonical Indexer transaction IDs still produce matched watches with either final data bit', async () => {
+   for (const id of [INDEXER_TX_ID, OTHER_INDEXER_TX_ID]) {
+      const now = new Date(1_800_000_000_000);
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      try {
+         const watch = store.prepareWatch(SPEC, intent()).watch;
+         store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+         const client = new AlgorandIndexerClient('https://indexer.invalid',
+            new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+            async input => new URL(String(input)).pathname === '/health'
+               ? Response.json({ round: 101 })
+               : Response.json({ transactions: [{
+                  ...rawTx(101), id, 'round-time': 1_800_000_000,
+                  note: Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64'),
+                  'asset-transfer-transaction': { receiver: RECEIVER, 'asset-id': SPEC.assetId, amount: Number(SPEC.atomicAmount) },
+               }], 'current-round': 101 }), 1_000, undefined, 'C');
+         const result = await new RoundWatchPoller(store, client, 5_000, 100, () => now).runOnce();
+         assert.equal(result.succeeded, 1);
+         assert.equal(result.failed, 0);
+         assert.equal(store.getWatch(watch.id)?.state, 'matched');
+         assert.equal(store.getWatch(watch.id)?.matchedTransaction, id);
+         assert.equal(store.getWatch(watch.id)?.matchedRound, 101);
+      } finally { store.close(); }
+   }
+});
+
 test('runtime scan query strategy defaults to C and validates explicit rollback variants', () => {
    assert.equal(resolveScanQueryVariant(undefined), 'C');
    assert.equal(resolveScanQueryVariant(''), 'C');
@@ -4032,7 +4211,7 @@ test('scan query variants apply only declared server filters and keep exact matc
 
          return Response.json({
             transactions: [{
-               id: `TX_${expected.variant}`,
+               id: INDEXER_TX_ID,
                sender,
                note,
                'confirmed-round': 11,
@@ -4145,13 +4324,13 @@ test('watch scanning explicitly excludes inner, clawback, and close-out asset tr
 
    const unsupported: Array<Record<string, unknown>> = [
       {
-         id: 'INNER_PARENT',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 11,
          'round-time': 1,
          'tx-type': 'appl',
          'inner-txns': [{
-            id: 'INNER_CHILD',
+            id: OTHER_INDEXER_TX_ID,
             sender: PAYER,
             note,
             'confirmed-round': 11,
@@ -4165,7 +4344,7 @@ test('watch scanning explicitly excludes inner, clawback, and close-out asset tr
          }],
       },
       {
-         id: 'CLAWBACK',
+         id: INDEXER_TX_ID,
          sender: RECEIVER,
          note,
          'confirmed-round': 11,
@@ -4179,7 +4358,7 @@ test('watch scanning explicitly excludes inner, clawback, and close-out asset tr
          },
       },
       {
-         id: 'CLOSE_OUT',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          note,
          'confirmed-round': 11,
@@ -4232,14 +4411,14 @@ test('watch scanning explicitly excludes inner, clawback, and close-out asset tr
 test('watch scanning still fails closed on malformed transaction envelopes', async () => {
    const malformed: Array<Record<string, unknown>> = [
       {
-         id: 'NON_AXFER_WITHOUT_INNER',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 11,
          'round-time': 1,
          'tx-type': 'appl',
       },
       {
-         id: 'MALFORMED_INNER_ROOT',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 11,
          'round-time': 1,
@@ -4247,7 +4426,7 @@ test('watch scanning still fails closed on malformed transaction envelopes', asy
          'inner-txns': [null],
       },
       {
-         id: 'MALFORMED_CLAWBACK',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 11,
          'round-time': 1,
@@ -4257,7 +4436,7 @@ test('watch scanning still fails closed on malformed transaction envelopes', asy
          },
       },
       {
-         id: 'MALFORMED_CLOSE',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 11,
          'round-time': 1,
@@ -4327,7 +4506,7 @@ test('watch scanning still fails closed on malformed transaction envelopes', asy
 
 test('malformed excluded evidence cannot advance coverage or produce expiry', async () => {
    const matchingInner: Record<string, unknown> = {
-      id: 'N01_MATCHING_INNER',
+      id: OTHER_INDEXER_TX_ID,
       sender: PAYER,
       note: Buffer.from(SPEC.invoiceNote!, 'utf8').toString('base64'),
       'confirmed-round': 101,
@@ -4341,7 +4520,7 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
       },
    };
    const validInnerParent: Record<string, unknown> = {
-      id: 'N01_VALID_PARENT',
+      id: INDEXER_TX_ID,
       sender: RECEIVER,
       'confirmed-round': 101,
       'round-time': 1_800_000_000,
@@ -4350,7 +4529,7 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
    };
    const malformedVariants: Array<Record<string, unknown>> = [
       {
-         id: 'N01_INNER_ROOT',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 101,
          'round-time': 1_800_000_002,
@@ -4358,7 +4537,7 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
          'inner-txns': [null],
       },
       {
-         id: 'N01_CLAWBACK',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 101,
          'round-time': 1_800_000_002,
@@ -4368,7 +4547,7 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
          },
       },
       {
-         id: 'N01_CLOSE',
+         id: INDEXER_TX_ID,
          sender: PAYER,
          'confirmed-round': 101,
          'round-time': 1_800_000_002,
@@ -4379,23 +4558,23 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
       },
       {
          ...validInnerParent,
-         id: 'N01_UNKNOWN_PARENT_TYPE',
+         id: INDEXER_TX_ID,
          'tx-type': 'not-a-transaction-type',
       },
       {
          ...validInnerParent,
-         id: 'N01_PAY_PARENT_WITH_INNER',
+         id: INDEXER_TX_ID,
          'tx-type': 'pay',
       },
       {
          ...validInnerParent,
-         id: 'N01_CONTRADICTORY_TRANSFER_ENVELOPE',
+         id: INDEXER_TX_ID,
          'asset-transfer-transaction':
             matchingInner['asset-transfer-transaction'],
       },
       {
          ...validInnerParent,
-         id: 'N01_AXFER_WITH_MALFORMED_DESCENDANT',
+         id: INDEXER_TX_ID,
          'inner-txns': [{
             ...matchingInner,
             'inner-txns': [null],
@@ -4403,11 +4582,11 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
       },
       {
          ...validInnerParent,
-         id: 'N01_UNKNOWN_SIBLING_TYPE',
+         id: INDEXER_TX_ID,
          'inner-txns': [
             matchingInner,
             {
-               id: 'N01_UNKNOWN_SIBLING',
+               id: OTHER_INDEXER_TX_ID,
                sender: PAYER,
                'confirmed-round': 101,
                'round-time': 1_800_000_000,
@@ -4499,7 +4678,7 @@ test('malformed excluded evidence cannot advance coverage or produce expiry', as
 test('settlement evidence accepts only direct axfer classification', async () => {
    const direct = {
       ...rawTx(100),
-      id: 'SERVICE',
+      id: INDEXER_TX_ID,
       'asset-transfer-transaction': {
          receiver: RECEIVER,
          'asset-id': TESTNET_USDC_ASSET_ID,
@@ -4517,7 +4696,7 @@ test('settlement evidence accepts only direct axfer classification', async () =>
       }),
       async input => {
          const url = new URL(String(input));
-         if (url.pathname === '/v2/transactions/SERVICE') {
+         if (url.pathname === `/v2/transactions/${INDEXER_TX_ID}`) {
             return Response.json({ transaction: direct });
          }
          return Response.json({
@@ -4528,11 +4707,11 @@ test('settlement evidence accepts only direct axfer classification', async () =>
    );
 
    assert.equal(
-      (await directClient.lookupAssetTransfer('SERVICE'))?.transaction,
-      'SERVICE',
+      (await directClient.lookupAssetTransfer(INDEXER_TX_ID))?.transaction,
+      INDEXER_TX_ID,
    );
    assert.equal(
-      (await directClient.searchTransactionPage('SERVICE')).transactions
+      (await directClient.searchTransactionPage(INDEXER_TX_ID)).transactions
          .length,
       1,
    );
@@ -4569,7 +4748,7 @@ test('settlement evidence accepts only direct axfer classification', async () =>
          }),
          async input => {
             const url = new URL(String(input));
-            if (url.pathname === '/v2/transactions/SERVICE') {
+            if (url.pathname === `/v2/transactions/${INDEXER_TX_ID}`) {
                return Response.json({ transaction: fixture });
             }
             return Response.json({
@@ -4580,11 +4759,11 @@ test('settlement evidence accepts only direct axfer classification', async () =>
       );
 
       await assert.rejects(
-         client.lookupAssetTransfer('SERVICE'),
+         client.lookupAssetTransfer(INDEXER_TX_ID),
          /not an axfer|clawback|close-out/,
       );
       await assert.rejects(
-         client.searchTransactionPage('SERVICE'),
+         client.searchTransactionPage(INDEXER_TX_ID),
          /not an axfer|clawback|close-out/,
       );
    }
@@ -4735,7 +4914,7 @@ test('Indexer cancels every unconsumed response body on early exits', async () =
    assert.deepEqual(cancellations, ['declared-oversize']);
 
    assert.equal(
-      await indexer.lookupAssetTransfer('MISSING'),
+      await indexer.lookupAssetTransfer(INDEXER_TX_ID),
       undefined,
    );
    assert.deepEqual(
@@ -5674,7 +5853,7 @@ test('Indexer rejects responses that violate requested filters and disables redi
    };
    const wrongTransactionId = {
       ...rawTx(11),
-      id: 'OTHER_TRANSACTION',
+      id: OTHER_INDEXER_TX_ID,
    };
    const bodies = [
       Response.json({ transactions: [wrongSender], 'current-round': 20 }),
@@ -5705,7 +5884,7 @@ test('Indexer rejects responses that violate requested filters and disables redi
       /requested asset filter/,
    );
    await assert.rejects(
-      indexer.searchTransactionPage('SERVICE'),
+      indexer.searchTransactionPage(INDEXER_TX_ID),
       /requested transaction ID/,
    );
 });
@@ -5763,14 +5942,14 @@ test('health, activation, checkpoint, scan pages, and absence pages all consume 
       const url = new URL(String(input));
       if (url.pathname === '/health') return Response.json({ round: 20 });
       if (url.pathname === '/v2/blocks/20') return Response.json({ round: 20, timestamp: 1 });
-      if (url.pathname === '/v2/transactions/SERVICE') return Response.json({ transaction: { ...rawTx(10), id: 'SERVICE' } });
+      if (url.pathname === `/v2/transactions/${INDEXER_TX_ID}`) return Response.json({ transaction: { ...rawTx(10), id: INDEXER_TX_ID } });
       return Response.json({ transactions: [], 'current-round': 20 });
    });
    await client.getCurrentRound('health');
-   await client.lookupAssetTransfer('SERVICE', 'activation');
+   await client.lookupAssetTransfer(INDEXER_TX_ID, 'activation');
    await client.getBlock(20);
    await client.searchWatchPage(watchRecord({}), 10, 20);
-   await client.searchTransactionPage('SERVICE');
+   await client.searchTransactionPage(INDEXER_TX_ID);
    assert.deepEqual(dispatcher.snapshot().requests, {
       health: 1, activation: 1, checkpoint: 1, 'scan-page': 1, 'absence-proof': 1,
    });
@@ -6987,7 +7166,7 @@ function invoiceTx(round: number, roundTime: number): IndexedWatchTransaction {
 }
 function rawTx(round: number): Record<string, unknown> {
    return {
-      id: 'TX',
+      id: INDEXER_TX_ID,
       sender: PAYER,
       'confirmed-round': round,
       'round-time': 1,
