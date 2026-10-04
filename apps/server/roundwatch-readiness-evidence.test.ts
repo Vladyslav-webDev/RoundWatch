@@ -639,6 +639,197 @@ async function flushUntil(condition: () => boolean): Promise<void> {
    assert.fail('worker did not reach the expected state after draining microtasks');
 }
 
+for (const kind of ['poller', 'reconciler'] as const) {
+   test(`Wave A worker evidence: ${kind} counts slow current failures but rejects slow healthy recovery`, async t => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+      const store = new RoundWatchStore(':memory:');
+      let probeNow = 1_000;
+      let probeCalls = 0;
+      let releaseProbe: ((evidence: IndexerCapabilityEvidence) => void) | undefined;
+      const probe = new IndexerHealthProbe({ probeReadinessCapabilities() {
+         probeCalls += 1;
+         if (probeCalls === 1) return Promise.resolve({ polling: true, reconciliation: true });
+         return new Promise<IndexerCapabilityEvidence>(resolve => { releaseProbe = resolve; });
+      } }, ASSET, () => probeNow, 15_000, 120_000);
+      let tip = 100;
+      let customerTurns = 0;
+      const indexer = fakeIndexer({
+         async getCurrentRound() { return kind === 'poller' ? ++tip : 101; },
+         async searchWatchPage() {
+            customerTurns += 1;
+            return { transactions: [], currentRound: tip };
+         },
+         async lookupAssetTransfer() { customerTurns += 1; return undefined; },
+      });
+      const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+         undefined, undefined, undefined, probe);
+      const reconciler = new SettlementReconciler(store, indexer,
+         { network: NETWORK, intervalMilliseconds: 5_000,
+            baseBackoffMilliseconds: 1, maxBackoffMilliseconds: 1 }, undefined, probe);
+      const affected = kind === 'poller' ? poller : reconciler;
+      const companion = kind === 'poller' ? reconciler : poller;
+      const app = createApp({
+         avmAddress: ADDRESS, store, indexer, syncFacilitatorOnStart: false,
+         facilitatorClient: {
+            async getSupported() { return { kinds: [], extensions: [], signers: {} }; },
+            async verify() { throw new Error('unexpected verification'); },
+            async settle() { throw new Error('unexpected settlement'); },
+         },
+         // Normal production composition, with an in-memory store and available disk.
+         readinessCheck: () => {
+            const storage = store.readinessCheck();
+            const pollerReady = poller.healthSnapshot().ready;
+            const reconcilerReady = reconciler.healthSnapshot().ready;
+            const backgroundWorkers = pollerReady && reconcilerReady;
+            const diskHeadroom = true;
+            return {
+               ready: storage && backgroundWorkers && diskHeadroom,
+               checks: { storage, poller: pollerReady, reconciler: reconcilerReady, backgroundWorkers, diskHeadroom },
+            };
+         },
+      });
+      try {
+         poller.start(); reconciler.start();
+         await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+         assert.equal(probeCalls, 1);
+         assert.equal((await app.request('/ready')).status, 200);
+         const key = `slow-current-${kind}`;
+         const watch = kind === 'poller' ? active(store, key)
+            : store.prepareWatch({ idempotencyKey: key, expectedSender: ADDRESS,
+               expectedReceiver: OTHER, assetId: ASSET, atomicAmount: '1' }, service(key)).watch;
+
+         // Two slow negative samples establish unhealthy state; a subsequent
+         // slow complete success must not recover it under the active policy.
+         for (const cycle of [1, 2, 3]) {
+            releaseProbe = undefined;
+            probeNow += 15_000;
+            t.mock.timers.tick(5_000);
+            await flushUntil(() => releaseProbe !== undefined);
+            assert.equal(customerTurns, cycle, 'customer work completes before the held probe');
+            assert.equal(store.getWatch(watch.id)?.workUnitsUsed, cycle);
+            assert.equal(affected.healthSnapshot().running, true);
+            probeNow += 16_001;
+            t.mock.timers.tick(16_001);
+            releaseProbe!({ polling: cycle === 3 || kind !== 'poller',
+               reconciliation: cycle === 3 || kind !== 'reconciler' });
+            await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+
+            const sample = probe.currentSample()!;
+            assert.equal(sample.completedAtMs - sample.attemptedAtMs, 16_001);
+            assert.equal(probe.isSampleCurrent(sample), true);
+            assert.equal(probe.isSampleFreshForAdmission(sample, 15_000), false);
+            const health = affected.healthSnapshot();
+            assert.equal(health.consecutiveFailures, Math.min(cycle, 2),
+               'successful customer work must not reset or hide complete-probe failures');
+            assert.equal(health.providerHealth, cycle === 1 ? 'healthy' : 'unhealthy');
+            assert.equal(health.ready, cycle === 1);
+            assert.equal(companion.readinessCheck(), true, 'the other capability remains healthy');
+            const response = await app.request('/ready');
+            assert.equal(response.status, cycle === 1 ? 200 : 503);
+            assert.equal((await response.json() as { checks: Record<string, boolean> }).checks[kind], cycle === 1);
+            assert.equal(probeCalls, cycle + 1);
+            if (kind === 'poller') {
+               assert.equal(poller.capacitySnapshot().watchesSucceededLastCycle, 1);
+               assert.equal(poller.capacitySnapshot().watchesFailedLastCycle, 0);
+            }
+         }
+      } finally {
+         poller.stop(); reconciler.stop();
+         releaseProbe?.({ polling: false, reconciliation: false });
+         await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+         store.close();
+      }
+   });
+}
+
+test('Wave A worker evidence: both workers consume a cached negative physical sample only once', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+   const store = new RoundWatchStore(':memory:');
+   let probeNow = 1_000;
+   let healthy = true;
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      return { polling: healthy, reconciliation: healthy };
+   } }, ASSET, () => probeNow);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: NETWORK, intervalMilliseconds: 5_000 }, undefined, probe);
+   try {
+      poller.start(); reconciler.start();
+      await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+      healthy = false;
+      probeNow += 15_000;
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      assert.equal(calls, 2);
+      for (const worker of [poller, reconciler]) assert.equal(worker.healthSnapshot().consecutiveFailures, 1);
+      const revision = probe.currentSample()!.revision;
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      assert.equal(calls, 2);
+      assert.equal(probe.currentSample()!.revision, revision);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().consecutiveFailures, 1);
+         assert.equal(worker.readinessCheck(), true);
+      }
+      probeNow += 15_000;
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      assert.equal(calls, 3);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().consecutiveFailures, 2);
+         assert.equal(worker.healthSnapshot().providerHealth, 'unhealthy');
+         assert.equal(worker.readinessCheck(), false);
+      }
+   } finally { poller.stop(); reconciler.stop(); store.close(); }
+});
+
+test('Wave A worker evidence: both workers ignore a negative probe made obsolete by a newer coalesced failure', async t => {
+   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+   const store = new RoundWatchStore(':memory:');
+   const held = deferredSignal();
+   let calls = 0;
+   const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+      calls += 1;
+      if (calls === 2) {
+         await held.promise;
+         return { polling: false, reconciliation: false };
+      }
+      return { polling: true, reconciliation: true };
+   } }, ASSET, () => 1_000);
+   const indexer = fakeIndexer();
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, undefined,
+      undefined, undefined, undefined, probe);
+   const reconciler = new SettlementReconciler(store, indexer,
+      { network: NETWORK, intervalMilliseconds: 5_000 }, undefined, probe);
+   try {
+      await probe.runIfDue(30_000);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      poller.start(); reconciler.start();
+      await flushUntil(() => calls === 2);
+      assert.equal(probe.invalidateForProviderFailure(), 1);
+      held.release();
+      await flushUntil(() => !poller.healthSnapshot().running && !reconciler.healthSnapshot().running);
+      const obsolete = probe.currentSample()!;
+      assert.equal(obsolete.failureEpoch, probe.currentFailureEpoch());
+      assert.equal(obsolete.providerFailureRevision, 1);
+      assert.equal(probe.isSampleCurrent(obsolete), false);
+      for (const worker of [poller, reconciler]) {
+         assert.equal(worker.healthSnapshot().providerHealth, 'unknown');
+         assert.equal(worker.healthSnapshot().consecutiveFailures, 0);
+         assert.equal(worker.readinessCheck(), false);
+      }
+      t.mock.timers.tick(5_000);
+      await flushUntil(() => poller.readinessCheck() && reconciler.readinessCheck());
+      assert.equal(calls, 3);
+      assert.equal(probe.currentSample()?.providerFailureRevision, 2);
+      assert.equal(probe.invalidateForProviderFailure(), 2);
+   } finally { poller.stop(); reconciler.stop(); held.release(); store.close(); }
+});
+
 test('Wave A follow-up: two failed customer turns sharing one physical tip request invalidate evidence once', async () => {
    const store = new RoundWatchStore(':memory:');
    const probe = new IndexerHealthProbe({

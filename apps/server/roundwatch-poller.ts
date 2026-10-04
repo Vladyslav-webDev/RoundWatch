@@ -597,7 +597,10 @@ export class RoundWatchPoller {
             if (generation !== this.generation) return;
             if (
                sample.revision > this.lastObservedProbeRevision &&
-               this.healthProbe.isSampleFreshForAdmission(sample, probeAge)
+               this.healthProbe.isSampleCurrent(sample) &&
+               // Current negative evidence counts even when the probe was slow.
+               (!sample.evidence.polling ||
+                  this.healthProbe.isSampleFreshForAdmission(sample, probeAge))
             ) {
                this.lastObservedProbeRevision = sample.revision;
                this.workerHealth.markProbeResult(sample.evidence.polling);

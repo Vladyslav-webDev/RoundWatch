@@ -157,7 +157,8 @@ export class IndexerHealthProbe {
       return pending;
    }
 
-   private isSampleCurrent(sample: IndexerProbeSample): boolean {
+   // Causal currentness is independent of age; positive evidence also needs freshness.
+   isSampleCurrent(sample: IndexerProbeSample): boolean {
       return sample.failureEpoch === this.failureEpoch &&
          sample.providerFailureRevision === this.providerFailureRevision;
    }
