@@ -3312,13 +3312,16 @@ for (const entry of ['existing', 'partial-capture', 'cleanup-error'] as const) {
          assert.equal(metrics.snapshotWatch(id)?.workUnitsClaimed, 1);
          throw new Error('synthetic terminal capture failure');
       });
-      const finish = metrics.finishWatch.bind(metrics);
+      const bindRelease = metrics.bindWatchRelease.bind(metrics);
       let cleanups = 0;
-      t.mock.method(metrics, 'finishWatch', (id: string) => {
-         cleanups += 1;
-         const snapshot = finish(id);
-         if (entry === 'cleanup-error') throw new Error('synthetic terminal cleanup failure');
-         return snapshot;
+      t.mock.method(metrics, 'bindWatchRelease', (id: string) => {
+         const release = bindRelease(id);
+         if (!release) return;
+         return () => {
+            cleanups += 1;
+            release();
+            if (entry === 'cleanup-error') throw new Error('synthetic terminal cleanup failure');
+         };
       });
       const logs: string[] = [];
       const warnings: string[] = [];
@@ -3426,6 +3429,126 @@ for (const outcome of ['valid', 'stale-mismatch', 'stale-mismatch-with-recorder'
       }
    });
 }
+
+for (const fault of ['record', 'finish-before', 'finish-after', 'log', 'warning'] as const) {
+   test(`B3 followup F3 real app mismatch contains ${fault}`, async t => {
+      const store = new RoundWatchStore(':memory:');
+      const metrics = new RoundWatchEconomicsMetrics();
+      const spec = { ...SPEC, idempotencyKey: `app-protocol-${fault}`, expectedSender: WATCH_SENDER };
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      let earlier: ReturnType<typeof metrics.captureWatch> | undefined;
+      const settle = facilitator.settle.bind(facilitator);
+      t.mock.method(facilitator, 'settle', async (payload: PaymentPayload, requirements: PaymentRequirements) => {
+         const result = await settle(payload, requirements);
+         earlier = metrics.captureWatch(store.getByIdempotencyKey(spec.idempotencyKey)!.id);
+         earlier.recordWorkUnit();
+         return result;
+      });
+      const record = metrics.recordLifecycle.bind(metrics);
+      t.mock.method(metrics, 'recordLifecycle', (id: string, observation: Parameters<typeof record>[1]) => {
+         if (fault === 'record') throw new Error('synthetic lifecycle recording failure');
+         return record(id, observation);
+      });
+      const finish = metrics.finishWatch.bind(metrics);
+      t.mock.method(metrics, 'finishWatch', (id: string) => {
+         if (fault === 'finish-before' || fault === 'warning') throw new Error('synthetic finish before delete');
+         const snapshot = finish(id);
+         if (fault === 'finish-after') throw new Error('synthetic finish after delete');
+         return snapshot;
+      });
+      const logs: string[] = [];
+      const warnings: string[] = [];
+      t.mock.method(console, 'info', (message: string) => {
+         if (!message.startsWith('RoundWatch economics watch-terminal ')) return;
+         if (fault === 'log') throw new Error('synthetic terminal log failure');
+         logs.push(message);
+      });
+      t.mock.method(console, 'warn', (...args: unknown[]) => {
+         warnings.push(args.map(String).join(' '));
+         if (fault === 'warning') throw new Error('synthetic warning sink failure');
+      });
+      const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher, async () => {
+         const response = await syntheticServiceTransferResponse().json();
+         response.transaction['asset-transfer-transaction'].amount += 1;
+         return Response.json(response);
+      }, 1_000, metrics);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer, economicsMetrics: metrics, requireSettlementIntent: true,
+      });
+      try {
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         const request = { method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body };
+         assert.equal((await app.request('/spike/watch', request)).status, 500);
+         const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+         assert.equal(watch.state, 'settlement_unknown');
+         assert.equal(watch.settlementReconciliationTerminal, true);
+         assert.equal(warnings.some(message => message.includes('could not confirm')), false);
+         assert.equal(metrics.snapshotWatch(watch.id), undefined);
+         earlier!.recordWorkUnit();
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         assert.deepEqual(logs, []);
+         assert.equal(dispatcher.snapshot().failures, 0);
+         assert.equal((await app.request('/spike/watch', request)).status, 409);
+         assert.equal(facilitator.settleCalls, 1);
+      } finally { store.close(); }
+   });
+}
+
+test('B3 followup F2 failed real app capture cannot release a replacement after await', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const metrics = new RoundWatchEconomicsMetrics();
+   const spec = { ...SPEC, idempotencyKey: 'app-replacement', expectedSender: WATCH_SENDER };
+   const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+   const capture = metrics.captureWatch.bind(metrics);
+   let earlier: ReturnType<typeof capture> | undefined;
+   const settle = facilitator.settle.bind(facilitator);
+   t.mock.method(facilitator, 'settle', async (payload: PaymentPayload, requirements: PaymentRequirements) => {
+      const result = await settle(payload, requirements);
+      earlier = capture(store.getByIdempotencyKey(spec.idempotencyKey)!.id);
+      return result;
+   });
+   t.mock.method(metrics, 'captureWatch', () => { throw new Error('synthetic original capture failure'); });
+   const logs: string[] = [];
+   t.mock.method(console, 'info', (message: string) => {
+      if (message.startsWith('RoundWatch economics watch-terminal ')) logs.push(message);
+   });
+   let started!: () => void;
+   const requestStarted = new Promise<void>(resolve => { started = resolve; });
+   let release!: (response: Response) => void;
+   const response = new Promise<Response>(resolve => { release = resolve; });
+   const indexer = new AlgorandIndexerClient('https://indexer.example.test',
+      new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+      async () => { started(); return response; }, 1_000, metrics);
+   const app = createApp({
+      avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+      store, indexer, economicsMetrics: metrics, requireSettlementIntent: true,
+   });
+   let pending: Promise<Response> | undefined;
+   try {
+      const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+      pending = Promise.resolve(app.request('/spike/watch', {
+         method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+      }));
+      await requestStarted;
+      const watch = store.getByIdempotencyKey(spec.idempotencyKey)!;
+      earlier!.finishWatch();
+      const replacement = capture(watch.id);
+      replacement.recordWorkUnit();
+      const snapshot = metrics.snapshotWatch(watch.id);
+      const mismatch = await syntheticServiceTransferResponse().json();
+      mismatch.transaction['asset-transfer-transaction'].amount += 1;
+      release(Response.json(mismatch));
+      assert.equal((await pending).status, 500);
+      assert.equal(store.getWatch(watch.id)?.settlementReconciliationTerminal, true);
+      assert.deepEqual(metrics.snapshotWatch(watch.id), snapshot);
+      assert.deepEqual(logs, []);
+      replacement.recordWorkUnit();
+      assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 2);
+      assert.equal(facilitator.settleCalls, 1);
+   } finally { release(syntheticServiceTransferResponse()); await pending; store.close(); }
+});
 
 function syntheticServiceTransferResponse(): Response {
    return Response.json({ transaction: {

@@ -1,5 +1,5 @@
 import type { IndexerDispatcherSnapshot, IndexerRequestPurpose } from './roundwatch-scheduler.js';
-import type { WatchState } from './roundwatch-store.js';
+import type { WatchRecord, WatchState } from './roundwatch-store.js';
 
 export const INDEXER_REQUEST_PURPOSES = [
    'activation',
@@ -86,6 +86,84 @@ export const INERT_WATCH_ECONOMICS_RECORDER: WatchEconomicsRecorder = Object.fre
    recordLifecycle: () => {},
    finishWatch: () => undefined,
 });
+
+/** A single turn's recorder and independent release, both bound before await. */
+export interface WatchEconomicsTurn {
+   readonly recorder: WatchEconomicsRecorder;
+   readonly release: (() => void) | undefined;
+}
+
+export function warnWatchMetricFailure(context: string, error: unknown): void {
+   // A failed diagnostic sink must not escape into provider handling. Do not
+   // attempt to log its own failure, which could recurse indefinitely.
+   try {
+      console.warn(context, error instanceof Error ? error.message : 'Unknown metrics error');
+   } catch {}
+}
+
+export function captureWatchEconomicsTurn(
+   metrics: RoundWatchEconomicsMetrics | undefined,
+   watchId: string,
+   existingOnly = false,
+): WatchEconomicsTurn | undefined {
+   if (!metrics) return;
+   const bindRelease = () => {
+      try { return metrics.bindWatchRelease(watchId); }
+      catch (error) { warnWatchMetricFailure('RoundWatch economics release binding failed:', error); }
+   };
+   // Preserve an existing identity even if capture itself partially fails.
+   let release = bindRelease();
+   let recorder = INERT_WATCH_ECONOMICS_RECORDER;
+   try {
+      recorder = (existingOnly ? metrics.captureExistingWatch(watchId) : metrics.captureWatch(watchId)) ?? recorder;
+   } catch (error) {
+      warnWatchMetricFailure('RoundWatch economics capture metric failed:', error);
+   }
+   // Capture may have created the first entry and then thrown. This is a
+   // synchronous, non-creating release binding, never a later ID fallback.
+   release ??= bindRelease();
+   return { recorder, release };
+}
+
+export function finishWatchEconomicsTurn(
+   turn: WatchEconomicsTurn | undefined,
+   watch: WatchRecord | undefined,
+   now: () => number = Date.now,
+): void {
+   if (!turn || !watch) return;
+   const terminal = watch.state === 'matched' || watch.state === 'expired' ||
+      watch.state === 'indeterminate' ||
+      (watch.state === 'settlement_unknown' && watch.settlementReconciliationTerminal);
+   if (!terminal) return;
+
+   let recorded = false;
+   let snapshot: WatchWorkSnapshot | undefined;
+   if (turn.recorder !== INERT_WATCH_ECONOMICS_RECORDER) {
+      try {
+         const timestamp = now();
+         const createdAt = Date.parse(watch.createdAt);
+         const activatedAt = watch.activatedAt ? Date.parse(watch.activatedAt) : NaN;
+         turn.recorder.recordLifecycle({
+            finalState: watch.state,
+            ...(Number.isFinite(createdAt) ? { timeToTerminalMs: Math.max(0, timestamp - createdAt) } : {}),
+            ...(Number.isFinite(activatedAt) ? { activeDurationMs: Math.max(0, timestamp - activatedAt) } : {}),
+         });
+         recorded = true;
+      } catch (error) { warnWatchMetricFailure('RoundWatch economics lifecycle metric failed:', error); }
+      if (recorded) {
+         try { snapshot = turn.recorder.finishWatch(); }
+         catch (error) { warnWatchMetricFailure('RoundWatch economics finish metric failed:', error); }
+      }
+   }
+   // Independent of recording and snapshot construction; exactly one bounded
+   // attempt, identity-fenced and idempotent even if finish removed the entry.
+   try { turn.release?.(); }
+   catch (error) { warnWatchMetricFailure('RoundWatch economics release metric failed:', error); }
+   if (snapshot) {
+      try { console.info(`RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`); }
+      catch (error) { warnWatchMetricFailure('RoundWatch economics terminal log failed:', error); }
+   }
+}
 
 export const FREE_REQUEST_CATEGORIES = [
    'health',
@@ -196,6 +274,14 @@ export class RoundWatchEconomicsMetrics {
    captureExistingWatch(watchId: string): WatchEconomicsRecorder | undefined {
       const metric = this.watches.get(watchId);
       return metric ? this.recorder(watchId, metric) : undefined;
+   }
+
+   bindWatchRelease(watchId: string): (() => void) | undefined {
+      const metric = this.watches.get(watchId);
+      if (!metric) return;
+      return () => {
+         if (this.watches.get(watchId) === metric) this.watches.delete(watchId);
+      };
    }
 
    recordIndexerRequest(

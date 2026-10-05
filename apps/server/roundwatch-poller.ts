@@ -7,16 +7,18 @@ import {
    type TransactionPage,
 } from './roundwatch-indexer.js';
 import {
-   INERT_WATCH_ECONOMICS_RECORDER,
+   captureWatchEconomicsTurn,
+   finishWatchEconomicsTurn,
+   warnWatchMetricFailure,
    type RoundWatchEconomicsMetrics,
    type WatchEconomicsRecorder,
+   type WatchEconomicsTurn,
 } from './roundwatch-metrics.js';
 import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
 import type {
    PollingFailureDisposition,
    RoundWatchStore,
    WatchRecord,
-   WatchState,
 } from './roundwatch-store.js';
 import {
    IndexerRequestTurnBudget,
@@ -253,8 +255,10 @@ export class RoundWatchPoller {
 
       for (const watch of ordered) {
          outcome.attempted += 1;
+         // Lexical to this turn, never shared with another watch or sweep.
+         const context: { metrics?: WatchEconomicsTurn } = {};
          try {
-            const turn = await this.serviceWatch(watch, getSweepTip, getSweepPage);
+            const turn = await this.serviceWatch(watch, getSweepTip, getSweepPage, context);
             if (turn.kind !== 'noOp') this.store.clearPollingFailure(watch.id);
             if (turn.kind === 'progressed') outcome.succeeded += 1;
             else if (turn.kind === 'providerEvidenceOnly') outcome.providerEvidenceOnly =
@@ -286,15 +290,12 @@ export class RoundWatchPoller {
             if (persisted?.state === 'indeterminate') {
                outcome.isolatedFailures =
                   (outcome.isolatedFailures ?? 0) + 1;
-               // The failed turn may have been finished by another caller.
-               // Terminal handling must never create an entry after the await.
-               this.finishMetric(persisted, 'indeterminate',
-                  this.captureMetric(() => this.economicsMetrics?.captureExistingWatch(watch.id)));
+               this.finishMetric(persisted, context.metrics);
             }
-            console.error(
+            this.recordMetric(() => console.error(
                `RoundWatch poll failed for watch ${watch.id}:`,
                safeErrorMessage(error),
-            );
+            ));
          }
       }
 
@@ -326,9 +327,9 @@ export class RoundWatchPoller {
             disposition: 'permanent',
          });
          if (updated) {
-            console.warn(
+            this.recordMetric(() => console.warn(
                `RoundWatch polling permanently blocked watch=${watch.id} code=${failure.code} work=${updated.workUnitsUsed}/${updated.workUnitBudget ?? 'unknown'}; terminal state=indeterminate`,
-            );
+            ));
          }
          return updated;
       }
@@ -347,9 +348,9 @@ export class RoundWatchPoller {
          retryAt,
       });
       if (updated) {
-         console.warn(
+         this.recordMetric(() => console.warn(
             `RoundWatch polling deferred watch=${watch.id} code=${failure.code} disposition=${failure.disposition} retryAt=${retryAt.toISOString()} failures=${updated.pollingFailureCount}`,
-         );
+         ));
       }
       return updated;
    }
@@ -364,26 +365,27 @@ export class RoundWatchPoller {
          nextToken?: string,
          watchMetrics?: WatchEconomicsRecorder,
       ) => Promise<{ page: TransactionPage; fresh: boolean }>,
+      context: { metrics?: WatchEconomicsTurn },
    ): Promise<CustomerTurnOutcome> {
       if (initial.evidenceVersion !== 1 || initial.scanAfterRound === undefined || initial.expiresAt === undefined) {
-         console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`);
+         this.recordMetric(() => console.warn(`RoundWatch watch ${initial.id} lacks proof-compatible baseline metadata; left unresolved`));
          return { kind: 'noOp', providerEvidence: false };
       }
 
       const workClaim = this.store.claimWorkUnit(initial.id);
       if (workClaim === 'exhausted') {
          this.sessions.delete(initial.id);
-         this.finishMetric(initial, 'indeterminate', this.captureMetric(() =>
-            this.economicsMetrics?.captureWatch(initial.id)));
-         console.warn(
+         context.metrics = captureWatchEconomicsTurn(this.economicsMetrics, initial.id);
+         this.finishMetric(initial, context.metrics);
+         this.recordMetric(() => console.warn(
             `RoundWatch work budget exhausted watch=${initial.id}; terminal state=indeterminate`,
-         );
+         ));
          return { kind: 'noOp', providerEvidence: false };
       }
       if (workClaim !== 'claimed') return { kind: 'noOp', providerEvidence: false };
 
-      const watchMetrics = this.captureMetric(() =>
-         this.economicsMetrics?.captureWatch(initial.id));
+      context.metrics = captureWatchEconomicsTurn(this.economicsMetrics, initial.id);
+      const watchMetrics = context.metrics?.recorder;
       this.recordMetric(() => watchMetrics?.recordWorkUnit());
 
       const requestBudget = new IndexerRequestTurnBudget(
@@ -403,13 +405,13 @@ export class RoundWatchPoller {
          if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
             this.store.setClosingRound(watch.id, block.round);
             watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
-            console.log(`RoundWatch finalization checkpoint fixed for watch ${watch.id} at round ${block.round}`);
+            this.recordMetric(() => console.log(`RoundWatch finalization checkpoint fixed for watch ${watch.id} at round ${block.round}`));
          }
       }
 
       if (watch.closingRound !== undefined && watch.scanAfterRound >= watch.closingRound) {
          this.store.markExpired(watch.id, watch.scanAfterRound, watch.closingRound);
-         this.finishMetric(watch, 'expired', watchMetrics);
+         this.finishMetric(watch, context.metrics);
          return { kind: 'noOp', providerEvidence: false };
       }
 
@@ -459,8 +461,8 @@ export class RoundWatchPoller {
       if (match) {
          this.store.markMatched(watch.id, match.transaction, match.round);
          this.sessions.delete(watch.id);
-         this.finishMetric(watch, 'matched', watchMetrics);
-         console.log(`RoundWatch matched watch ${watch.id} in round ${match.round}`);
+         this.finishMetric(watch, context.metrics);
+         this.recordMetric(() => console.log(`RoundWatch matched watch ${watch.id} in round ${match.round}`));
          return { kind: 'progressed', providerEvidence: fresh };
       }
       if (page.nextToken) {
@@ -482,12 +484,12 @@ export class RoundWatchPoller {
       this.recordMetric(() => watchMetrics?.recordCoverage(
          session.maxRound - watch.scanAfterRound,
       ));
-      console.log(`RoundWatch scan progress watch=${watch.id} coveredThrough=${session.maxRound}`);
+      this.recordMetric(() => console.log(`RoundWatch scan progress watch=${watch.id} coveredThrough=${session.maxRound}`));
       const updated = this.store.getWatch(watch.id);
       if (updated?.closingRound !== undefined && updated.scanAfterRound !== undefined && updated.scanAfterRound === updated.closingRound) {
          this.store.markExpired(updated.id, updated.scanAfterRound, updated.closingRound);
-         this.finishMetric(updated, 'expired', watchMetrics);
-         console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`);
+         this.finishMetric(updated, context.metrics);
+         this.recordMetric(() => console.log(`RoundWatch finalization complete watch=${updated.id} closingRound=${updated.closingRound}`));
       }
       return { kind: 'progressed', providerEvidence: fresh };
    }
@@ -558,51 +560,20 @@ export class RoundWatchPoller {
 
    private finishMetric(
       watch: WatchRecord,
-      finalState: WatchState,
-      watchMetrics: WatchEconomicsRecorder | undefined,
+      metricTurn: WatchEconomicsTurn | undefined,
    ): void {
-      if (!watchMetrics) return;
-      if (watchMetrics === INERT_WATCH_ECONOMICS_RECORDER) {
-         // A terminal capture failure must still release any existing entry.
-         // This non-creating cleanup is best-effort and emits no partial log.
-         this.recordMetric(() => this.economicsMetrics?.finishWatch(watch.id));
-         return;
-      }
-
-      const now = this.now().getTime();
-      const createdAt = Date.parse(watch.createdAt);
-      const activatedAt = watch.activatedAt ? Date.parse(watch.activatedAt) : NaN;
-
-      this.recordMetric(() => watchMetrics.recordLifecycle({
-         finalState,
-         ...(Number.isFinite(activatedAt)
-            ? { activeDurationMs: Math.max(0, now - activatedAt) }
-            : {}),
-         ...(Number.isFinite(createdAt)
-            ? { timeToTerminalMs: Math.max(0, now - createdAt) }
-            : {}),
-      }));
-
-      const snapshot = watchMetrics.finishWatch();
-      if (snapshot) {
-         console.info(`RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`);
-      }
-   }
-
-   private captureMetric(
-      operation: () => WatchEconomicsRecorder | undefined,
-   ): WatchEconomicsRecorder | undefined {
-      if (!this.economicsMetrics) return;
-      return this.recordMetric(operation) ?? INERT_WATCH_ECONOMICS_RECORDER;
+      if (!metricTurn) return;
+      const persisted = this.recordMetric(() => this.store.getWatch(watch.id));
+      finishWatchEconomicsTurn(metricTurn, persisted, () => this.now().getTime());
    }
 
    private recordMetric<T>(operation: () => T): T | undefined {
       try {
          return operation();
       } catch (error) {
-         console.warn(
+         warnWatchMetricFailure(
             'RoundWatch economics poll metric failed:',
-            error instanceof Error ? error.message : 'Unknown metrics error',
+            error,
          );
       }
    }

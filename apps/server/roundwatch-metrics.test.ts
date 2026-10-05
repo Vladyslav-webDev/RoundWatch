@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import type { FacilitatorClient } from '@x402/core/server';
 
 import {
@@ -12,7 +12,7 @@ import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { RoundWatchRuntimeSampler } from './roundwatch-runtime-metrics.js';
-import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
+import { IndexerRequestDispatcher, type IndexerDispatchObservation } from './roundwatch-scheduler.js';
 import { RoundWatchStore, type WatchRecord } from './roundwatch-store.js';
 
 test('watch metrics aggregate per-purpose work without exporting the watch id', () => {
@@ -600,7 +600,7 @@ for (const workUnitBudget of [1, 2]) {
    });
 }
 
-test('B3 telemetry captureExistingWatch failure does not abort a permanent-error poller sweep', async t => {
+test('B3 telemetry capture failure does not abort a permanent-error poller sweep or recapture after await', async t => {
    const now = new Date('2026-09-19T12:00:00.000Z');
    const store = new RoundWatchStore(':memory:', { now: () => now });
    const metrics = new RoundWatchEconomicsMetrics();
@@ -613,8 +613,16 @@ test('B3 telemetry captureExistingWatch failure does not abort a permanent-error
       }, round);
    }
    const telemetryError = new Error('synthetic terminal capture failure');
+   metrics.captureWatch(first.id).recordWorkUnit();
+   const captureWatch = metrics.captureWatch.bind(metrics);
+   t.mock.method(metrics, 'captureWatch', (id: string) => {
+      if (id === first.id) throw telemetryError;
+      return captureWatch(id);
+   });
    const capture = metrics.captureExistingWatch.bind(metrics);
+   let recaptures = 0;
    t.mock.method(metrics, 'captureExistingWatch', (id: string) => {
+      recaptures += 1;
       if (id === first.id) throw telemetryError;
       return capture(id);
    });
@@ -644,6 +652,7 @@ test('B3 telemetry captureExistingWatch failure does not abort a permanent-error
       assert.equal(result.failed, 1);
       assert.equal(result.succeeded, 1);
       assert.equal(scans, 2);
+      assert.equal(recaptures, 0, 'the failed turn must keep its pre-await binding');
       assert.equal(store.getWatch(first.id)?.state, 'indeterminate');
       assert.equal(metrics.snapshotWatch(first.id), undefined);
       assert.equal(store.getWatch(second.id)?.scanAfterRound, 110);
@@ -761,13 +770,16 @@ for (const terminal of ['mismatch', 'absence', 'budget'] as const) {
                assert.ok(metrics.snapshotWatch(id));
                throw new Error('synthetic terminal capture failure');
             });
-            const finish = metrics.finishWatch.bind(metrics);
+            const bindRelease = metrics.bindWatchRelease.bind(metrics);
             let cleanups = 0;
-            t.mock.method(metrics, 'finishWatch', (id: string) => {
-               cleanups += 1;
-               const snapshot = finish(id);
-               if (entry === 'cleanup-error') throw new Error('synthetic terminal cleanup failure');
-               return snapshot;
+            t.mock.method(metrics, 'bindWatchRelease', (id: string) => {
+               const release = bindRelease(id);
+               if (!release) return;
+               return () => {
+                  cleanups += 1;
+                  release();
+                  if (entry === 'cleanup-error') throw new Error('synthetic terminal cleanup failure');
+               };
             });
             const result = await reconciler.reconcileOnce();
             const persisted = store.getWatch(watch.id)!;
@@ -874,6 +886,446 @@ for (const captureFails of [true, false]) {
          store.close();
       }
    });
+}
+
+for (const order of ['observer-first', 'finish-first'] as const) {
+   for (const outcome of ['success', 'failure', 'timeout'] as const) {
+      test(`B3 followup F4 ${order} preserves ${outcome} at completion boundary`, async t => {
+         const metrics = new RoundWatchEconomicsMetrics();
+         const watchId = `observer-${order}-${outcome}`;
+         const recorder = metrics.captureWatch(watchId);
+         const operationStarted = deferred<void>();
+         const operationGate = deferred<void>();
+         const observed = deferred<IndexerDispatchObservation>();
+         const apiGate = deferred<void>();
+         let monotonic = 0;
+         const dispatcher = new IndexerRequestDispatcher({
+            requestsPerSecond: 1_000, burst: 10, concurrency: 1, now: () => monotonic,
+         });
+         const dispatch = dispatcher.dispatch.bind(dispatcher);
+         t.mock.method(dispatcher, 'dispatch', async (...args: Parameters<typeof dispatch>) => {
+            try {
+               const result = await dispatch(args[0], args[1], observation => {
+                  args[2]?.(observation);
+                  observed.resolve(observation);
+               });
+               await apiGate.promise;
+               return result;
+            } catch (error) {
+               await apiGate.promise;
+               throw error;
+            }
+         });
+         const body = JSON.stringify({ round: 321 });
+         let providerError: unknown = new Error('synthetic provider failure');
+         const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher, async (_input, init) => {
+            operationStarted.resolve();
+            await operationGate.promise;
+            if (outcome === 'timeout') {
+               return new Promise<Response>((_resolve, reject) => {
+                  const signal = init!.signal!;
+                  const timeout = () => { clearTimeout(keepAlive); monotonic = 13; providerError = signal.reason; reject(providerError); };
+                  const keepAlive = setTimeout(() => reject(new Error('timeout signal did not fire')), 500);
+                  if (signal.aborted) timeout();
+                  else signal.addEventListener('abort', timeout, { once: true });
+               });
+            }
+            monotonic = 7;
+            if (outcome === 'failure') throw providerError;
+            return new Response(body);
+         }, 20, metrics);
+         let apiSettled = false;
+         const pending = indexer.getCurrentRound('activation', watchId, recorder).then(
+            value => { apiSettled = true; return { value }; },
+            error => { apiSettled = true; return { error }; },
+         );
+         let terminal: ReturnType<typeof metrics.finishWatch>;
+         try {
+            await operationStarted.promise;
+            if (order === 'finish-first') terminal = recorder.finishWatch();
+            operationGate.resolve();
+            const observation = await observed.promise;
+            assert.equal(apiSettled, false, 'public API stays held after the real dispatcher observer');
+            assert.equal(observation.outcome, outcome);
+            if (order === 'observer-first') terminal = recorder.finishWatch();
+            assert.ok(terminal);
+            const before = structuredClone(terminal);
+            const request = terminal.indexer.activation;
+            assert.equal(request.attempts, order === 'observer-first' ? 1 : 0);
+            assert.equal(request.successes, order === 'observer-first' && outcome === 'success' ? 1 : 0);
+            assert.equal(request.failures, order === 'observer-first' && outcome !== 'success' ? 1 : 0);
+            assert.equal(request.timeouts, order === 'observer-first' && outcome === 'timeout' ? 1 : 0);
+            assert.equal(request.responseBytes, order === 'observer-first' && outcome === 'success' ? Buffer.byteLength(body) : 0);
+            assert.equal(request.queueWait.samples, order === 'observer-first' ? 1 : 0);
+            assert.equal(request.queueWait.totalMs, 0);
+            assert.equal(request.wallTime.totalMs, order === 'observer-first' ? outcome === 'timeout' ? 13 : 7 : 0);
+            apiGate.resolve();
+            const result = await pending;
+            if (outcome === 'success') assert.deepEqual(result, { value: 321 });
+            else assert.equal('error' in result && result.error, providerError);
+            if (outcome === 'timeout') assert.equal((providerError as Error).name, 'TimeoutError');
+            assert.deepEqual(terminal, before);
+            assert.equal(metrics.activeWatchMetricCount(), 0);
+            assert.equal(metrics.snapshotWatch(watchId), undefined);
+         } finally {
+            operationGate.resolve(); apiGate.resolve(); await pending;
+         }
+      });
+   }
+}
+
+for (const scenario of ['invalid-json', 'protocol', 'accepted-404', 'dispatch-rejection', 'record-throw'] as const) {
+   test(`B3 followup F4 counts ${scenario} exactly once and preserves provider result`, async t => {
+      const metrics = new RoundWatchEconomicsMetrics();
+      const watchId = `observer-case-${scenario}`;
+      const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 });
+      const rejection = new Error('synthetic pre-observer dispatch rejection');
+      if (scenario === 'dispatch-rejection') t.mock.method(dispatcher, 'dispatch', () => Promise.reject(rejection));
+      let records = 0;
+      const record = metrics.recordIndexerRequest.bind(metrics);
+      t.mock.method(metrics, 'recordIndexerRequest', (...args: Parameters<typeof record>) => {
+         records += 1;
+         record(...args);
+         if (scenario === 'record-throw') throw new Error('synthetic partial observation write');
+      });
+      if (scenario === 'record-throw') t.mock.method(console, 'warn', () => { throw new Error('synthetic observer warning sink'); });
+      const body = scenario === 'invalid-json' ? '{' : JSON.stringify({ round: scenario === 'protocol' ? 'invalid' : 321 });
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher,
+         async () => scenario === 'accepted-404' ? new Response(null, { status: 404, headers: { 'content-length': '17' } }) : new Response(body),
+         1_000, metrics);
+      if (scenario === 'accepted-404') assert.equal(await indexer.lookupAssetTransfer('A'.repeat(52), 'activation', watchId), undefined);
+      else if (scenario === 'dispatch-rejection') await assert.rejects(indexer.getCurrentRound('activation', watchId), error => error === rejection);
+      else if (scenario === 'invalid-json') await assert.rejects(indexer.getCurrentRound('activation', watchId), /Indexer activation response was not valid JSON/);
+      else if (scenario === 'protocol') await assert.rejects(indexer.getCurrentRound('activation', watchId), /health round is not a non-negative safe integer/);
+      else assert.equal(await indexer.getCurrentRound('activation', watchId), 321);
+      const request = metrics.finishWatch(watchId)!.indexer.activation;
+      assert.equal(records, 1, 'observer failure must not trigger a second write from the continuation');
+      assert.equal(request.attempts, 1);
+      assert.equal(request.successes, scenario === 'accepted-404' || scenario === 'record-throw' ? 1 : 0);
+      assert.equal(request.failures, scenario === 'accepted-404' || scenario === 'record-throw' ? 0 : 1);
+      assert.equal(request.responseBytes, scenario === 'dispatch-rejection' ? 0 : scenario === 'accepted-404' ? 17 : Buffer.byteLength(body));
+      assert.equal(request.queueWait.samples, 1);
+      assert.equal(request.wallTime.samples, 1);
+   });
+}
+
+test('B3 followup F4 queued and in-flight observers precede all held public continuations', async t => {
+   const metrics = new RoundWatchEconomicsMetrics();
+   const watchId = 'observers-many';
+   const gate = deferred<void>();
+   const allObserved = deferred<void>();
+   const dispatcher = new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 2 });
+   const dispatch = dispatcher.dispatch.bind(dispatcher);
+   let observers = 0;
+   t.mock.method(dispatcher, 'dispatch', async (...args: Parameters<typeof dispatch>) => {
+      const result = await dispatch(args[0], args[1], observation => {
+         args[2]?.(observation);
+         if (++observers === 4) allObserved.resolve();
+      });
+      await gate.promise;
+      return result;
+   });
+   const body = JSON.stringify({ round: 321 });
+   const indexer = new AlgorandIndexerClient('https://indexer.example.test', dispatcher, async () => new Response(body), 1_000, metrics);
+   const pending = Promise.all(Array.from({ length: 4 }, () => indexer.getCurrentRound('activation', watchId)));
+   try {
+      assert.equal(dispatcher.snapshot().inFlight, 2);
+      assert.equal(dispatcher.snapshot().queued, 2);
+      await allObserved.promise;
+      const terminal = metrics.finishWatch(watchId)!;
+      assert.equal(terminal.indexer.activation.attempts, 4);
+      assert.equal(terminal.indexer.activation.responseBytes, 4 * Buffer.byteLength(body));
+      const saved = structuredClone(terminal);
+      gate.resolve();
+      assert.deepEqual(await pending, [321, 321, 321, 321]);
+      assert.deepEqual(terminal, saved);
+      assert.equal(metrics.activeWatchMetricCount(), 0);
+   } finally { gate.resolve(); await pending; }
+});
+
+const terminalFaults = ['record', 'finish-before', 'finish-after', 'log', 'warning'] as const;
+type TerminalFault = typeof terminalFaults[number];
+
+for (const path of ['match', 'permanent-error'] as const) {
+   for (const fault of terminalFaults) {
+      test(`B3 followup F1 poller ${path} contains ${fault}`, async t => {
+         const now = new Date('2026-09-19T12:00:00.000Z');
+         const store = new RoundWatchStore(':memory:', { now: () => now });
+         const metrics = new RoundWatchEconomicsMetrics();
+         const first = prepareMetricsWatch(store, `fault-first-${path}-${fault}`).watch;
+         const second = prepareMetricsWatch(store, `fault-second-${path}-${fault}`, '7'.repeat(51) + 'A').watch;
+         for (const [watch, round] of [[first, 100], [second, 101]] as const) {
+            store.activateWatch(watch.id, {
+               transaction: watch.expectedServiceTransaction!, network: ALGORAND_TESTNET, payer: watch.expectedServicePayer!,
+            }, round);
+         }
+         const earlier = metrics.captureWatch(first.id);
+         earlier.recordWorkUnit();
+         const logs = injectTerminalFault(t, metrics, fault, first.id);
+         const probe = new IndexerHealthProbe({
+            probeReadinessCapabilities: async () => ({ polling: true, reconciliation: true }),
+         }, first.assetId);
+         const revision = probe.currentRevision();
+         let scans = 0;
+         const indexer = new AlgorandIndexerClient('https://indexer.example.test',
+            new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+            async input => {
+               const url = new URL(String(input));
+               if (url.pathname === '/health') return Response.json({ round: 110 });
+               scans += 1;
+               if (url.searchParams.get('min-round') === '101') {
+                  if (path === 'permanent-error') return permanentWatchErrorResponse();
+                  return Response.json({ 'current-round': 110, transactions: [{
+                     id: 'A'.repeat(51) + 'Q', sender: first.expectedSender, 'tx-type': 'axfer',
+                     'confirmed-round': 105, 'round-time': now.getTime() / 1_000,
+                     'asset-transfer-transaction': {
+                        'asset-id': first.assetId, amount: Number(first.atomicAmount), receiver: first.expectedReceiver,
+                     },
+                  }] });
+               }
+               return Response.json({ 'current-round': 110, transactions: [] });
+            }, 1_000, metrics);
+         try {
+            const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now, metrics, 0, 0, probe);
+            const result = await poller.runOnce();
+            assert.equal(result.attempted, 2);
+            assert.equal(result.failed, path === 'match' ? 0 : 1);
+            assert.equal(result.isolatedFailures ?? 0, path === 'match' ? 0 : 1);
+            assert.equal(result.succeeded, path === 'match' ? 2 : 1);
+            assert.equal(probe.currentFailureEpoch(), 0);
+            assert.equal(probe.currentRevision(), revision);
+            assert.notEqual(poller.healthSnapshot().providerHealth, 'unhealthy');
+            assert.equal(store.getWatch(first.id)?.state, path === 'match' ? 'matched' : 'indeterminate');
+            if (path === 'match') assert.equal(store.getWatch(first.id)?.pollingFailureCount, 0);
+            assert.equal(store.getWatch(second.id)?.scanAfterRound, 110);
+            assert.equal(scans, 2);
+            assert.equal(metrics.snapshotWatch(first.id), undefined);
+            earlier.recordWorkUnit();
+            assert.equal(metrics.snapshotWatch(first.id), undefined);
+            assert.deepEqual(logs, [], 'damaged recording/finish/log must not publish a complete snapshot');
+         } finally { store.close(); }
+      });
+   }
+}
+
+for (const fault of terminalFaults) {
+   test(`B3 followup F3 reconciler contains ${fault}`, async t => {
+      const store = new RoundWatchStore(':memory:');
+      const metrics = new RoundWatchEconomicsMetrics();
+      const watch = prepareMetricsWatch(store, `reconciler-fault-${fault}`).watch;
+      const earlier = metrics.captureWatch(watch.id);
+      earlier.recordWorkUnit();
+      const logs = injectTerminalFault(t, metrics, fault, watch.id);
+      const probe = new IndexerHealthProbe({
+         probeReadinessCapabilities: async () => ({ polling: true, reconciliation: true }),
+      }, watch.assetId);
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test',
+         new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+         async () => metricsSettlementTransferResponse(watch, false), 1_000, metrics);
+      try {
+         const result = await new SettlementReconciler(store, indexer, {
+            network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+         }, metrics, probe).reconcileOnce();
+         assert.equal(result.failed, 0);
+         assert.equal(result.succeeded, 1);
+         assert.equal(probe.currentFailureEpoch(), 0);
+         assert.equal(store.getWatch(watch.id)?.settlementReconciliationTerminal, true);
+         assert.equal(metrics.snapshotWatch(watch.id), undefined);
+         earlier.recordWorkUnit();
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         assert.deepEqual(logs, []);
+      } finally { store.close(); }
+   });
+}
+
+for (const capture of ['normal', 'failed-existing', 'partial-existing', 'disabled-empty'] as const) {
+   test(`B3 followup F2 late poller error preserves replacement with ${capture}`, async t => {
+      const now = new Date('2026-09-19T12:00:00.000Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const metrics = new RoundWatchEconomicsMetrics();
+      const watch = prepareMetricsWatch(store, `replacement-${capture}`).watch;
+      store.activateWatch(watch.id, {
+         transaction: watch.expectedServiceTransaction!, network: ALGORAND_TESTNET, payer: watch.expectedServicePayer!,
+      }, 100);
+      const originalCapture = metrics.captureWatch.bind(metrics);
+      const earlier = capture === 'disabled-empty' ? undefined : originalCapture(watch.id);
+      earlier?.recordWorkUnit();
+      let captures = 0;
+      t.mock.method(metrics, 'captureWatch', (id: string) => {
+         captures += 1;
+         if (capture === 'normal') return originalCapture(id);
+         if (capture === 'partial-existing') originalCapture(id);
+         throw new Error('synthetic capture failure');
+      });
+      let recaptures = 0;
+      const existing = metrics.captureExistingWatch.bind(metrics);
+      t.mock.method(metrics, 'captureExistingWatch', (id: string) => { recaptures += 1; return existing(id); });
+      const logs: string[] = [];
+      t.mock.method(console, 'info', (message: string) => logs.push(message));
+      const started = deferred<void>();
+      const response = deferred<Response>();
+      const probe = new IndexerHealthProbe({
+         probeReadinessCapabilities: async () => ({ polling: true, reconciliation: true }),
+      }, watch.assetId);
+      const indexer = new AlgorandIndexerClient('https://indexer.example.test',
+         new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+         async input => {
+            if (new URL(String(input)).pathname === '/health') return Response.json({ round: 110 });
+            started.resolve(); return response.promise;
+         }, 1_000, metrics);
+      let pending: Promise<unknown> | undefined;
+      try {
+         pending = new RoundWatchPoller(store, indexer, 5_000, 100, () => now, metrics, 0, 0, probe).runOnce();
+         await started.promise;
+         earlier?.finishWatch();
+         assert.equal(metrics.activeWatchMetricCount(), 0);
+         const replacement = originalCapture(watch.id);
+         replacement.recordWorkUnit();
+         replacement.recordCoverage(123);
+         const snapshot = metrics.snapshotWatch(watch.id);
+         response.resolve(permanentWatchErrorResponse());
+         const result = await pending as { failed: number; isolatedFailures?: number };
+         assert.equal(result.failed, 1);
+         assert.equal(result.isolatedFailures, 1);
+         assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
+         assert.equal(probe.currentFailureEpoch(), 0);
+         assert.deepEqual(metrics.snapshotWatch(watch.id), snapshot);
+         assert.equal(metrics.activeWatchMetricCount(), 1);
+         assert.equal(captures, 1);
+         assert.equal(recaptures, 0, 'error continuation must retain the original binding');
+         assert.deepEqual(logs, []);
+         replacement.recordWorkUnit();
+         assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 2);
+      } finally {
+         response.resolve(permanentWatchErrorResponse());
+         await pending;
+         store.close();
+      }
+   });
+}
+
+test('B3 followup F2 inactive stale poller candidates never capture metrics', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const metrics = new RoundWatchEconomicsMetrics();
+   const watch = prepareMetricsWatch(store, 'inactive-candidate').watch;
+   const stale = store.activateWatch(watch.id, {
+      transaction: watch.expectedServiceTransaction!, network: ALGORAND_TESTNET, payer: watch.expectedServicePayer!,
+   }, 100);
+   store.markMatched(watch.id, 'A'.repeat(51) + 'Q', 105);
+   t.mock.method(store, 'listPollingCandidates', () => [stale]);
+   let captures = 0;
+   t.mock.method(metrics, 'captureWatch', () => { captures += 1; throw new Error('stale capture'); });
+   const indexer = new AlgorandIndexerClient('https://indexer.example.test', new IndexerRequestDispatcher(),
+      async () => { throw new Error('inactive watch must not query Indexer'); }, 1_000, metrics);
+   try {
+      const result = await new RoundWatchPoller(store, indexer, 5_000, 100, () => new Date(), metrics).runOnce();
+      assert.equal(result.failed, 0);
+      assert.equal(captures, 0);
+      assert.equal(metrics.activeWatchMetricCount(), 0);
+   } finally { store.close(); }
+});
+
+function permanentWatchErrorResponse(): Response {
+   return Response.json({ message: 'invalid input: searching transactions by zero address with asset sender role is not supported' }, { status: 400 });
+}
+
+test('B3 followup F2 failed reconciler capture cannot release a replacement after await', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const metrics = new RoundWatchEconomicsMetrics();
+   const watch = prepareMetricsWatch(store, 'reconciler-replacement').watch;
+   const capture = metrics.captureWatch.bind(metrics);
+   const earlier = capture(watch.id);
+   earlier.recordWorkUnit();
+   t.mock.method(metrics, 'captureWatch', () => { throw new Error('synthetic original capture failure'); });
+   const logs: string[] = [];
+   t.mock.method(console, 'info', (message: string) => logs.push(message));
+   const started = deferred<void>();
+   const response = deferred<Response>();
+   const indexer = new AlgorandIndexerClient('https://indexer.example.test',
+      new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+      async () => { started.resolve(); return response.promise; }, 1_000, metrics);
+   let pending: Promise<unknown> | undefined;
+   try {
+      pending = new SettlementReconciler(store, indexer, {
+         network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+      }, metrics).reconcileOnce();
+      await started.promise;
+      earlier.finishWatch();
+      const replacement = capture(watch.id);
+      replacement.recordWorkUnit();
+      const snapshot = metrics.snapshotWatch(watch.id);
+      response.resolve(metricsSettlementTransferResponse(watch, false));
+      await pending;
+      assert.equal(store.getWatch(watch.id)?.settlementReconciliationTerminal, true);
+      assert.deepEqual(metrics.snapshotWatch(watch.id), snapshot);
+      assert.deepEqual(logs, []);
+      replacement.recordWorkUnit();
+      assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 2);
+   } finally { response.resolve(metricsSettlementTransferResponse(watch)); await pending; store.close(); }
+});
+
+test('B3 followup F3 independent release is non-creating, identity-bound and snapshot-free', async t => {
+   const metrics = new RoundWatchEconomicsMetrics();
+   const releaseMetrics = metrics as RoundWatchEconomicsMetrics & { bindWatchRelease(id: string): (() => void) | undefined };
+   assert.equal(typeof releaseMetrics.bindWatchRelease, 'function');
+   assert.equal(releaseMetrics.bindWatchRelease('absent'), undefined);
+   assert.equal(metrics.activeWatchMetricCount(), 0);
+   const original = metrics.captureWatch('release-identity');
+   const release = releaseMetrics.bindWatchRelease('release-identity')!;
+   original.finishWatch();
+   const replacement = metrics.captureWatch('release-identity');
+   replacement.recordWorkUnit();
+   const snapshot = metrics.snapshotWatch('release-identity');
+   release(); release();
+   assert.deepEqual(metrics.snapshotWatch('release-identity'), snapshot);
+   const releaseReplacement = releaseMetrics.bindWatchRelease('release-identity')!;
+   t.mock.method(metrics, 'snapshotWatch', () => { throw new Error('broken snapshot cannot block release'); });
+   releaseReplacement(); releaseReplacement();
+   original.recordWorkUnit(); replacement.recordWorkUnit();
+   assert.equal(metrics.activeWatchMetricCount(), 0);
+
+   // Explicit limit: if the primitive itself fails before deletion, containment
+   // and one attempt are guaranteed, but absolute cleanup cannot be promised.
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const watch = prepareMetricsWatch(store, 'broken-release').watch;
+      store.markSettlementInvalid(watch.id);
+      metrics.captureWatch(watch.id);
+      const repairRelease = releaseMetrics.bindWatchRelease(watch.id)!;
+      let attempts = 0;
+      t.mock.method(metrics, 'bindWatchRelease', () => () => { attempts += 1; throw new Error('synthetic base release failure'); });
+      const { captureWatchEconomicsTurn, finishWatchEconomicsTurn } = await import('./roundwatch-metrics.js');
+      const turn = captureWatchEconomicsTurn(metrics, watch.id);
+      assert.doesNotThrow(() => finishWatchEconomicsTurn(turn, store.getWatch(watch.id)));
+      assert.equal(attempts, 1);
+      assert.equal(store.getWatch(watch.id)?.settlementReconciliationTerminal, true);
+      assert.equal(metrics.activeWatchMetricCount(), 1, 'a broken primitive may retain the entry');
+      repairRelease();
+      assert.equal(metrics.activeWatchMetricCount(), 0);
+   } finally { store.close(); }
+});
+
+function injectTerminalFault(t: TestContext, metrics: RoundWatchEconomicsMetrics, fault: TerminalFault, watchId: string): string[] {
+   const record = metrics.recordLifecycle.bind(metrics);
+   t.mock.method(metrics, 'recordLifecycle', (id: string, observation: Parameters<typeof record>[1]) => {
+      if (id === watchId && fault === 'record') throw new Error('synthetic lifecycle recording failure');
+      return record(id, observation);
+   });
+   const finish = metrics.finishWatch.bind(metrics);
+   t.mock.method(metrics, 'finishWatch', (id: string) => {
+      if (id === watchId && (fault === 'finish-before' || fault === 'warning')) throw new Error('synthetic finish before delete');
+      const snapshot = finish(id);
+      if (id === watchId && fault === 'finish-after') throw new Error('synthetic finish after delete');
+      return snapshot;
+   });
+   const logs: string[] = [];
+   t.mock.method(console, 'info', (message: string) => {
+      if (!message.startsWith('RoundWatch economics watch-terminal ')) return;
+      if (fault === 'log') throw new Error('synthetic terminal log failure');
+      logs.push(message);
+   });
+   if (fault === 'warning') t.mock.method(console, 'warn', () => { throw new Error('synthetic warning sink failure'); });
+   return logs;
 }
 
 function metricsSettlementTransferResponse(watch: WatchRecord, matches = true): Response {

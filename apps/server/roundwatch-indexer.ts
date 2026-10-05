@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { IndexedAssetTransfer } from './roundwatch-reconciler.js';
 import type { WatchRecord } from './roundwatch-store.js';
-import type {
-   RoundWatchEconomicsMetrics,
-   WatchEconomicsRecorder,
+import {
+   warnWatchMetricFailure,
+   type RoundWatchEconomicsMetrics,
+   type WatchEconomicsRecorder,
 } from './roundwatch-metrics.js';
 import {
    IndexerRequestDispatcher,
@@ -510,8 +511,15 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       // Bind before dispatch, including time spent queued. A later request in
       // the same async turn must keep the caller's recorder, even after finish.
       const metric = this.captureRequestMetric(watchId, watchMetrics);
-      let dispatchObservation: IndexerDispatchObservation | undefined;
+      let completionRecorded = false;
       let responseBytes = 0;
+      const recordCompletion = (observation: IndexerDispatchObservation) => {
+         if (completionRecorded) return;
+         // Guard before writing: a partially successful telemetry operation
+         // must not be counted again by a success/error continuation.
+         completionRecorded = true;
+         this.recordRequestMetric(metric, purpose, observation, responseBytes);
+      };
 
       try {
          const result = await this.dispatcher.dispatch(
@@ -577,9 +585,9 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                      bodyReadFailed: diagnostic.bodyReadFailed,
                   });
 
-                  console.warn(
-                     `RoundWatch Indexer HTTP failure ${JSON.stringify(error.telemetry())}`,
-                  );
+                  try {
+                     console.warn(`RoundWatch Indexer HTTP failure ${JSON.stringify(error.telemetry())}`);
+                  } catch {} // Preserve the provider error even if its diagnostic sink fails.
                   throw error;
                }
 
@@ -611,33 +619,17 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
 
                return parse(body);
             },
-            observation => {
-               dispatchObservation = observation;
-            },
+            recordCompletion,
          );
 
-         this.recordRequestMetric(
-            metric,
-            purpose,
-            dispatchObservation ?? {
-               outcome: 'success',
-               queueWaitMs: 0,
-               wallTimeMs: 0,
-            },
-            responseBytes,
-         );
          return result;
       } catch (error) {
-         this.recordRequestMetric(
-            metric,
-            purpose,
-            dispatchObservation ?? {
-               outcome: isTimeoutError(error) ? 'timeout' : 'failure',
-               queueWaitMs: 0,
-               wallTimeMs: 0,
-            },
-            responseBytes,
-         );
+         // Bounded fallback only if dispatch rejected before its observer.
+         recordCompletion({
+            outcome: isTimeoutError(error) ? 'timeout' : 'failure',
+            queueWaitMs: 0,
+            wallTimeMs: 0,
+         });
          throw error;
       }
    }
@@ -652,9 +644,9 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       try {
          return this.economicsMetrics.captureWatch(watchId);
       } catch (error) {
-         console.warn(
+         warnWatchMetricFailure(
             'RoundWatch economics Indexer metric failed:',
-            error instanceof Error ? error.message : 'Unknown metrics error',
+            error,
          );
       }
    }
@@ -675,9 +667,9 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
             wallTimeMs: observation.wallTimeMs,
          });
       } catch (error) {
-         console.warn(
+         warnWatchMetricFailure(
             'RoundWatch economics Indexer metric failed:',
-            error instanceof Error ? error.message : 'Unknown metrics error',
+            error,
          );
       }
    }
