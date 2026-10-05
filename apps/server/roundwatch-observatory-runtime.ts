@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import {
+   readRetainedRuntimeSample,
+   type RetainedRuntimeSample,
+} from './roundwatch-observatory-retention.js';
 
 import type { IndexerDispatcherSnapshot } from './roundwatch-scheduler.js';
 import type { PollerCapacitySnapshot } from './roundwatch-poller.js';
@@ -28,6 +32,7 @@ export interface ObservatoryRuntimeSources {
    dispatcherSnapshot: () => IndexerDispatcherSnapshot;
    cachedIndexerTip: () => CachedIndexerTip;
    pollCycleSnapshot?: () => PollerCapacitySnapshot;
+   retainedRuntimeSample?: () => RetainedRuntimeSample;
 }
 
 export interface ObservatoryClocks {
@@ -52,6 +57,7 @@ export function createObservatoryRuntimeSnapshotBuilder(
       network, assetId, economicsMetricsEnabled,
       pollerHealthSnapshot, reconcilerHealthSnapshot,
       dispatcherSnapshot, cachedIndexerTip, pollCycleSnapshot,
+      retainedRuntimeSample,
    } = sources;
    const { epochMilliseconds, processMonotonicMilliseconds } = clocks;
    const processEpoch = initializeProcessEpoch(generateProcessEpoch);
@@ -79,11 +85,9 @@ export function createObservatoryRuntimeSnapshotBuilder(
       if (dispatcher.availability !== 'available') processMonotonicMs = null;
       const observedRound = cachedRoundObservation(cachedIndexerTip);
       const pollCycle = completedPollCycleObservation(pollCycleSnapshot);
+      const sampled = readRetainedRuntimeSample(retainedRuntimeSample, economicsMetricsEnabled);
       // Comparison wall clock follows direct observations; never dates the tip.
       const observedAt = epochToIsoUtc(epochMilliseconds());
-      const optionalAvailability = economicsMetricsEnabled
-         ? 'unavailable'
-         : 'instrumentation_disabled';
 
       return {
          schemaVersion: 'observatory-runtime-v0.1',
@@ -100,8 +104,8 @@ export function createObservatoryRuntimeSnapshotBuilder(
          indexer: { dispatcher, observedRound },
          pollCycle,
          readiness: emptyObservation('unavailable'),
-         capacity: emptyObservation(optionalAvailability),
-         resources: emptyObservation(optionalAvailability),
+         capacity: sampled.capacity,
+         resources: sampled.resources,
       };
    };
 }
