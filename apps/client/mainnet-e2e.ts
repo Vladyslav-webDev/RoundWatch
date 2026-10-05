@@ -95,10 +95,10 @@ async function main(): Promise<void> {
    }
 
    requireExplicitConfirmation();
-   const account = getPayerAccount();
-   const sender = account.addr.toString();
 
    if (mode === 'start') {
+      const account = getPayerAccount();
+      const sender = account.addr.toString();
       if (existsSync(statePath)) {
          throw new Error(
             `MainNet checkpoint already exists at ${statePath}. Refusing to create a second paid watch. Use status/recover/pay, or remove the checkpoint only after deliberate review.`,
@@ -113,11 +113,10 @@ async function main(): Promise<void> {
 
    const state = validateMainnetCheckpoint(readState(), {
       runtimeServerUrl: serverUrl,
-      payerAddress: sender,
       requireWatchId: true,
    });
 
-   await payInvoice(account, state as MainnetCheckpointWithWatch);
+   await payInvoice(getPayerAccount, state as MainnetCheckpointWithWatch);
 }
 
 function assertStaticSafety(): void {
@@ -318,7 +317,7 @@ async function startWatch(
 
 export async function recoverWatch(
    state: MainnetCheckpoint,
-   readWatchImpl: typeof readWatch = readWatch,
+   readWatchImpl: typeof readWatch = watchId => readWatch(watchId, fetchImpl, true),
    fetchImpl: typeof fetch = fetch,
 ): Promise<MainnetCheckpointWithWatch> {
    if (state.watchId) {
@@ -347,15 +346,18 @@ export async function recoverWatch(
 }
 
 export async function payInvoice(
-   account: algosdk.Account,
+   createAccount: () => algosdk.Account,
    state: MainnetCheckpointWithWatch,
    readWatchImpl: typeof readWatch = readWatch,
    createAlgod: () => algosdk.Algodv2 = () => new algosdk.Algodv2('', algodUrl, ''),
 ): Promise<void> {
+   validateMainnetCheckpoint(state, {
+      runtimeServerUrl: serverUrl,
+      requireWatchId: true,
+   });
    const active = await readWatchImpl(state.watchId);
    validateMainnetCheckpoint(state, {
       runtimeServerUrl: serverUrl,
-      payerAddress: account.addr.toString(),
       requireWatchId: true,
       watch: active,
    });
@@ -369,6 +371,16 @@ export async function payInvoice(
    if (active.state !== 'active') {
       throw new Error(`Expected active MainNet watch, received ${active.state}`);
    }
+
+   // Public identity/state checks must finish before mnemonic derivation. The
+   // derived payer still needs validation before any Algod or signing action.
+   const account = createAccount();
+   validateMainnetCheckpoint(state, {
+      runtimeServerUrl: serverUrl,
+      payerAddress: account.addr.toString(),
+      requireWatchId: true,
+      watch: active,
+   });
 
    const algod = createAlgod();
    const suggestedParams = await algod.getTransactionParams().do();
@@ -427,9 +439,13 @@ function readState(): unknown {
    return JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
 }
 
-async function readWatch(watchId: string): Promise<MainnetWatchSnapshot> {
-   const response = await fetch(`${serverUrl}/v1/watch/${watchId}`);
-   if (!response.ok) {
+async function readWatch(
+   watchId: string,
+   fetchImpl: typeof fetch = fetch,
+   requireHttp200 = false,
+): Promise<MainnetWatchSnapshot> {
+   const response = await fetchImpl(`${serverUrl}/v1/watch/${watchId}`);
+   if (requireHttp200 ? response.status !== 200 : !response.ok) {
       throw new Error(`MainNet watch status failed with HTTP ${response.status}`);
    }
 

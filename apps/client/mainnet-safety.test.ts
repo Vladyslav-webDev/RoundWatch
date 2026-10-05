@@ -622,7 +622,7 @@ for (const state of ['expired', 'indeterminate', 'matched']) {
          } as unknown as algosdk.Algodv2;
       };
       let reads = 0;
-      const pay = payInvoice(payer, recovered, async watchId => {
+      const pay = payInvoice(() => payer, recovered, async watchId => {
          reads += 1;
          assert.equal(watchId, WATCH_ID);
          return watch;
