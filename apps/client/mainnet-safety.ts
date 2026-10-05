@@ -38,6 +38,9 @@ export interface MainnetWatchSnapshot {
    assetId?: number;
    atomicAmount?: string;
    invoiceNote?: string;
+   serviceTransaction?: string;
+   servicePayer?: string;
+   expectedServicePayer?: string;
    matchedTransaction?: string;
    matchedRound?: number;
 }
@@ -51,7 +54,8 @@ export interface CheckpointValidationOptions {
 }
 
 
-export interface ReadyMainnetCheckpoint extends MainnetCheckpoint {
+// A restored watch identity does not imply eligibility for an invoice payment.
+export interface MainnetCheckpointWithWatch extends MainnetCheckpoint {
    watchId: string;
 }
 
@@ -136,7 +140,7 @@ export async function recoverExistingMainnetWatch(
    fetchImpl: typeof fetch,
    state: MainnetCheckpoint,
    runtimeServerUrl: string,
-): Promise<ReadyMainnetCheckpoint> {
+): Promise<MainnetCheckpointWithWatch> {
    const checkpoint = validateMainnetCheckpoint(state, {
       runtimeServerUrl,
    });
@@ -164,11 +168,11 @@ export async function recoverExistingMainnetWatch(
 
    if (response.status === 404) {
       throw new Error(
-         'SAFETY STOP: no existing durable MainNet watch was found for this checkpoint. Recovery will not sign or purchase a new watch.',
+         'SAFETY STOP: no existing durable MainNet watch was found for this checkpoint. Recovery will not sign or purchase a new watch; no payment was attempted.',
       );
    }
 
-   if (!response.ok) {
+   if (response.status !== 200) {
       throw new Error(
          `MainNet recovery lookup failed with HTTP ${response.status}; no payment was attempted`,
       );
@@ -181,19 +185,56 @@ export async function recoverExistingMainnetWatch(
       );
    }
 
-   const recovered: ReadyMainnetCheckpoint = {
+   const recovered: MainnetCheckpointWithWatch = {
       ...checkpoint,
       watchId: body.watch.id,
    };
 
-   validateMainnetCheckpoint(recovered, {
+   return validateRecoveredMainnetCheckpoint(
+      recovered,
+      body.watch,
       runtimeServerUrl,
-      payerAddress: checkpoint.expectedSender,
+      checkpoint.expectedSender,
+   );
+}
+
+export function validateRecoveredMainnetCheckpoint(
+   state: MainnetCheckpoint,
+   watch: MainnetWatchSnapshot,
+   runtimeServerUrl: string,
+   payerAddress: string = state.expectedSender,
+): MainnetCheckpointWithWatch {
+   const checkpoint = validateMainnetCheckpoint(state, {
+      runtimeServerUrl,
+      payerAddress,
       requireWatchId: true,
-      watch: body.watch,
+      requirePayableWatch: false,
+      watch,
    });
 
-   return recovered;
+   if (
+      watch.state !== 'active' &&
+      watch.state !== 'matched' &&
+      watch.state !== 'expired' &&
+      watch.state !== 'indeterminate'
+   ) {
+      throw new Error(`MainNet watch state is not recoverable: ${watch.state}`);
+   }
+
+   if (
+      typeof watch.serviceTransaction !== 'string' ||
+      watch.serviceTransaction.length === 0
+   ) {
+      throw new Error('MainNet watch settlement is not confirmed; not recovered');
+   }
+
+   for (const servicePayer of [watch.expectedServicePayer, watch.servicePayer]) {
+      if (servicePayer !== undefined && servicePayer !== checkpoint.expectedSender) {
+         throw new Error('MainNet watch service payer does not match the checkpoint sender');
+      }
+   }
+
+   return checkpoint as MainnetCheckpointWithWatch;
 }
 
 export function assertMainnetRuntimeSafety(

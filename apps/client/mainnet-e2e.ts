@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import algosdk from 'algosdk';
 import {
@@ -22,13 +23,19 @@ import {
    recoverExistingMainnetWatch,
    USDC_MAINNET_ASA_ID,
    validateMainnetCheckpoint,
+   validateRecoveredMainnetCheckpoint,
    type MainnetCheckpoint,
+   type MainnetCheckpointWithWatch,
    type MainnetWatchSnapshot,
-   type ReadyMainnetCheckpoint,
 } from './mainnet-safety.js';
 
-process.loadEnvFile(resolve('../server/.env'));
-process.loadEnvFile(resolve('.env'));
+const isMainModule =
+   process.argv[1] !== undefined &&
+   resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMainModule) {
+   process.loadEnvFile(resolve('../server/.env'));
+   process.loadEnvFile(resolve('.env'));
+}
 
 const CONFIRM_FLAG = '--confirm-mainnet';
 
@@ -88,10 +95,10 @@ async function main(): Promise<void> {
    }
 
    requireExplicitConfirmation();
-   const account = getPayerAccount();
-   const sender = account.addr.toString();
 
    if (mode === 'start') {
+      const account = getPayerAccount();
+      const sender = account.addr.toString();
       if (existsSync(statePath)) {
          throw new Error(
             `MainNet checkpoint already exists at ${statePath}. Refusing to create a second paid watch. Use status/recover/pay, or remove the checkpoint only after deliberate review.`,
@@ -106,11 +113,10 @@ async function main(): Promise<void> {
 
    const state = validateMainnetCheckpoint(readState(), {
       runtimeServerUrl: serverUrl,
-      payerAddress: sender,
       requireWatchId: true,
    });
 
-   await payInvoice(account, state as ReadyMainnetCheckpoint);
+   await payInvoice(getPayerAccount, state as MainnetCheckpointWithWatch);
 }
 
 function assertStaticSafety(): void {
@@ -205,7 +211,7 @@ async function runPreflight(sender: string): Promise<void> {
 async function startWatch(
    account: algosdk.Account,
    sender: string,
-): Promise<ReadyMainnetCheckpoint> {
+): Promise<MainnetCheckpointWithWatch> {
    const readiness = await fetch(`${serverUrl}/ready`);
    const readinessBody = await readiness.json() as {
       status?: string;
@@ -309,27 +315,25 @@ async function startWatch(
    return completedCheckpoint;
 }
 
-async function recoverWatch(
+export async function recoverWatch(
    state: MainnetCheckpoint,
-): Promise<ReadyMainnetCheckpoint> {
+   readWatchImpl: typeof readWatch = watchId => readWatch(watchId, fetchImpl, true),
+   fetchImpl: typeof fetch = fetch,
+): Promise<MainnetCheckpointWithWatch> {
    if (state.watchId) {
-      const existing = await readWatch(state.watchId);
-      validateMainnetCheckpoint(state, {
-         runtimeServerUrl: serverUrl,
-         payerAddress: state.expectedSender,
-         requireWatchId: true,
-         watch: existing,
-      });
-      if (existing.state !== 'active' && existing.state !== 'matched') {
-         throw new Error(`Existing MainNet watch is ${existing.state}, not recovered`);
-      }
+      const existing = await readWatchImpl(state.watchId);
+      const recovered = validateRecoveredMainnetCheckpoint(
+         state,
+         existing,
+         serverUrl,
+      );
 
       console.log(`Existing MainNet watch ${state.watchId} is ${existing.state}.`);
-      return state as ReadyMainnetCheckpoint;
+      return recovered;
    }
 
    const recovered = await recoverExistingMainnetWatch(
-      fetch,
+      fetchImpl,
       state,
       serverUrl,
    );
@@ -341,14 +345,19 @@ async function recoverWatch(
    return recovered;
 }
 
-async function payInvoice(
-   account: algosdk.Account,
-   state: ReadyMainnetCheckpoint,
+export async function payInvoice(
+   createAccount: () => algosdk.Account,
+   state: MainnetCheckpointWithWatch,
+   readWatchImpl: typeof readWatch = readWatch,
+   createAlgod: () => algosdk.Algodv2 = () => new algosdk.Algodv2('', algodUrl, ''),
 ): Promise<void> {
-   const active = await readWatch(state.watchId);
    validateMainnetCheckpoint(state, {
       runtimeServerUrl: serverUrl,
-      payerAddress: account.addr.toString(),
+      requireWatchId: true,
+   });
+   const active = await readWatchImpl(state.watchId);
+   validateMainnetCheckpoint(state, {
+      runtimeServerUrl: serverUrl,
       requireWatchId: true,
       watch: active,
    });
@@ -363,7 +372,17 @@ async function payInvoice(
       throw new Error(`Expected active MainNet watch, received ${active.state}`);
    }
 
-   const algod = new algosdk.Algodv2('', algodUrl, '');
+   // Public identity/state checks must finish before mnemonic derivation. The
+   // derived payer still needs validation before any Algod or signing action.
+   const account = createAccount();
+   validateMainnetCheckpoint(state, {
+      runtimeServerUrl: serverUrl,
+      payerAddress: account.addr.toString(),
+      requireWatchId: true,
+      watch: active,
+   });
+
+   const algod = createAlgod();
    const suggestedParams = await algod.getTransactionParams().do();
    const transaction = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({
       sender: state.expectedSender,
@@ -420,9 +439,13 @@ function readState(): unknown {
    return JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
 }
 
-async function readWatch(watchId: string): Promise<MainnetWatchSnapshot> {
-   const response = await fetch(`${serverUrl}/v1/watch/${watchId}`);
-   if (!response.ok) {
+async function readWatch(
+   watchId: string,
+   fetchImpl: typeof fetch = fetch,
+   requireHttp200 = false,
+): Promise<MainnetWatchSnapshot> {
+   const response = await fetchImpl(`${serverUrl}/v1/watch/${watchId}`);
+   if (requireHttp200 ? response.status !== 200 : !response.ok) {
       throw new Error(`MainNet watch status failed with HTTP ${response.status}`);
    }
 
@@ -467,10 +490,12 @@ function printUsage(): void {
    console.log('  tsx mainnet-e2e.ts pay --confirm-mainnet     # spends 0.000001 USDC invoice payment + network fee');
 }
 
-main().catch(error => {
-   console.error('ROUNDWATCH MAINNET E2E ERROR');
-   console.error(error instanceof Error ? error.message : error);
-   // Let Node drain open async handles naturally. Calling process.exit() while
-   // fetch/undici handles are closing can trigger a libuv assertion on Windows.
-   process.exitCode = 1;
-});
+if (isMainModule) {
+   main().catch(error => {
+      console.error('ROUNDWATCH MAINNET E2E ERROR');
+      console.error(error instanceof Error ? error.message : error);
+      // Let Node drain open async handles naturally. Calling process.exit() while
+      // fetch/undici handles are closing can trigger a libuv assertion on Windows.
+      process.exitCode = 1;
+   });
+}
