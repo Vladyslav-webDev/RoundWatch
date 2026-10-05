@@ -1,5 +1,5 @@
 import type { IndexerDispatcherSnapshot, IndexerRequestPurpose } from './roundwatch-scheduler.js';
-import type { WatchState } from './roundwatch-store.js';
+import type { WatchRecord, WatchState } from './roundwatch-store.js';
 
 export const INDEXER_REQUEST_PURPOSES = [
    'activation',
@@ -58,6 +58,111 @@ export interface WatchLifecycleObservation {
    activeDurationMs?: number;
    timeToTerminalMs?: number;
    finalState?: WatchState;
+}
+
+/** A recorder bound to one process-local watch metrics lifecycle. */
+export interface WatchEconomicsRecorder {
+   recordIndexerRequest(
+      purpose: IndexerRequestPurpose,
+      observation: IndexerRequestObservation,
+   ): void;
+   recordScanPage(observation: ScanPageObservation): void;
+   recordCoverage(roundsCovered: number): void;
+   recordReconciliationAttempt(): void;
+   recordClosingRequest(): void;
+   recordWorkUnit(): void;
+   recordLifecycle(observation: WatchLifecycleObservation): void;
+   finishWatch(): WatchWorkSnapshot | undefined;
+}
+
+/** Explicitly disabled telemetry: a supplied recorder suppresses ID fallback. */
+export const INERT_WATCH_ECONOMICS_RECORDER: WatchEconomicsRecorder = Object.freeze({
+   recordIndexerRequest: () => {},
+   recordScanPage: () => {},
+   recordCoverage: () => {},
+   recordReconciliationAttempt: () => {},
+   recordClosingRequest: () => {},
+   recordWorkUnit: () => {},
+   recordLifecycle: () => {},
+   finishWatch: () => undefined,
+});
+
+/** A single turn's recorder and independent release, both bound before await. */
+export interface WatchEconomicsTurn {
+   readonly recorder: WatchEconomicsRecorder;
+   readonly release: (() => void) | undefined;
+}
+
+export function warnWatchMetricFailure(context: string, error: unknown): void {
+   // A failed diagnostic sink must not escape into provider handling. Do not
+   // attempt to log its own failure, which could recurse indefinitely.
+   try {
+      console.warn(context, error instanceof Error ? error.message : 'Unknown metrics error');
+   } catch {}
+}
+
+export function captureWatchEconomicsTurn(
+   metrics: RoundWatchEconomicsMetrics | undefined,
+   watchId: string,
+   existingOnly = false,
+): WatchEconomicsTurn | undefined {
+   if (!metrics) return;
+   const bindRelease = () => {
+      try { return metrics.bindWatchRelease(watchId); }
+      catch (error) { warnWatchMetricFailure('RoundWatch economics release binding failed:', error); }
+   };
+   // Preserve an existing identity even if capture itself partially fails.
+   let release = bindRelease();
+   let recorder = INERT_WATCH_ECONOMICS_RECORDER;
+   try {
+      recorder = (existingOnly ? metrics.captureExistingWatch(watchId) : metrics.captureWatch(watchId)) ?? recorder;
+   } catch (error) {
+      warnWatchMetricFailure('RoundWatch economics capture metric failed:', error);
+   }
+   // Capture may have created the first entry and then thrown. This is a
+   // synchronous, non-creating release binding, never a later ID fallback.
+   release ??= bindRelease();
+   return { recorder, release };
+}
+
+export function finishWatchEconomicsTurn(
+   turn: WatchEconomicsTurn | undefined,
+   watch: WatchRecord | undefined,
+   now: () => number = Date.now,
+): void {
+   if (!turn || !watch) return;
+   const terminal = watch.state === 'matched' || watch.state === 'expired' ||
+      watch.state === 'indeterminate' ||
+      (watch.state === 'settlement_unknown' && watch.settlementReconciliationTerminal);
+   if (!terminal) return;
+
+   let recorded = false;
+   let snapshot: WatchWorkSnapshot | undefined;
+   if (turn.recorder !== INERT_WATCH_ECONOMICS_RECORDER) {
+      try {
+         const timestamp = now();
+         const createdAt = Date.parse(watch.createdAt);
+         const activatedAt = watch.activatedAt ? Date.parse(watch.activatedAt) : NaN;
+         turn.recorder.recordLifecycle({
+            finalState: watch.state,
+            ...(Number.isFinite(createdAt) ? { timeToTerminalMs: Math.max(0, timestamp - createdAt) } : {}),
+            ...(Number.isFinite(activatedAt) ? { activeDurationMs: Math.max(0, timestamp - activatedAt) } : {}),
+         });
+         recorded = true;
+      } catch (error) { warnWatchMetricFailure('RoundWatch economics lifecycle metric failed:', error); }
+      if (recorded) {
+         try { snapshot = turn.recorder.finishWatch(); }
+         catch (error) { warnWatchMetricFailure('RoundWatch economics finish metric failed:', error); }
+      }
+   }
+   // Independent of recording and snapshot construction; exactly one bounded
+   // attempt, identity-fenced and idempotent even if finish removed the entry.
+   try { turn.release?.(); }
+   catch (error) { warnWatchMetricFailure('RoundWatch economics release metric failed:', error); }
+   if (snapshot) {
+      try { console.info(`RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`); }
+      catch (error) { warnWatchMetricFailure('RoundWatch economics terminal log failed:', error); }
+   }
 }
 
 export const FREE_REQUEST_CATEGORIES = [
@@ -149,10 +254,35 @@ interface MutableFreeWork {
  * It is not wired into production behavior by defining it. Callers are
  * responsible for flushing/recording a terminal snapshot and then releasing
  * the corresponding watch entry.
+ *
+ * Watch IDs are durable randomUUID() primary keys, not reusable job names.
+ * ID-based record methods start/record live work synchronously. Async callers
+ * must capture a recorder before awaiting and carry it through the whole turn,
+ * including subsequent requests and terminal handling. A captured recorder
+ * becomes inert when its entry is removed, even if the ID is later reused.
+ * Restart recovery starts fresh process-local metrics only for unfinished work;
+ * no historical finished-ID state is retained here.
  */
 export class RoundWatchEconomicsMetrics {
    private readonly watches = new Map<string, MutableWatchWork>();
    private readonly freeWork = new Map<FreeRequestCategory, MutableFreeWork>();
+
+   captureWatch(watchId: string): WatchEconomicsRecorder {
+      return this.recorder(watchId, this.watch(watchId));
+   }
+
+   captureExistingWatch(watchId: string): WatchEconomicsRecorder | undefined {
+      const metric = this.watches.get(watchId);
+      return metric ? this.recorder(watchId, metric) : undefined;
+   }
+
+   bindWatchRelease(watchId: string): (() => void) | undefined {
+      const metric = this.watches.get(watchId);
+      if (!metric) return;
+      return () => {
+         if (this.watches.get(watchId) === metric) this.watches.delete(watchId);
+      };
+   }
 
    recordIndexerRequest(
       watchId: string,
@@ -309,6 +439,33 @@ export class RoundWatchEconomicsMetrics {
             this.snapshotFreeWork(category),
          ]),
       ) as Record<FreeRequestCategory, FreeWorkSnapshot>;
+   }
+
+   private recorder(
+      watchId: string,
+      metric: MutableWatchWork,
+   ): WatchEconomicsRecorder {
+      // Identity, rather than ID alone, fences every late observation. These
+      // closures belong to outstanding work; the accumulator retains no handle
+      // or tombstone after finishWatch deletes the entry.
+      const record = <Args extends unknown[]>(operation: (...args: Args) => void) =>
+         (...args: Args): void => {
+            if (this.watches.get(watchId) === metric) operation(...args);
+         };
+
+      return {
+         recordIndexerRequest: record((purpose, observation) =>
+            this.recordIndexerRequest(watchId, purpose, observation)),
+         recordScanPage: record(observation => this.recordScanPage(watchId, observation)),
+         recordCoverage: record(rounds => this.recordCoverage(watchId, rounds)),
+         recordReconciliationAttempt: record(() => this.recordReconciliationAttempt(watchId)),
+         recordClosingRequest: record(() => this.recordClosingRequest(watchId)),
+         recordWorkUnit: record(() => this.recordWorkUnit(watchId)),
+         recordLifecycle: record(observation => this.recordLifecycle(watchId, observation)),
+         finishWatch: () => this.watches.get(watchId) === metric
+            ? this.finishWatch(watchId)
+            : undefined,
+      };
    }
 
    private watch(watchId: string): MutableWatchWork {

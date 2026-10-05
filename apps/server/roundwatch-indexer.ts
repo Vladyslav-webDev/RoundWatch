@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { IndexedAssetTransfer } from './roundwatch-reconciler.js';
 import type { WatchRecord } from './roundwatch-store.js';
-import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import {
+   warnWatchMetricFailure,
+   type RoundWatchEconomicsMetrics,
+   type WatchEconomicsRecorder,
+} from './roundwatch-metrics.js';
 import {
    IndexerRequestDispatcher,
    type IndexerDispatchObservation,
@@ -148,13 +152,19 @@ export interface RoundWatchIndexer {
    getCurrentRound(
       purpose?: IndexerRequestPurpose,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<number>;
    lookupAssetTransfer(
       transactionId: string,
       purpose?: IndexerRequestPurpose,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<IndexedAssetTransfer | undefined>;
-   getBlock(round: number, watchId?: string): Promise<IndexedBlock>;
+   getBlock(
+      round: number,
+      watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
+   ): Promise<IndexedBlock>;
    watchPageQueryKey?(
       watch: WatchRecord,
       minRound: number,
@@ -166,11 +176,13 @@ export interface RoundWatchIndexer {
       minRound: number,
       maxRound: number,
       nextToken?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<TransactionPage>;
    searchTransactionPage(
       transactionId: string,
       nextToken?: string,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<TransactionIdPage>;
 }
 
@@ -209,6 +221,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
    async getCurrentRound(
       purpose: IndexerRequestPurpose = 'health',
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<number> {
       return (await this.request(
          purpose,
@@ -216,6 +229,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          body => safeRound(field(body, 'round'), 'health round'),
          false,
          watchId,
+         watchMetrics,
       ))!;
    }
 
@@ -223,6 +237,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       transactionId: string,
       purpose: IndexerRequestPurpose = 'reconciliation',
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<IndexedAssetTransfer | undefined> {
       parseCanonicalAlgorandTransactionId(transactionId, 'requested transaction ID');
       return this.request(
@@ -240,10 +255,15 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          },
          true,
          watchId,
+         watchMetrics,
       );
    }
 
-   async getBlock(round: number, watchId?: string): Promise<IndexedBlock> {
+   async getBlock(
+      round: number,
+      watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
+   ): Promise<IndexedBlock> {
       const expected = safeRound(round, 'requested block round');
       return (await this.request(
          'checkpoint',
@@ -260,6 +280,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          },
          false,
          watchId,
+         watchMetrics,
       ))!;
    }
 
@@ -282,8 +303,11 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       minRound: number,
       maxRound: number,
       nextToken?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<TransactionPage> {
-      return this.searchWatchPageFor(watch, minRound, maxRound, nextToken, watch.id);
+      return this.searchWatchPageFor(
+         watch, minRound, maxRound, nextToken, watch.id, watchMetrics,
+      );
    }
 
    private async searchWatchPageFor(
@@ -292,6 +316,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       maxRound: number,
       nextToken?: string,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<TransactionPage> {
       const plan = buildScanQueryPlan(watch, this.scanQueryVariant);
       const url = this.buildWatchSearchUrl(
@@ -332,6 +357,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          }),
          false,
          watchId,
+         watchMetrics,
       ))!;
    }
 
@@ -426,6 +452,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       transactionId: string,
       nextToken?: string,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<TransactionIdPage> {
       parseCanonicalAlgorandTransactionId(transactionId, 'requested transaction ID');
       const url = new URL('/v2/transactions', this.baseUrl);
@@ -451,6 +478,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          }),
          false,
          watchId,
+         watchMetrics,
       ))!;
    }
 
@@ -460,6 +488,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       parse: (body: unknown) => T,
       allowNotFound = false,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<T | undefined> {
       return this.requestUrl(
          purpose,
@@ -467,6 +496,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          parse,
          allowNotFound,
          watchId,
+         watchMetrics,
       );
    }
 
@@ -476,9 +506,20 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       parse: (body: unknown) => T,
       allowNotFound = false,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<T | undefined> {
-      let dispatchObservation: IndexerDispatchObservation | undefined;
+      // Bind before dispatch, including time spent queued. A later request in
+      // the same async turn must keep the caller's recorder, even after finish.
+      const metric = this.captureRequestMetric(watchId, watchMetrics);
+      let completionRecorded = false;
       let responseBytes = 0;
+      const recordCompletion = (observation: IndexerDispatchObservation) => {
+         if (completionRecorded) return;
+         // Guard before writing: a partially successful telemetry operation
+         // must not be counted again by a success/error continuation.
+         completionRecorded = true;
+         this.recordRequestMetric(metric, purpose, observation, responseBytes);
+      };
 
       try {
          const result = await this.dispatcher.dispatch(
@@ -544,9 +585,9 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
                      bodyReadFailed: diagnostic.bodyReadFailed,
                   });
 
-                  console.warn(
-                     `RoundWatch Indexer HTTP failure ${JSON.stringify(error.telemetry())}`,
-                  );
+                  try {
+                     console.warn(`RoundWatch Indexer HTTP failure ${JSON.stringify(error.telemetry())}`);
+                  } catch {} // Preserve the provider error even if its diagnostic sink fails.
                   throw error;
                }
 
@@ -578,56 +619,57 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
 
                return parse(body);
             },
-            observation => {
-               dispatchObservation = observation;
-            },
+            recordCompletion,
          );
 
-         this.recordRequestMetric(
-            watchId,
-            purpose,
-            dispatchObservation ?? {
-               outcome: 'success',
-               queueWaitMs: 0,
-               wallTimeMs: 0,
-            },
-            responseBytes,
-         );
          return result;
       } catch (error) {
-         this.recordRequestMetric(
-            watchId,
-            purpose,
-            dispatchObservation ?? {
-               outcome: isTimeoutError(error) ? 'timeout' : 'failure',
-               queueWaitMs: 0,
-               wallTimeMs: 0,
-            },
-            responseBytes,
-         );
+         // Bounded fallback only if dispatch rejected before its observer.
+         recordCompletion({
+            outcome: isTimeoutError(error) ? 'timeout' : 'failure',
+            queueWaitMs: 0,
+            wallTimeMs: 0,
+         });
          throw error;
       }
    }
 
-   private recordRequestMetric(
+   private captureRequestMetric(
       watchId: string | undefined,
+      watchMetrics: WatchEconomicsRecorder | undefined,
+   ): WatchEconomicsRecorder | undefined {
+      if (watchMetrics) return watchMetrics;
+      if (!watchId || !this.economicsMetrics) return;
+
+      try {
+         return this.economicsMetrics.captureWatch(watchId);
+      } catch (error) {
+         warnWatchMetricFailure(
+            'RoundWatch economics Indexer metric failed:',
+            error,
+         );
+      }
+   }
+
+   private recordRequestMetric(
+      metric: WatchEconomicsRecorder | undefined,
       purpose: IndexerRequestPurpose,
       observation: IndexerDispatchObservation,
       responseBytes: number,
    ): void {
-      if (!watchId || !this.economicsMetrics) return;
+      if (!metric) return;
 
       try {
-         this.economicsMetrics.recordIndexerRequest(watchId, purpose, {
+         metric.recordIndexerRequest(purpose, {
             outcome: observation.outcome,
             responseBytes,
             queueWaitMs: observation.queueWaitMs,
             wallTimeMs: observation.wallTimeMs,
          });
       } catch (error) {
-         console.warn(
+         warnWatchMetricFailure(
             'RoundWatch economics Indexer metric failed:',
-            error instanceof Error ? error.message : 'Unknown metrics error',
+            error,
          );
       }
    }

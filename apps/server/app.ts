@@ -31,9 +31,11 @@ import {
 } from './free-payment-gate.js';
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
 import type { PaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
-import type {
-   FreeRequestCategory,
-   RoundWatchEconomicsMetrics,
+import {
+   captureWatchEconomicsTurn,
+   finishWatchEconomicsTurn,
+   type FreeRequestCategory,
+   type RoundWatchEconomicsMetrics,
 } from './roundwatch-metrics.js';
 import {
    TESTNET_NETWORK_CONFIG,
@@ -494,13 +496,19 @@ export function createApp(dependencies: AppDependencies): Hono {
          ...(context.result.payer ? { payer: context.result.payer } : {}),
       };
 
-      store.recordSettlementCandidate(watchId, settlementEvidence);
+      const settlementWatch = store.recordSettlementCandidate(watchId, settlementEvidence);
+
+      const metricTurn = captureWatchEconomicsTurn(
+         economicsMetrics, watchId,
+         settlementWatch.state === 'matched' || settlementWatch.settlementReconciliationTerminal,
+      );
 
       try {
          const transfer = await indexer.lookupAssetTransfer(
             settlementEvidence.transaction,
             'activation',
             watchId,
+            metricTurn?.recorder,
          );
          const watch = store.getWatch(watchId);
          if (!transfer || !watch) return;
@@ -514,7 +522,7 @@ export function createApp(dependencies: AppDependencies): Hono {
             transfer.round <= (watch.serviceLastValid ?? -1);
          if (!matches) {
             store.markSettlementInvalid(watchId);
-            finishTerminalMetric(economicsMetrics, watch, 'settlement_unknown');
+            finishWatchEconomicsTurn(metricTurn, store.getWatch(watchId));
             return;
          }
          store.activateWatch(watchId, settlementEvidence, transfer.round);
@@ -1594,35 +1602,6 @@ async function responseByteLength(response: Response): Promise<number> {
       return (await response.clone().arrayBuffer()).byteLength;
    } catch {
       return 0;
-   }
-}
-
-function finishTerminalMetric(
-   economicsMetrics: RoundWatchEconomicsMetrics | undefined,
-   watch: WatchRecord,
-   finalState: WatchRecord['state'],
-): void {
-   if (!economicsMetrics) return;
-
-   try {
-      const createdAt = Date.parse(watch.createdAt);
-      economicsMetrics.recordLifecycle(watch.id, {
-         finalState,
-         ...(Number.isFinite(createdAt)
-            ? { timeToTerminalMs: Math.max(0, Date.now() - createdAt) }
-            : {}),
-      });
-      const snapshot = economicsMetrics.finishWatch(watch.id);
-      if (snapshot) {
-         console.info(
-            `RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`,
-         );
-      }
-   } catch (error) {
-      console.warn(
-         'RoundWatch economics terminal metric failed:',
-         error instanceof Error ? error.message : 'Unknown metrics error',
-      );
    }
 }
 

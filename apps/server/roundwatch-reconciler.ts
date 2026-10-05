@@ -1,5 +1,12 @@
 import type { TransactionIdPage } from './roundwatch-indexer.js';
-import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
+import {
+   captureWatchEconomicsTurn,
+   finishWatchEconomicsTurn,
+   warnWatchMetricFailure,
+   type RoundWatchEconomicsMetrics,
+   type WatchEconomicsRecorder,
+   type WatchEconomicsTurn,
+} from './roundwatch-metrics.js';
 import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
@@ -27,15 +34,18 @@ export interface SettlementLookupIndexer {
       transactionId: string,
       purpose?: 'activation' | 'reconciliation',
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<IndexedAssetTransfer | undefined>;
    getCurrentRound(
       purpose?: 'reconciliation',
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<number>;
    searchTransactionPage(
       transactionId: string,
       nextToken?: string,
       watchId?: string,
+      watchMetrics?: WatchEconomicsRecorder,
    ): Promise<TransactionIdPage>;
 }
 
@@ -187,7 +197,7 @@ export class SettlementReconciler {
                }
                this.absenceProofSessions.delete(watch.id);
                this.defer(watch);
-               console.error(`RoundWatch settlement reconciliation failed for watch ${watch.id}:`, safeErrorMessage(error));
+               this.recordMetric(() => console.error(`RoundWatch settlement reconciliation failed for watch ${watch.id}:`, safeErrorMessage(error)));
             }
          }
       } finally {
@@ -197,20 +207,33 @@ export class SettlementReconciler {
    }
 
    private async reconcileWatch(watch: WatchRecord): Promise<CustomerTurnOutcome> {
+      // A candidate selected before another turn awaited may already have
+      // been terminally rejected. Check before claiming work, which can itself
+      // terminalize a watch through budget exhaustion.
+      const metricWasTerminal = this.economicsMetrics
+         ? this.store.getWatch(watch.id)?.settlementReconciliationTerminal
+         : false;
+      const captureMetrics = () => captureWatchEconomicsTurn(
+         this.economicsMetrics, watch.id, !!metricWasTerminal,
+      );
       const workClaim = this.store.claimWorkUnit(watch.id);
       if (workClaim === 'exhausted') {
          this.absenceProofSessions.delete(watch.id);
-         this.finishMetric(watch, 'indeterminate');
-         console.warn(
+         this.finishMetric(watch, captureMetrics());
+         this.recordMetric(() => console.warn(
             `RoundWatch work budget exhausted during settlement reconciliation watch=${watch.id}; terminal state=indeterminate`,
-         );
+         ));
          return { kind: 'noOp', providerEvidence: false };
       }
       if (workClaim !== 'claimed') return { kind: 'noOp', providerEvidence: false };
 
+      const metricTurn = captureMetrics();
+      const watchMetrics = metricTurn?.recorder;
+      // An inert recorder explicitly suppresses ID fallback after capture
+      // failure; every continuation retains this turn's original binding.
       this.recordMetric(() => {
-         this.economicsMetrics?.recordWorkUnit(watch.id);
-         this.economicsMetrics?.recordReconciliationAttempt(watch.id);
+         watchMetrics?.recordWorkUnit();
+         watchMetrics?.recordReconciliationAttempt();
       });
 
       const requestBudget = new IndexerRequestTurnBudget(
@@ -234,11 +257,12 @@ export class SettlementReconciler {
                expectedTransaction,
                'reconciliation',
                watch.id,
+               watchMetrics,
             ),
          );
          if (transfer) {
             this.absenceProofSessions.delete(watch.id);
-            this.applyConfirmed(watch, transfer);
+            this.applyConfirmed(watch, transfer, metricTurn);
             return { kind: 'progressed', providerEvidence: true };
          }
 
@@ -246,6 +270,7 @@ export class SettlementReconciler {
             this.indexer.getCurrentRound(
                'reconciliation',
                watch.id,
+               watchMetrics,
             ),
          );
          if (currentRound <= watch.serviceLastValid) {
@@ -264,6 +289,7 @@ export class SettlementReconciler {
             expectedTransaction,
             session.nextToken,
             watch.id,
+            watchMetrics,
          ),
       );
       session.coverage =
@@ -276,7 +302,7 @@ export class SettlementReconciler {
       );
       if (found) {
          this.absenceProofSessions.delete(watch.id);
-         this.applyConfirmed(watch, found);
+         this.applyConfirmed(watch, found, metricTurn);
          return { kind: 'progressed', providerEvidence: true };
       }
 
@@ -307,14 +333,18 @@ export class SettlementReconciler {
       }
 
       this.store.markSettlementInvalid(watch.id);
-      this.finishMetric(watch, 'settlement_unknown');
-      console.error(
+      this.finishMetric(watch, metricTurn);
+      this.recordMetric(() => console.error(
          `RoundWatch service transaction remained absent after LastValid for watch ${watch.id}`,
-      );
+      ));
       return { kind: 'progressed', providerEvidence: true };
    }
 
-   private applyConfirmed(watch: WatchRecord, transfer: IndexedAssetTransfer): void {
+   private applyConfirmed(
+      watch: WatchRecord,
+      transfer: IndexedAssetTransfer,
+      metricTurn: WatchEconomicsTurn | undefined,
+   ): void {
       this.absenceProofSessions.delete(watch.id);
       const matches =
          transfer.transaction === watch.expectedServiceTransaction &&
@@ -327,8 +357,8 @@ export class SettlementReconciler {
          transfer.round <= watch.serviceLastValid!;
       if (!matches) {
          this.store.markSettlementInvalid(watch.id);
-         this.finishMetric(watch, 'settlement_unknown');
-         console.error(`RoundWatch confirmed service transaction mismatched immutable terms for watch ${watch.id}`);
+         this.finishMetric(watch, metricTurn);
+         this.recordMetric(() => console.error(`RoundWatch confirmed service transaction mismatched immutable terms for watch ${watch.id}`));
          return;
       }
       this.store.activateWatch(watch.id, {
@@ -336,7 +366,7 @@ export class SettlementReconciler {
          network: this.config.network,
          payer: transfer.sender,
       }, transfer.round);
-      console.log(`RoundWatch reconciled watch ${watch.id} at service round ${transfer.round}`);
+      this.recordMetric(() => console.log(`RoundWatch reconciled watch ${watch.id} at service round ${transfer.round}`));
    }
 
    private defer(watch: WatchRecord): void {
@@ -347,31 +377,20 @@ export class SettlementReconciler {
 
    private finishMetric(
       watch: WatchRecord,
-      finalState: WatchRecord['state'],
+      metricTurn: WatchEconomicsTurn | undefined,
    ): void {
-      if (!this.economicsMetrics) return;
-
-      const createdAt = Date.parse(watch.createdAt);
-      this.recordMetric(() => this.economicsMetrics?.recordLifecycle(watch.id, {
-         finalState,
-         ...(Number.isFinite(createdAt)
-            ? { timeToTerminalMs: Math.max(0, this.now().getTime() - createdAt) }
-            : {}),
-      }));
-
-      const snapshot = this.economicsMetrics.finishWatch(watch.id);
-      if (snapshot) {
-         console.info(`RoundWatch economics watch-terminal ${JSON.stringify(snapshot)}`);
-      }
+      if (!metricTurn) return;
+      const persisted = this.recordMetric(() => this.store.getWatch(watch.id));
+      finishWatchEconomicsTurn(metricTurn, persisted, () => this.now().getTime());
    }
 
-   private recordMetric(operation: () => void): void {
+   private recordMetric<T>(operation: () => T): T | undefined {
       try {
-         operation();
+         return operation();
       } catch (error) {
-         console.warn(
+         warnWatchMetricFailure(
             'RoundWatch economics reconciliation metric failed:',
-            error instanceof Error ? error.message : 'Unknown metrics error',
+            error,
          );
       }
    }
