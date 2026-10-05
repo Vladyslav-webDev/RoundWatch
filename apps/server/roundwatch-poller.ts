@@ -39,12 +39,21 @@ export const MAX_POLL_FAILURE_BACKOFF_MILLISECONDS = 5 * 60_000;
 export const MAX_POLL_RETRY_AFTER_MILLISECONDS = 60 * 60_000;
 
 export interface PollerCapacitySnapshot {
+   lastCycleCompletedAt?: string;
    lastCycleDurationMs?: number;
    watchesAttemptedLastCycle: number;
    watchesSucceededLastCycle: number;
    watchesFailedLastCycle: number;
    currentIndexerRound?: number;
    currentIndexerRoundObservedAt?: string;
+}
+
+interface CompletedPollCycle {
+   readonly lastCycleCompletedAt: string;
+   readonly lastCycleDurationMs: number;
+   readonly watchesAttemptedLastCycle: number;
+   readonly watchesSucceededLastCycle: number;
+   readonly watchesFailedLastCycle: number;
 }
 
 interface ScanSession {
@@ -70,10 +79,7 @@ export class RoundWatchPoller {
    private historicalPageCacheBytes = 0;
    private readonly workerHealth = new WorkerHealthTracker();
    private lastObservedProbeRevision = 0;
-   private lastCycleDurationMs?: number;
-   private watchesAttemptedLastCycle = 0;
-   private watchesSucceededLastCycle = 0;
-   private watchesFailedLastCycle = 0;
+   private latestCompletedCycle?: CompletedPollCycle;
    private lastObservedIndexerRound?: number;
    private lastObservedIndexerRoundAt?: string;
 
@@ -145,13 +151,17 @@ export class RoundWatchPoller {
    }
 
    capacitySnapshot(): PollerCapacitySnapshot {
+      const cycle = this.latestCompletedCycle;
       return {
-         ...(this.lastCycleDurationMs === undefined
+         ...(cycle === undefined
             ? {}
-            : { lastCycleDurationMs: this.lastCycleDurationMs }),
-         watchesAttemptedLastCycle: this.watchesAttemptedLastCycle,
-         watchesSucceededLastCycle: this.watchesSucceededLastCycle,
-         watchesFailedLastCycle: this.watchesFailedLastCycle,
+            : {
+                 lastCycleCompletedAt: cycle.lastCycleCompletedAt,
+                 lastCycleDurationMs: cycle.lastCycleDurationMs,
+              }),
+         watchesAttemptedLastCycle: cycle?.watchesAttemptedLastCycle ?? 0,
+         watchesSucceededLastCycle: cycle?.watchesSucceededLastCycle ?? 0,
+         watchesFailedLastCycle: cycle?.watchesFailedLastCycle ?? 0,
          ...(this.lastObservedIndexerRound === undefined
             ? {}
             : { currentIndexerRound: this.lastObservedIndexerRound }),
@@ -306,13 +316,31 @@ export class RoundWatchPoller {
       outcome: WorkerCycleOutcome,
       cycleStartedAt: number,
    ): WorkerCycleOutcome {
-      this.lastCycleDurationMs = Math.max(
-         0,
-         performance.now() - cycleStartedAt,
-      );
-      this.watchesAttemptedLastCycle = outcome.attempted;
-      this.watchesSucceededLastCycle = outcome.succeeded;
-      this.watchesFailedLastCycle = outcome.failed;
+      try {
+         const cycleFinishedAt = performance.now();
+         if (!Number.isFinite(cycleStartedAt) || !Number.isFinite(cycleFinishedAt)) return outcome;
+         const durationMs = Math.max(0, cycleFinishedAt - cycleStartedAt);
+         // Native conversion validates the Date range and produces ISO UTC.
+         // Capture only here, before tick's subsequent capability-probe work.
+         const completedAt = Date.prototype.toISOString.call(this.now());
+         if (
+            !Number.isFinite(durationMs) ||
+            ![outcome.attempted, outcome.succeeded, outcome.failed].every(
+               value => Number.isSafeInteger(value) && value >= 0,
+            )
+         ) return outcome;
+
+         this.latestCompletedCycle = Object.freeze({
+            lastCycleCompletedAt: completedAt,
+            lastCycleDurationMs: durationMs,
+            watchesAttemptedLastCycle: outcome.attempted,
+            watchesSucceededLastCycle: outcome.succeeded,
+            watchesFailedLastCycle: outcome.failed,
+         });
+      } catch {
+         // Passive telemetry failure must not enter operational failure handling.
+         // Keep the preceding complete record; no logging, callbacks, or retries.
+      }
       return outcome;
    }
 

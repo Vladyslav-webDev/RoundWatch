@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { performance } from 'node:perf_hooks';
 
 import {
    createObservatoryRuntimeSnapshotBuilder,
@@ -8,10 +9,11 @@ import {
    type ObservatoryRuntimeSources,
 } from './roundwatch-observatory-runtime.js';
 import type { Observation } from './roundwatch-observatory-types.js';
-import { RoundWatchPoller } from './roundwatch-poller.js';
+import { RoundWatchPoller, type PollerCapacitySnapshot } from './roundwatch-poller.js';
+import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { IndexerRequestDispatcher, type IndexerDispatcherSnapshot } from './roundwatch-scheduler.js';
-import type { RoundWatchStore } from './roundwatch-store.js';
+import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import type { RoundWatchIndexer } from './roundwatch-indexer.js';
 import { WorkerHealthTracker, type WorkerHealthSnapshot } from './roundwatch-worker-health.js';
 
@@ -55,6 +57,7 @@ function sources(overrides: Partial<ObservatoryRuntimeSources> = {}): Observator
       reconcilerHealthSnapshot: worker,
       dispatcherSnapshot: dispatcher,
       cachedIndexerTip: () => ({}),
+      pollCycleSnapshot: undefined,
       ...overrides,
    };
 }
@@ -463,6 +466,7 @@ test('repeated reads through real worker/dispatcher getters perform no operation
       reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
       dispatcherSnapshot: () => realDispatcher.snapshot(),
       cachedIndexerTip: () => poller.capacitySnapshot(),
+      pollCycleSnapshot: () => poller.capacitySnapshot(),
    });
    // These capabilities cannot enter the builder, even if offered by wiring.
    const guardedSources = new Proxy(safeSources, {
@@ -478,11 +482,388 @@ test('repeated reads through real worker/dispatcher getters perform no operation
       assert.equal(snapshot.workers.poller.availability, 'available');
       assert.equal(snapshot.workers.reconciler.availability, 'available');
       assert.equal(snapshot.indexer.dispatcher.availability, 'available');
+      assertEmpty(snapshot.pollCycle, 'not_yet_sampled');
    }
    assert.deepEqual([poller.healthSnapshot(), reconciler.healthSnapshot(), poller.capacitySnapshot(), realDispatcher.snapshot()], before);
    assert.equal(dispatcherClockReads, 1); // no token refill or dispatcher clock mutation
    assert.equal(unsafeCalls, 0);
    for (const spy of [runOnce, reconcileOnce, pollerReadiness, reconcilerReadiness, dispatch, log, warn, error, info, debug, fetch]) {
       assert.equal(spy.mock.callCount(), 0);
+   }
+});
+
+function cycleBuilder(poller: RoundWatchPoller, observationClocks = clocks) {
+   return createObservatoryRuntimeSnapshotBuilder(sources({
+      pollerHealthSnapshot: () => poller.healthSnapshot(),
+      cachedIndexerTip: () => poller.capacitySnapshot(),
+      pollCycleSnapshot: () => poller.capacitySnapshot(),
+   }), observationClocks);
+}
+
+function emptyPoller(now: () => Date = () => new Date(WALL_MS), probe?: IndexerHealthProbe) {
+   const store = { listPollingCandidates: () => [] } as unknown as RoundWatchStore;
+   const indexer = new Proxy({} as RoundWatchIndexer, {
+      get() { assert.fail('Empty cycle must not access the provider'); },
+   });
+   return new RoundWatchPoller(store, indexer, 60_000, 100, now,
+      undefined, undefined, undefined, probe);
+}
+
+async function flushUntil(condition: () => boolean): Promise<void> {
+   for (let i = 0; i < 100; i += 1) {
+      if (condition()) return;
+      await new Promise<void>(resolve => setImmediate(resolve));
+   }
+   assert.fail('Worker did not reach expected cycle boundary');
+}
+
+test('wired cycle starts not yet sampled; a completed empty cycle is a real observation and resets with a new poller', async () => {
+   const poller = emptyPoller();
+   const build = cycleBuilder(poller);
+   assertEmpty(build().pollCycle, 'not_yet_sampled');
+   assert.deepEqual(poller.capacitySnapshot(), {
+      watchesAttemptedLastCycle: 0, watchesSucceededLastCycle: 0, watchesFailedLastCycle: 0,
+   });
+   const healthBefore = poller.healthSnapshot();
+   assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+   const completed = build().pollCycle;
+   assert.equal(completed.availability, 'available');
+   assert.equal(completed.observedAt, WALL_ISO);
+   assert.equal(completed.lastCollectionFailureAt, null);
+   assert.deepEqual(completed.data, {
+      durationMs: poller.capacitySnapshot().lastCycleDurationMs,
+      attempted: 0, progressed: 0, failed: 0,
+   });
+   assert.deepEqual(poller.healthSnapshot(), healthBefore, 'runOnce does not manage scheduled worker health');
+   assertEmpty(cycleBuilder(emptyPoller())().pollCycle, 'not_yet_sampled');
+});
+
+test('non-empty completion publishes one coherent cycle: progressed cursor advance, failure, no-op and evidence-only', async t => {
+   t.mock.method(console, 'log', () => {});
+   t.mock.method(console, 'warn', () => {});
+   t.mock.method(console, 'error', () => {});
+   let wall = WALL_MS;
+   let monotonic = 100;
+   t.mock.method(performance, 'now', () => monotonic);
+   const watches = ['progress', 'failure', 'no-op', 'evidence-only'].map(id => ({
+      id, evidenceVersion: 1, scanAfterRound: 100,
+      expiresAt: new Date(WALL_MS + 60_000).toISOString(),
+   } as WatchRecord));
+   const store = {
+      listPollingCandidates: () => watches,
+      claimWorkUnit: (id: string) => id === 'no-op' ? 'inactive' : 'claimed',
+      clearPollingFailure: () => {},
+      advanceScanRound: () => true,
+      getWatch: (id: string) => watches.find(watch => watch.id === id),
+      recordPollingFailure: () => undefined,
+      markMatched: () => assert.fail('Cursor progress is not a match'),
+   } as unknown as RoundWatchStore;
+   let release!: () => void;
+   const held = new Promise<void>(resolve => { release = resolve; });
+   let entered = false;
+   const indexer = {
+      async getCurrentRound() { return 101; },
+      async searchWatchPage(watch: WatchRecord) {
+         if (watch.id === 'progress') {
+            entered = true;
+            await held;
+         }
+         if (watch.id === 'failure') throw new Error('Provider failure');
+         return { currentRound: 101, transactions: [],
+            ...(watch.id === 'evidence-only' ? { nextToken: 'next' } : {}) };
+      },
+   } as unknown as RoundWatchIndexer;
+   const poller = new RoundWatchPoller(store, indexer, 60_000, 100, () => new Date(wall));
+   const build = cycleBuilder(poller);
+   const pending = poller.runOnce();
+   await flushUntil(() => entered);
+   assertEmpty(build().pollCycle, 'not_yet_sampled');
+   wall += 5_000;
+   monotonic = 112.5;
+   release();
+   const outcome = await pending;
+   assert.deepEqual(outcome, {
+      attempted: 4, succeeded: 1, failed: 1, noOp: 1, providerEvidenceOnly: 1, providerEvidence: 2,
+   });
+   assert.deepEqual(build().pollCycle, {
+      availability: 'available', observedAt: new Date(wall).toISOString(),
+      lastCollectionFailureAt: null,
+      data: { durationMs: 12.5, attempted: 4, progressed: 1, failed: 1 },
+   });
+   const retained = poller.capacitySnapshot();
+   retained.lastCycleCompletedAt = 'mutated';
+   retained.watchesSucceededLastCycle = 99;
+   assert.equal(build().pollCycle.data!.progressed, 1);
+   assert.equal(build().pollCycle.observedAt, new Date(wall).toISOString());
+   assert.equal(poller.healthSnapshot().providerHealth, 'unhealthy', 'caught systemic turn failure still marks provider health');
+});
+
+test('completion is published before a held capability probe; probe duration and worker completion cannot redate it', async t => {
+   let wall = WALL_MS;
+   let monotonic = 100;
+   let performanceReads = 0;
+   t.mock.method(performance, 'now', () => {
+      performanceReads += 1;
+      return performanceReads === 1 ? 100 : monotonic;
+   });
+   // Enumeration is part of the cycle duration, unlike the subsequent probe.
+   const store = { listPollingCandidates: () => { wall += 500; monotonic = 112.5; return []; } } as unknown as RoundWatchStore;
+   let release!: (evidence: IndexerCapabilityEvidence) => void;
+   let probeEntered = false;
+   const probe = new IndexerHealthProbe({ probeReadinessCapabilities() {
+      probeEntered = true;
+      return new Promise(resolve => { release = resolve; });
+   } }, 10458941, () => 100);
+   const poller = new RoundWatchPoller(store, {} as RoundWatchIndexer, 60_000, 100,
+      () => new Date(wall), undefined, undefined, undefined, probe);
+   const build = cycleBuilder(poller);
+   poller.start();
+   try {
+      await flushUntil(() => probeEntered);
+      const completed = build().pollCycle;
+      assert.deepEqual(completed, {
+         availability: 'available', observedAt: new Date(WALL_MS + 500).toISOString(),
+         lastCollectionFailureAt: null,
+         data: { durationMs: 12.5, attempted: 0, progressed: 0, failed: 0 },
+      });
+      assert.equal(poller.healthSnapshot().running, true);
+      assert.equal(poller.healthSnapshot().providerHealth, 'unknown');
+      assert.equal(poller.readinessCheck(), false);
+      wall += 30_000;
+      monotonic += 30_000;
+      release({ polling: true, reconciliation: true });
+      await flushUntil(() => !poller.healthSnapshot().running);
+      assert.deepEqual(build().pollCycle, completed);
+      assert.equal(poller.healthSnapshot().providerHealth, 'healthy');
+      assert.equal(poller.readinessCheck(), true);
+      assert.equal(performanceReads, 2, 'duration clock is used only at runOnce start and finish');
+   } finally {
+      release?.({ polling: true, reconciliation: true });
+      poller.stop();
+   }
+});
+
+test('later outer candidate-read failure preserves completion while scheduled worker failure semantics remain intact', async t => {
+   let failCandidates = false;
+   const store = { listPollingCandidates() {
+      if (failCandidates) throw new Error('Candidate read failed');
+      return [];
+   } } as unknown as RoundWatchStore;
+   const poller = new RoundWatchPoller(store, {} as RoundWatchIndexer, 60_000, 100, () => new Date(WALL_MS));
+   const build = cycleBuilder(poller);
+   await poller.runOnce();
+   const completed = build().pollCycle;
+   const retained = poller.capacitySnapshot();
+   // Candidate acquisition is an outer failure, before the normal finish boundary.
+   failCandidates = true;
+   await assert.rejects(poller.runOnce(), /Candidate read failed/);
+   const error = t.mock.method(console, 'error', () => {});
+   poller.start();
+   try {
+      await flushUntil(() => !poller.healthSnapshot().running);
+      assert.deepEqual(poller.capacitySnapshot(), retained);
+      assert.deepEqual(build().pollCycle, completed);
+      assert.equal(poller.healthSnapshot().providerHealth, 'unhealthy');
+      assert.equal(poller.healthSnapshot().consecutiveFailures, 1);
+      assert.equal(poller.readinessCheck(), false);
+      assert.equal(error.mock.callCount(), 1);
+   } finally { poller.stop(); }
+});
+
+test('invalid or throwing completion clocks preserve the prior complete record without worker/probe/log failure', async t => {
+   let invalid = false;
+   const logs = (['log', 'warn', 'error', 'info', 'debug'] as const).map(
+      method => t.mock.method(console, method, () => assert.fail('Telemetry failure logged')),
+   );
+   for (const badClock of [() => new Date(NaN), () => { throw new Error('Completion clock failed'); }]) {
+      invalid = false;
+      const probe = new IndexerHealthProbe({ async probeReadinessCapabilities() {
+         return { polling: true, reconciliation: true };
+      } }, 10458941, () => 100);
+      const poller = emptyPoller(() => invalid ? badClock() : new Date(WALL_MS), probe);
+      await poller.runOnce();
+      const completed = cycleBuilder(poller)().pollCycle;
+      invalid = true;
+      const invalidate = t.mock.method(probe, 'invalidateForProviderFailure', () => assert.fail('Telemetry invalidated evidence'));
+      poller.start();
+      try {
+         await flushUntil(() => !poller.healthSnapshot().running);
+         assert.deepEqual(cycleBuilder(poller)().pollCycle, completed);
+         assert.equal(poller.healthSnapshot().consecutiveFailures, 0);
+         assert.equal(poller.healthSnapshot().providerHealth, 'healthy');
+         assert.equal(poller.readinessCheck(), true);
+         assert.equal(invalidate.mock.callCount(), 0);
+      } finally { poller.stop(); }
+      const fresh = emptyPoller(badClock);
+      assert.deepEqual(await fresh.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+      assertEmpty(cycleBuilder(fresh)().pollCycle, 'not_yet_sampled');
+   }
+   for (const log of logs) assert.equal(log.mock.callCount(), 0);
+});
+
+for (const [label, start, end] of [
+   ['start Infinity', Infinity, 212.5],
+   ['end -Infinity', 200, -Infinity],
+] as const) {
+   test(`nonfinite monotonic ${label} preserves completion and operational outcomes`, async t => {
+      const forbidden = () => assert.fail('Invalid duration caused an operational side effect');
+      const logs = (['log', 'warn', 'error', 'info', 'debug'] as const).map(
+         method => t.mock.method(console, method, forbidden),
+      );
+      const readings = [100, 112.5, start, end, start, end, 300, 310];
+      const monotonic = t.mock.method(performance, 'now', () => {
+         assert.ok(readings.length > 0, 'Unexpected extra duration clock read');
+         return readings.shift()!;
+      });
+      let wall = WALL_MS;
+      const probeSource = t.mock.fn(async () => ({ polling: true, reconciliation: true }));
+      const probe = new IndexerHealthProbe({ probeReadinessCapabilities: probeSource }, 10458941, () => 100);
+      const invalidate = t.mock.method(probe, 'invalidateForProviderFailure', forbidden);
+      const poller = emptyPoller(() => new Date(wall), probe);
+      const build = cycleBuilder(poller);
+      const outcome = { attempted: 0, succeeded: 0, failed: 0 };
+
+      assert.deepEqual(await poller.runOnce(), outcome);
+      const completed = build().pollCycle;
+      const retained = poller.capacitySnapshot();
+      const health = poller.healthSnapshot();
+      assert.equal(completed.data!.durationMs, 12.5);
+      wall += 1_000;
+
+      assert.deepEqual(await poller.runOnce(), outcome);
+      assert.deepEqual(poller.capacitySnapshot(), retained);
+      assert.deepEqual(build().pollCycle, completed);
+      assert.deepEqual(poller.healthSnapshot(), health);
+      assert.equal(probeSource.mock.callCount(), 0);
+
+      poller.start();
+      try {
+         await flushUntil(() => !poller.healthSnapshot().running);
+         assert.deepEqual(poller.capacitySnapshot(), retained);
+         assert.deepEqual(build().pollCycle, completed);
+         assert.equal(poller.healthSnapshot().consecutiveFailures, 0);
+         assert.equal(poller.healthSnapshot().providerHealth, 'healthy');
+         assert.equal(poller.readinessCheck(), true);
+         assert.equal(probeSource.mock.callCount(), 1, 'Only the ordinary scheduled probe runs');
+         assert.equal(invalidate.mock.callCount(), 0);
+
+         wall += 1_000;
+         assert.deepEqual(await poller.runOnce(), outcome);
+         assert.equal(build().pollCycle.observedAt, new Date(wall).toISOString());
+         assert.equal(build().pollCycle.data!.durationMs, 10);
+         assert.equal(monotonic.mock.callCount(), 8);
+         assert.equal(readings.length, 0);
+      } finally { poller.stop(); }
+      for (const log of logs) assert.equal(log.mock.callCount(), 0);
+   });
+}
+
+test('finite backward duration still clamps to zero and ordinary completion publishes normally', async t => {
+   const logs = (['log', 'warn', 'error', 'info', 'debug'] as const).map(
+      method => t.mock.method(console, method, () => assert.fail('Duration telemetry logged')),
+   );
+   const readings = [100, 112.5, 200, 190, 300, 325];
+   const monotonic = t.mock.method(performance, 'now', () => {
+      assert.ok(readings.length > 0, 'Unexpected extra duration clock read');
+      return readings.shift()!;
+   });
+   let wall = WALL_MS;
+   const poller = emptyPoller(() => new Date(wall));
+   const build = cycleBuilder(poller);
+   const health = poller.healthSnapshot();
+   for (const durationMs of [12.5, 0, 25]) {
+      assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+      assert.deepEqual(build().pollCycle, {
+         availability: 'available', observedAt: new Date(wall).toISOString(),
+         lastCollectionFailureAt: null,
+         data: { durationMs, attempted: 0, progressed: 0, failed: 0 },
+      });
+      assert.deepEqual(poller.healthSnapshot(), health);
+      wall += 1_000;
+   }
+   assert.equal(monotonic.mock.callCount(), 6);
+   assert.equal(readings.length, 0);
+   for (const log of logs) assert.equal(log.mock.callCount(), 0);
+});
+
+test('repeated later snapshot reads keep completion provenance without operational or sampler work', async t => {
+   const forbidden = () => assert.fail('Snapshot read performed operational work');
+   const store = {
+      listPollingCandidates: () => [], capacitySnapshot: forbidden, readinessCheck: forbidden,
+   } as unknown as RoundWatchStore;
+   const poller = new RoundWatchPoller(store, new Proxy({} as RoundWatchIndexer, { get: forbidden }),
+      60_000, 100, () => new Date(WALL_MS));
+   await poller.runOnce();
+   const candidates = t.mock.method(store, 'listPollingCandidates', forbidden);
+   const run = t.mock.method(poller, 'runOnce', forbidden);
+   const readiness = t.mock.method(poller, 'readinessCheck', forbidden);
+   const sampler = { sample: t.mock.fn(forbidden) };
+   const publicReadiness = t.mock.fn(forbidden);
+   const logs = (['log', 'warn', 'error', 'info', 'debug'] as const).map(
+      method => t.mock.method(console, method, forbidden),
+   );
+   let readWall = WALL_MS + 60_000;
+   const build = createObservatoryRuntimeSnapshotBuilder(Object.assign(sources({
+      pollerHealthSnapshot: () => poller.healthSnapshot(),
+      cachedIndexerTip: () => poller.capacitySnapshot(),
+      pollCycleSnapshot: () => poller.capacitySnapshot(),
+   }), { sampler, currentReadinessSnapshot: publicReadiness }),
+   { ...clocks, epochMilliseconds: () => readWall });
+   const first = build();
+   first.pollCycle.data!.attempted = 99;
+   const health = poller.healthSnapshot();
+   const retained = poller.capacitySnapshot();
+   for (let i = 0; i < 30; i += 1) {
+      readWall += 1_000;
+      const snapshot = build();
+      assert.equal(snapshot.observedAt, new Date(readWall).toISOString());
+      assert.equal(snapshot.pollCycle.observedAt, WALL_ISO);
+      assert.equal(snapshot.pollCycle.data!.attempted, 0);
+   }
+   assert.deepEqual(poller.capacitySnapshot(), retained);
+   assert.deepEqual(poller.healthSnapshot(), health);
+   for (const spy of [candidates, run, readiness, sampler.sample, publicReadiness, ...logs]) {
+      assert.equal(spy.mock.callCount(), 0);
+   }
+});
+
+test('malformed or partial completed-cycle provenance and getter failures never serialize as available', () => {
+   const valid: PollerCapacitySnapshot = {
+      lastCycleCompletedAt: WALL_ISO, lastCycleDurationMs: 12.5,
+      watchesAttemptedLastCycle: 4, watchesSucceededLastCycle: 1, watchesFailedLastCycle: 1,
+   };
+   const invalid: Partial<PollerCapacitySnapshot>[] = [
+      ...[undefined, null, '', 'bad', '2026-02-30T12:00:00Z', '2026-10-05T24:00:00Z',
+         '2026-10-05T12:00:00', '2026-10-05T12:00:00+02:00', 123].map(
+         lastCycleCompletedAt => ({ lastCycleCompletedAt } as Partial<PollerCapacitySnapshot>)),
+      ...[undefined, null, -1, NaN, Infinity, '1'].map(
+         lastCycleDurationMs => ({ lastCycleDurationMs } as Partial<PollerCapacitySnapshot>)),
+      ...['watchesAttemptedLastCycle', 'watchesSucceededLastCycle', 'watchesFailedLastCycle'].flatMap(
+         field => [undefined, null, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1'].map(value => ({ [field]: value }))),
+   ];
+   for (const fields of invalid) {
+      const candidate = { ...valid, ...fields };
+      const before = structuredClone(candidate);
+      const snapshot = createObservatoryRuntimeSnapshotBuilder(sources({ pollCycleSnapshot: () => candidate }), clocks)();
+      assertEmpty(JSON.parse(JSON.stringify(snapshot)).pollCycle, 'unavailable');
+      assert.deepEqual(candidate, before);
+      assert.equal(snapshot.workers.poller.availability, 'available');
+   }
+   const startup = { watchesAttemptedLastCycle: 0, watchesSucceededLastCycle: 0, watchesFailedLastCycle: 0 };
+   for (const candidate of [null, {}, { ...startup, lastCycleDurationMs: 0 },
+      { ...startup, lastCycleCompletedAt: WALL_ISO }, { ...startup, watchesAttemptedLastCycle: 1 }]) {
+      assertEmpty(createObservatoryRuntimeSnapshotBuilder(sources({
+         pollCycleSnapshot: () => candidate as PollerCapacitySnapshot,
+      }), clocks)().pollCycle, 'unavailable');
+   }
+   for (const getter of [
+      () => { throw new Error('private cycle error'); },
+      () => Object.defineProperty({ ...valid }, 'lastCycleCompletedAt', {
+         get() { throw new Error('private provenance error'); },
+      }),
+   ]) {
+      const snapshot = createObservatoryRuntimeSnapshotBuilder(sources({ pollCycleSnapshot: getter }), clocks)();
+      assertEmpty(snapshot.pollCycle, 'unavailable');
+      assert.equal(JSON.stringify(snapshot).includes('private'), false);
    }
 });
