@@ -26,6 +26,7 @@ import {
    RoundWatchRuntimeSampler,
 } from './roundwatch-runtime-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
+import { createObservatoryRuntimeSnapshotBuilder } from './roundwatch-observatory-runtime.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
 import {
@@ -336,6 +337,17 @@ const reconciler = new SettlementReconciler(
    economicsMetrics,
    healthProbe,
 );
+// Boot-scoped core only; no route, sampling, or readiness work is wired here.
+export const observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
+   network: networkConfig.name,
+   assetId: networkConfig.usdcAssetId,
+   economicsMetricsEnabled: economicsInstrumentationEnabled,
+   pollerHealthSnapshot: () => poller.healthSnapshot(),
+   reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
+   dispatcherSnapshot: () => dispatcher.snapshot(),
+   cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
+});
+
 const currentReadinessSnapshot = () => {
    const storage = store.readinessCheck();
    const pollerHealth = poller.healthSnapshot();
