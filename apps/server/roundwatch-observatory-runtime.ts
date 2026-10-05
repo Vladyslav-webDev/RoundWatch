@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
 import type { IndexerDispatcherSnapshot } from './roundwatch-scheduler.js';
+import type { PollerCapacitySnapshot } from './roundwatch-poller.js';
 import type { WorkerHealthSnapshot } from './roundwatch-worker-health.js';
 import type {
    DispatcherObservationV01,
    IsoUtc,
    Observation,
    ObservatoryRuntimeV01,
+   PollCycleObservationV01,
    WorkerObservationV01,
 } from './roundwatch-observatory-types.js';
 
@@ -25,6 +27,7 @@ export interface ObservatoryRuntimeSources {
    reconcilerHealthSnapshot: () => WorkerHealthSnapshot;
    dispatcherSnapshot: () => IndexerDispatcherSnapshot;
    cachedIndexerTip: () => CachedIndexerTip;
+   pollCycleSnapshot?: () => PollerCapacitySnapshot;
 }
 
 export interface ObservatoryClocks {
@@ -48,7 +51,7 @@ export function createObservatoryRuntimeSnapshotBuilder(
    const {
       network, assetId, economicsMetricsEnabled,
       pollerHealthSnapshot, reconcilerHealthSnapshot,
-      dispatcherSnapshot, cachedIndexerTip,
+      dispatcherSnapshot, cachedIndexerTip, pollCycleSnapshot,
    } = sources;
    const { epochMilliseconds, processMonotonicMilliseconds } = clocks;
    const processEpoch = initializeProcessEpoch(generateProcessEpoch);
@@ -75,6 +78,7 @@ export function createObservatoryRuntimeSnapshotBuilder(
       );
       if (dispatcher.availability !== 'available') processMonotonicMs = null;
       const observedRound = cachedRoundObservation(cachedIndexerTip);
+      const pollCycle = completedPollCycleObservation(pollCycleSnapshot);
       // Comparison wall clock follows direct observations; never dates the tip.
       const observedAt = epochToIsoUtc(epochMilliseconds());
       const optionalAvailability = economicsMetricsEnabled
@@ -94,8 +98,7 @@ export function createObservatoryRuntimeSnapshotBuilder(
          },
          workers: { poller, reconciler },
          indexer: { dispatcher, observedRound },
-         // No trustworthy completion provenance or passive retention yet.
-         pollCycle: emptyObservation('unavailable'),
+         pollCycle,
          readiness: emptyObservation('unavailable'),
          capacity: emptyObservation(optionalAvailability),
          resources: emptyObservation(optionalAvailability),
@@ -207,6 +210,38 @@ function cachedRoundObservation(getter: () => CachedIndexerTip): Observation<{ r
 function booleanValue(value: unknown): boolean {
    if (typeof value !== 'boolean') throw new Error('Invalid boolean');
    return value;
+}
+
+function completedPollCycleObservation(
+   getter: ObservatoryRuntimeSources['pollCycleSnapshot'],
+): Observation<PollCycleObservationV01> {
+   if (getter === undefined) return emptyObservation('unavailable');
+   try {
+      const source = getter();
+      const observedAt = source.lastCycleCompletedAt;
+      const durationMs = source.lastCycleDurationMs;
+      const data = {
+         attempted: countValue(source.watchesAttemptedLastCycle),
+         progressed: countValue(source.watchesSucceededLastCycle),
+         failed: countValue(source.watchesFailedLastCycle),
+      };
+      if (observedAt === undefined && durationMs === undefined &&
+         data.attempted === 0 && data.progressed === 0 && data.failed === 0) {
+         return emptyObservation('not_yet_sampled');
+      }
+      if (!isIsoUtc(observedAt) || typeof durationMs !== 'number' ||
+         !Number.isFinite(durationMs) || durationMs < 0) {
+         return emptyObservation('unavailable');
+      }
+      return availableObservation({
+         durationMs,
+         attempted: data.attempted,
+         progressed: data.progressed,
+         failed: data.failed,
+      }, observedAt);
+   } catch {
+      return emptyObservation('unavailable');
+   }
 }
 
 function countValue(value: unknown): number {

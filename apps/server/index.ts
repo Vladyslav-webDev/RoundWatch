@@ -346,6 +346,7 @@ export const observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilde
    reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
    dispatcherSnapshot: () => dispatcher.snapshot(),
    cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
+   pollCycleSnapshot: () => poller.capacitySnapshot(),
 });
 
 const currentReadinessSnapshot = () => {
