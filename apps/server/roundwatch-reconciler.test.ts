@@ -6,12 +6,13 @@ import test from 'node:test';
 
 import { ALGORAND_TESTNET, TESTNET_USDC_ASSET_ID } from './app.js';
 import type { TransactionIdPage } from './roundwatch-indexer.js';
+import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import {
    SettlementReconciler,
    type IndexedAssetTransfer,
    type SettlementLookupIndexer,
 } from './roundwatch-reconciler.js';
-import { RoundWatchStore, type SettlementIntent, type WatchSpec } from './roundwatch-store.js';
+import { RoundWatchStore, type SettlementIntent, type WatchRecord, type WatchSpec } from './roundwatch-store.js';
 import { MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN } from './roundwatch-work-budget.js';
 
 const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
@@ -206,6 +207,281 @@ test('legacy candidate lacking immutable evidence stays unresolved instead of re
       await reconciler(store, new FakeLookup()).reconcileOnce();
       assert.equal(store.getWatch(watch.id)?.state, 'settlement_pending');
    } finally { store.close(); }
+});
+
+for (const workUnitBudget of [1, 2]) {
+   for (const exhausted of [false, true]) {
+      const used = exhausted ? workUnitBudget : workUnitBudget - 1;
+      test(`B4 terminal unknown reconciliation claim is inactive with budget ${workUnitBudget}, used ${used}`, () => {
+         const store = new RoundWatchStore(':memory:', { workUnitBudget });
+         try {
+            const watch = store.prepareWatch(SPEC, terms('TERMINAL')).watch;
+            for (let i = 0; i < used; i += 1) {
+               assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+            }
+            store.markSettlementInvalid(watch.id);
+            const before = store.getWatch(watch.id)!;
+            assert.equal(before.state, 'settlement_unknown');
+            assert.equal(before.settlementReconciliationTerminal, true);
+            assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'inactive');
+            assert.deepEqual(store.getWatch(watch.id), before);
+         } finally { store.close(); }
+      });
+
+      for (const terminalState of ['matched', 'expired', 'indeterminate', 'settlement_unknown'] as const) {
+         for (const purpose of ['reconciliation', 'polling'] as const) {
+            test(`B4 terminal matrix ${terminalState} rejects ${purpose} with budget ${workUnitBudget}, used ${used}`, () => {
+               const store = new RoundWatchStore(':memory:', { workUnitBudget });
+               try {
+                  const watch = store.prepareWatch(SPEC, terms('MATRIX')).watch;
+                  if (terminalState === 'settlement_unknown') {
+                     for (let i = 0; i < used; i += 1) {
+                        assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+                     }
+                     store.markSettlementInvalid(watch.id);
+                  } else {
+                     store.activateWatch(watch.id, {
+                        transaction: 'MATRIX', network: ALGORAND_TESTNET, payer: PAYER,
+                     }, 850);
+                     for (let i = 0; i < used; i += 1) {
+                        assert.equal(store.claimWorkUnit(watch.id, 'polling'), 'claimed');
+                     }
+                     if (terminalState === 'matched') store.markMatched(watch.id, 'INVOICE', 851);
+                     else if (terminalState === 'expired') {
+                        store.setClosingRound(watch.id, 850);
+                        assert.equal(store.markExpired(watch.id, 850, 850), true);
+                     } else {
+                        store.recordPollingFailure(watch.id, {
+                           code: 'synthetic_permanent_failure', disposition: 'permanent',
+                        });
+                     }
+                  }
+                  const before = store.getWatch(watch.id)!;
+                  assert.equal(before.state, terminalState);
+                  assert.equal(before.workUnitsUsed, used);
+                  assert.equal(store.claimWorkUnit(watch.id, purpose), 'inactive');
+                  assert.deepEqual(store.getWatch(watch.id), before);
+               } finally { store.close(); }
+            });
+         }
+      }
+
+      for (const transition of ['terminalized', 'activated'] as const) {
+         test(`B4 stale reconciler ${transition} after selection with budget ${workUnitBudget}, used ${used}`, async t => {
+            const store = new RoundWatchStore(':memory:', { workUnitBudget });
+            const indexer = new FakeLookup();
+            indexer.lookups.set('STALE', transfer('STALE'));
+            const metrics = new RoundWatchEconomicsMetrics();
+            try {
+               const watch = store.prepareWatch(SPEC, terms('STALE')).watch;
+               for (let i = 0; i < used; i += 1) {
+                  assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+               }
+               metrics.captureWatch(watch.id).recordWorkUnit();
+               const listCandidates = store.listSettlementReconciliationCandidates.bind(store);
+               let before: WatchRecord | undefined;
+               let beforeMetrics: ReturnType<typeof metrics.snapshotWatch>;
+               t.mock.method(store, 'listSettlementReconciliationCandidates', () => {
+                  const candidates = listCandidates();
+                  assert.equal(candidates.length, 1);
+                  assert.equal(candidates[0]!.settlementReconciliationTerminal, false);
+                  if (transition === 'terminalized') {
+                     store.markSettlementInvalid(watch.id);
+                     metrics.finishWatch(watch.id);
+                  } else {
+                     store.activateWatch(watch.id, {
+                        transaction: 'STALE', network: ALGORAND_TESTNET, payer: PAYER,
+                     }, 850);
+                  }
+                  before = store.getWatch(watch.id)!;
+                  beforeMetrics = metrics.snapshotWatch(watch.id);
+                  return candidates;
+               });
+               const worker = new SettlementReconciler(store, indexer, {
+                  network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+               }, metrics);
+               const outcome = await worker.reconcileOnce();
+               assert.equal(indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls, 0);
+               assert.deepEqual(outcome, { attempted: 1, succeeded: 0, failed: 0, noOp: 1 });
+               assert.ok(before);
+               assert.equal(before.state, transition === 'terminalized' ? 'settlement_unknown' : 'active');
+               assert.deepEqual(store.getWatch(watch.id), before);
+               assert.deepEqual(metrics.snapshotWatch(watch.id), beforeMetrics);
+               assert.equal(metrics.activeWatchMetricCount(), transition === 'terminalized' ? 0 : 1);
+            } finally { store.close(); }
+         });
+      }
+   }
+
+   for (const state of ['settlement_pending', 'settlement_unknown', 'active'] as const) {
+      const purpose = state === 'active' ? 'polling' : 'reconciliation';
+      const wrongPurpose = state === 'active' ? 'reconciliation' : 'polling';
+      test(`B4 live ${state} claims only ${purpose} and exhausts budget ${workUnitBudget}`, () => {
+         const store = new RoundWatchStore(':memory:', { workUnitBudget });
+         try {
+            const watch = store.prepareWatch(SPEC, terms('LIVE')).watch;
+            if (state === 'active') {
+               store.activateWatch(watch.id, {
+                  transaction: 'LIVE', network: ALGORAND_TESTNET, payer: PAYER,
+               }, 850);
+            } else if (state === 'settlement_unknown') store.markSettlementUnknown(watch.id);
+            for (let i = 0; i < workUnitBudget; i += 1) {
+               const before = store.getWatch(watch.id)!;
+               assert.equal(store.claimWorkUnit(watch.id, wrongPurpose), 'inactive');
+               assert.deepEqual(store.getWatch(watch.id), before);
+               assert.equal(store.claimWorkUnit(watch.id, purpose), 'claimed');
+               assert.deepEqual(store.getWatch(watch.id), { ...before, workUnitsUsed: i + 1 });
+            }
+            const beforeExhaustion = store.getWatch(watch.id)!;
+            assert.equal(store.claimWorkUnit(watch.id, wrongPurpose), 'inactive');
+            assert.deepEqual(store.getWatch(watch.id), beforeExhaustion);
+            assert.equal(store.claimWorkUnit(watch.id, purpose), 'exhausted');
+            const terminal = store.getWatch(watch.id)!;
+            assert.deepEqual(terminal, {
+               ...beforeExhaustion, state: 'indeterminate',
+               terminalReason: 'work_budget_exhausted', settlementReconciliationTerminal: true,
+            });
+            assert.equal(store.claimWorkUnit(watch.id, purpose), 'inactive');
+            assert.deepEqual(store.getWatch(watch.id), terminal);
+         } finally { store.close(); }
+      });
+   }
+
+   for (const state of ['settlement_pending', 'settlement_unknown'] as const) {
+      test(`B4 live reconciler preserves ${state} work and request budget ${workUnitBudget}`, async () => {
+         const store = new RoundWatchStore(':memory:', { workUnitBudget });
+         const indexer = new FakeLookup();
+         indexer.round = 850; // Ordinary absence within validity remains recoverable.
+         try {
+            const watch = store.prepareWatch(SPEC, terms('RECOVERABLE')).watch;
+            if (state === 'settlement_unknown') store.markSettlementUnknown(watch.id);
+            const worker = reconciler(store, indexer);
+            for (let i = 0; i < workUnitBudget; i += 1) {
+               store.recordReconciliationFailure(watch.id, new Date(0));
+               const outcome = await worker.reconcileOnce();
+               assert.equal(outcome.attempted, 1);
+               assert.equal(outcome.failed, 0);
+               const current = store.getWatch(watch.id)!;
+               assert.equal(current.state, state);
+               assert.equal(current.settlementReconciliationTerminal, false);
+               assert.equal(current.workUnitsUsed, i + 1);
+               assert.equal(indexer.lookupCalls, i + 1);
+               assert.equal(indexer.currentRoundCalls, i + 1);
+               assert.equal(indexer.pageCalls, 0);
+            }
+            store.recordReconciliationFailure(watch.id, new Date(0));
+            const outcome = await worker.reconcileOnce();
+            assert.deepEqual(outcome, { attempted: 1, succeeded: 0, failed: 0, noOp: 1 });
+            const terminal = store.getWatch(watch.id)!;
+            assert.equal(terminal.state, 'indeterminate');
+            assert.equal(terminal.terminalReason, 'work_budget_exhausted');
+            assert.equal(terminal.settlementReconciliationTerminal, true);
+            assert.equal(terminal.workUnitsUsed, workUnitBudget);
+            assert.equal(indexer.lookupCalls, workUnitBudget);
+            assert.equal(indexer.currentRoundCalls, workUnitBudget);
+            assert.equal(indexer.pageCalls, 0);
+         } finally { store.close(); }
+      });
+   }
+}
+
+for (const state of ['active', 'matched', 'expired', 'indeterminate', 'settlement_unknown'] as const) {
+   test(`B4 follow-up retry metadata is unchanged for ${state}`, () => {
+      const store = new RoundWatchStore(':memory:');
+      try {
+         const watch = store.prepareWatch(SPEC, terms('RETRY_MATRIX')).watch;
+         store.recordReconciliationFailure(watch.id, new Date(0));
+         if (state === 'settlement_unknown') store.markSettlementInvalid(watch.id);
+         else {
+            store.activateWatch(watch.id, {
+               transaction: 'RETRY_MATRIX', network: ALGORAND_TESTNET, payer: PAYER,
+            }, 850);
+            if (state === 'matched') store.markMatched(watch.id, 'INVOICE', 851);
+            else if (state === 'expired') {
+               store.setClosingRound(watch.id, 850);
+               assert.equal(store.markExpired(watch.id, 850, 850), true);
+            } else if (state === 'indeterminate') {
+               store.recordPollingFailure(watch.id, {
+                  code: 'synthetic_permanent_failure', disposition: 'permanent',
+               });
+            }
+         }
+         const before = store.getWatch(watch.id)!;
+         assert.equal(before.state, state);
+         assert.equal(before.settlementReconciliationTerminal, state === 'settlement_unknown');
+         if (state === 'indeterminate') assert.equal(before.terminalReason, 'indexer_permanent_failure');
+         store.recordReconciliationFailure(watch.id, new Date('2026-09-18T10:00:01.000Z'));
+         assert.deepEqual(store.getWatch(watch.id), before);
+      } finally { store.close(); }
+   });
+}
+
+for (const state of ['settlement_pending', 'settlement_unknown'] as const) {
+   test(`B4 follow-up live ${state} writes exactly one retry metadata update`, () => {
+      const store = new RoundWatchStore(':memory:');
+      try {
+         const watch = store.prepareWatch(SPEC, terms('LIVE_RETRY')).watch;
+         if (state === 'settlement_unknown') store.markSettlementUnknown(watch.id);
+         const before = store.getWatch(watch.id)!;
+         assert.equal(before.state, state);
+         assert.equal(before.settlementReconciliationTerminal, false);
+         const nextAttemptAt = new Date('2026-09-18T10:00:01.000Z');
+         store.recordReconciliationFailure(watch.id, nextAttemptAt);
+         assert.deepEqual(store.getWatch(watch.id), {
+            ...before,
+            reconciliationAttempts: before.reconciliationAttempts + 1,
+            reconciliationNextAttemptAt: nextAttemptAt.toISOString(),
+         });
+      } finally { store.close(); }
+   });
+}
+
+test('B4 follow-up stale reconciler defer after claimed work and awaited activation preserves the complete active record', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeLookup();
+   let releaseRound!: (round: number) => void;
+   const roundResult = new Promise<number>(resolve => { releaseRound = resolve; });
+   let signalAwaited!: () => void;
+   const awaited = new Promise<void>(resolve => { signalAwaited = resolve; });
+   t.mock.method(indexer, 'getCurrentRound', async () => {
+      indexer.currentRoundCalls += 1;
+      signalAwaited();
+      return roundResult;
+   });
+   let sweep: ReturnType<SettlementReconciler['reconcileOnce']> | undefined;
+   try {
+      const watch = store.prepareWatch(SPEC, terms('STALE_RETRY')).watch;
+      store.recordReconciliationFailure(watch.id, new Date(0));
+      const beforeClaim = store.getWatch(watch.id)!;
+      const failure = t.mock.method(store, 'recordReconciliationFailure');
+      sweep = reconciler(store, indexer).reconcileOnce();
+      await awaited;
+      assert.equal(store.getWatch(watch.id)?.state, 'settlement_pending');
+      assert.equal(store.getWatch(watch.id)?.workUnitsUsed, beforeClaim.workUnitsUsed + 1);
+      assert.equal(indexer.lookupCalls, 1);
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(failure.mock.callCount(), 0);
+      const active = store.activateWatch(watch.id, {
+         transaction: 'STALE_RETRY', network: ALGORAND_TESTNET, payer: PAYER,
+      }, 850);
+      assert.equal(active.state, 'active');
+      assert.equal(active.settlementReconciliationTerminal, false);
+      assert.equal(active.reconciliationAttempts, beforeClaim.reconciliationAttempts);
+      assert.equal(active.reconciliationNextAttemptAt, beforeClaim.reconciliationNextAttemptAt);
+
+      releaseRound(850); // Absence within validity resumes the real defer() path.
+      const outcome = await sweep;
+      assert.equal(outcome.attempted, 1);
+      assert.equal(outcome.failed, 0);
+      assert.equal(outcome.providerEvidenceOnly, 1);
+      assert.equal(failure.mock.callCount(), 1);
+      assert.deepEqual(store.getWatch(watch.id), active);
+      assert.equal(indexer.pageCalls, 0);
+   } finally {
+      releaseRound(850);
+      await sweep;
+      store.close();
+   }
 });
 
 function reconciler(store: RoundWatchStore, indexer: SettlementLookupIndexer, now = () => new Date('2026-09-18T10:00:00Z')): SettlementReconciler {

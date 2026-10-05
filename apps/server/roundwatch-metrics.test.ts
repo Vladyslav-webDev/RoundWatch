@@ -581,13 +581,15 @@ for (const workUnitBudget of [1, 2]) {
          await started.promise;
          await new SettlementReconciler(store, indexer, config, metrics).reconcileOnce();
          assert.equal(store.getWatch(second.id)?.settlementReconciliationTerminal, true);
+         const finishedSecond = store.getWatch(second.id)!;
          assert.equal(metrics.snapshotWatch(second.id), undefined);
          assert.equal(logs.length, 1);
          const savedLogs = [...logs];
 
          response.resolve(new Response(null, { status: 404 }));
          await sweep;
-         assert.equal(secondLookups, workUnitBudget); // Existing settlement behavior is preserved.
+         assert.equal(secondLookups, 1); // Only the live turn can request the Indexer.
+         assert.deepEqual(store.getWatch(second.id), finishedSecond);
          assert.equal(metrics.snapshotWatch(second.id), undefined);
          assert.deepEqual(logs, savedLogs);
          assert.equal(metrics.activeWatchMetricCount(), 1); // Only the unfinished first watch.
@@ -754,7 +756,7 @@ for (const terminal of ['mismatch', 'absence', 'budget'] as const) {
                assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 1);
                assert.equal(metrics.snapshotWatch(watch.id)?.indexer.reconciliation.successes, 2);
             } else if (terminal === 'budget') {
-               assert.equal(store.claimWorkUnit(watch.id), 'claimed');
+               assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
             }
             warmup = false;
             requests = 0;

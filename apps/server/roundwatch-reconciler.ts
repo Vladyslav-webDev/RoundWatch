@@ -216,7 +216,7 @@ export class SettlementReconciler {
       const captureMetrics = () => captureWatchEconomicsTurn(
          this.economicsMetrics, watch.id, !!metricWasTerminal,
       );
-      const workClaim = this.store.claimWorkUnit(watch.id);
+      const workClaim = this.store.claimWorkUnit(watch.id, 'reconciliation');
       if (workClaim === 'exhausted') {
          this.absenceProofSessions.delete(watch.id);
          this.finishMetric(watch, captureMetrics());
