@@ -23,10 +23,13 @@ import {
 } from './roundwatch-health-probe.js';
 import {
    DEFAULT_ECONOMICS_SAMPLE_INTERVAL_MS,
-   RoundWatchRuntimeSampler,
 } from './roundwatch-runtime-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { createObservatoryRuntimeSnapshotBuilder } from './roundwatch-observatory-runtime.js';
+import {
+   initializeObservatorySampleRetention,
+   createObservatoryRuntimeSampler,
+} from './roundwatch-observatory-initialization.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
 import { createPaidAdmissionReadinessCheck } from './roundwatch-paid-readiness.js';
 import {
@@ -337,7 +340,8 @@ const reconciler = new SettlementReconciler(
    economicsMetrics,
    healthProbe,
 );
-// Boot-scoped core only; no route, sampling, or readiness work is wired here.
+const observatorySamples = initializeObservatorySampleRetention();
+// Boot-scoped core only; no route or readiness work is wired here.
 export const observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
    network: networkConfig.name,
    assetId: networkConfig.usdcAssetId,
@@ -347,6 +351,8 @@ export const observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilde
    dispatcherSnapshot: () => dispatcher.snapshot(),
    cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
    pollCycleSnapshot: () => poller.capacitySnapshot(),
+   retainedRuntimeSample: observatorySamples === undefined
+      ? undefined : () => observatorySamples!.snapshot(),
 });
 
 const currentReadinessSnapshot = () => {
@@ -409,25 +415,24 @@ const app = createApp({
    readinessCheck: currentReadinessSnapshot,
    paidAdmissionReadinessCheck,
 });
-const runtimeSampler = economicsMetrics
-   ? new RoundWatchRuntimeSampler(
-      economicsMetrics,
-      dispatcher,
-      databasePath,
-      {
-         intervalMilliseconds: economicsSampleIntervalMilliseconds,
-         capacitySnapshot: () => {
-            const pollerCapacity = poller.capacitySnapshot();
-            return {
-               ...store.capacitySnapshot(
-                  pollerCapacity.currentIndexerRound,
-               ),
-               ...pollerCapacity,
-            };
-         },
+const runtimeSampler = createObservatoryRuntimeSampler(
+   economicsMetrics,
+   dispatcher,
+   databasePath,
+   observatorySamples,
+   {
+      intervalMilliseconds: economicsSampleIntervalMilliseconds,
+      capacitySnapshot: () => {
+         const pollerCapacity = poller.capacitySnapshot();
+         return {
+            ...store.capacitySnapshot(
+               pollerCapacity.currentIndexerRound,
+            ),
+            ...pollerCapacity,
+         };
       },
-   )
-   : undefined;
+   },
+);
 
 const port = parsePositiveInteger(process.env.PORT, 4021);
 

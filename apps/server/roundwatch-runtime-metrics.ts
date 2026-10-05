@@ -23,6 +23,19 @@ export interface EconomicsRuntimeSnapshot {
    capacity?: CapacityRuntimeSnapshot;
 }
 
+/** Proven interval, separate from the legacy economics elapsed/delta fields. */
+export interface RuntimeCpuInterval {
+   userMicros: number;
+   systemMicros: number;
+   elapsedMs: number;
+}
+
+export interface ScheduledRuntimeSampleObserver {
+   // Synchronous publication only; unlike void, undefined rejects async callbacks.
+   sampleCompleted(snapshot: EconomicsRuntimeSnapshot, cpu: RuntimeCpuInterval | null): undefined;
+   collectionFailed(): undefined;
+}
+
 export interface EconomicsRuntimeSamplerOptions {
    intervalMilliseconds?: number;
    now?: () => Date;
@@ -32,6 +45,7 @@ export interface EconomicsRuntimeSamplerOptions {
    fileSize?: (path: string) => number | undefined;
    log?: (snapshot: EconomicsRuntimeSnapshot) => void;
    capacitySnapshot?: () => CapacityRuntimeSnapshot;
+   observer?: ScheduledRuntimeSampleObserver;
 }
 
 export class RoundWatchRuntimeSampler {
@@ -43,9 +57,11 @@ export class RoundWatchRuntimeSampler {
    private readonly fileSize: (path: string) => number | undefined;
    private readonly log: (snapshot: EconomicsRuntimeSnapshot) => void;
    private readonly capacitySnapshot?: () => CapacityRuntimeSnapshot;
+   private readonly observer?: ScheduledRuntimeSampleObserver;
    private timer: NodeJS.Timeout | undefined;
    private previousCpu: NodeJS.CpuUsage;
    private previousMonotonic: number;
+   private pairedCpuBaseline?: { user: number; system: number; monotonicMs: number };
 
    constructor(
       private readonly metrics: RoundWatchEconomicsMetrics,
@@ -63,17 +79,25 @@ export class RoundWatchRuntimeSampler {
       this.cpuUsage = options.cpuUsage ?? (() => process.cpuUsage());
       this.fileSize = options.fileSize ?? safeFileSize;
       this.capacitySnapshot = options.capacitySnapshot;
+      try {
+         this.observer = options.observer;
+      } catch {
+         // Optional passive wiring must not abort operational startup.
+      }
       this.log = options.log ?? (snapshot => {
          console.info(
             `RoundWatch economics runtime ${JSON.stringify(snapshot)}`,
          );
       });
 
-      this.previousCpu = this.cpuUsage();
+      this.previousCpu = cpuTotals(this.cpuUsage());
       this.previousMonotonic = finiteNumber(
          this.monotonicNow(),
          'monotonicNow',
       );
+      this.pairedCpuBaseline = {
+         ...this.previousCpu, monotonicMs: this.previousMonotonic,
+      };
    }
 
    start(): void {
@@ -93,6 +117,18 @@ export class RoundWatchRuntimeSampler {
    }
 
    sample(): EconomicsRuntimeSnapshot {
+      // Public/manual acquisition still advances legacy baselines, but cannot
+      // silently shorten the next scheduled Observatory CPU interval.
+      return this.acquire(false).snapshot;
+   }
+
+   private acquire(scheduled: boolean): {
+      snapshot: EconomicsRuntimeSnapshot;
+      cpu: RuntimeCpuInterval | null;
+   } {
+      const baseline = this.pairedCpuBaseline;
+      // Every acquisition failure, early or late, leaves confidence cleared.
+      this.pairedCpuBaseline = undefined;
       const sampledAt = this.now().toISOString();
       const currentMonotonic = finiteNumber(
          this.monotonicNow(),
@@ -104,7 +140,7 @@ export class RoundWatchRuntimeSampler {
       );
       this.previousMonotonic = currentMonotonic;
 
-      const currentCpu = this.cpuUsage();
+      const currentCpu = cpuTotals(this.cpuUsage());
       const cpuUserMicros = Math.max(
          0,
          currentCpu.user - this.previousCpu.user,
@@ -123,7 +159,7 @@ export class RoundWatchRuntimeSampler {
          ? undefined
          : this.fileSize(`${this.databasePath}-wal`);
 
-      return {
+      const snapshot: EconomicsRuntimeSnapshot = {
          resources: {
             sampledAt,
             elapsedMs,
@@ -158,17 +194,60 @@ export class RoundWatchRuntimeSampler {
             ? {}
             : { capacity: this.capacitySnapshot() }),
       };
+      const pairedElapsed = baseline === undefined
+         ? null
+         : currentMonotonic - baseline.monotonicMs;
+      const cpu = scheduled && baseline !== undefined &&
+         pairedElapsed !== null && Number.isFinite(pairedElapsed) && pairedElapsed > 0 &&
+         currentCpu.user >= baseline.user && currentCpu.system >= baseline.system
+         ? {
+            userMicros: currentCpu.user - baseline.user,
+            systemMicros: currentCpu.system - baseline.system,
+            elapsedMs: pairedElapsed,
+         }
+         : null;
+      if (scheduled) {
+         // Only completed acquisition establishes the next scheduled pair.
+         // Projection/publication/logging cannot invalidate this evidence.
+         this.pairedCpuBaseline = { ...currentCpu, monotonicMs: currentMonotonic };
+      }
+      return { snapshot, cpu };
    }
 
    private sampleAndLog(): void {
+      let acquired: ReturnType<RoundWatchRuntimeSampler['acquire']>;
       try {
-         this.log(this.sample());
+         acquired = this.acquire(true);
       } catch (error) {
-         console.warn(
-            'RoundWatch economics runtime sample failed:',
-            error instanceof Error ? error.message : 'Unknown metrics error',
-         );
+         this.notifyCollectionFailed();
+         this.warnSampleFailure(error);
+         return;
       }
+      try {
+         const returned: unknown = this.observer?.sampleCompleted(acquired.snapshot, acquired.cpu);
+         if (containUnsupportedPromise(returned)) this.notifyCollectionFailed();
+      } catch {
+         // Observer failure must neither suppress logging nor stop the cadence.
+         this.notifyCollectionFailed();
+      }
+      try {
+         this.log(acquired.snapshot);
+      } catch (error) {
+         this.warnSampleFailure(error);
+      }
+   }
+
+   private notifyCollectionFailed(): void {
+      try {
+         containUnsupportedPromise(this.observer?.collectionFailed());
+      } catch { /* Passive hook only; never notify recursively. */ }
+   }
+
+   private warnSampleFailure(error: unknown): void {
+      console.warn(
+         'RoundWatch economics runtime sample failed:',
+         error instanceof Error ? error.message : 'Unknown metrics error',
+      );
    }
 }
 
@@ -195,8 +274,31 @@ function nonNegativeInteger(value: number, name: string): number {
 }
 
 function finiteNumber(value: number, name: string): number {
-   if (!Number.isFinite(value)) {
-      throw new Error(`${name} must be finite`);
+   if (typeof value !== 'number' || !Number.isFinite(value) ||
+      value < 0 || value > Number.MAX_SAFE_INTEGER) {
+      throw new Error(`${name} must be finite, non-negative and safely measurable`);
    }
    return value;
+}
+
+/** Contain unsupported Promise/thenable returns without awaiting any work.
+ * Failure is classified at invocation time. Settlement only consumes rejection:
+ * it must never notify retention later and overwrite a newer observation.
+ * This cannot cancel asynchronous work started inside the callback.
+ */
+function containUnsupportedPromise(returned: unknown): boolean {
+   if (returned !== null && (typeof returned === 'object' || typeof returned === 'function') &&
+      typeof (returned as PromiseLike<unknown>).then === 'function') {
+      void Promise.resolve(returned).catch(() => {});
+      return true;
+   }
+   return false;
+}
+
+function cpuTotals(value: NodeJS.CpuUsage): NodeJS.CpuUsage {
+   // Validate operands BEFORE subtraction/clamping; copy injected objects too.
+   return {
+      user: nonNegativeInteger(value.user, 'cpu user total'),
+      system: nonNegativeInteger(value.system, 'cpu system total'),
+   };
 }
