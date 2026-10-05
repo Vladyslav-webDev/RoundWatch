@@ -400,7 +400,7 @@ export class RoundWatchPoller {
          return { kind: 'noOp', providerEvidence: false };
       }
 
-      const workClaim = this.store.claimWorkUnit(initial.id);
+      const workClaim = this.store.claimWorkUnit(initial.id, 'polling');
       if (workClaim === 'exhausted') {
          this.sessions.delete(initial.id);
          context.metrics = captureWatchEconomicsTurn(this.economicsMetrics, initial.id);

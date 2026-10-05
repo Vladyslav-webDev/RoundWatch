@@ -20,6 +20,8 @@ export type WatchTerminalReason =
    | 'work_budget_exhausted'
    | 'indexer_permanent_failure';
 
+export type WatchWorkPurpose = 'reconciliation' | 'polling';
+
 export type PollingFailureDisposition =
    | 'permanent'
    | 'transient'
@@ -647,12 +649,18 @@ export class RoundWatchStore {
 
    claimWorkUnit(
       id: string,
+      purpose: WatchWorkPurpose,
    ): 'claimed' | 'exhausted' | 'inactive' {
+      // Candidate snapshots cannot authorize either mutation. Re-establish
+      // this turn's eligibility in each atomic durable UPDATE.
+      const eligibility = purpose === 'reconciliation'
+         ? "state IN ('settlement_pending', 'settlement_unknown') AND settlement_reconciliation_terminal = 0"
+         : "state = 'active'";
       const claimed = this.database.prepare(`
          UPDATE roundwatch_watches
          SET work_units_used = work_units_used + 1
          WHERE id = ?
-           AND state IN ('settlement_pending', 'settlement_unknown', 'active')
+           AND ${eligibility}
            AND work_unit_budget IS NOT NULL
            AND work_units_used < work_unit_budget
       `).run(id);
@@ -661,36 +669,19 @@ export class RoundWatchStore {
          return 'claimed';
       }
 
-      const watch = this.getWatch(id);
-      if (
-         !watch ||
-         !['settlement_pending', 'settlement_unknown', 'active'].includes(
-            watch.state,
-         )
-      ) {
-         return 'inactive';
-      }
+      const exhausted = this.database.prepare(`
+         UPDATE roundwatch_watches
+         SET
+            state = 'indeterminate',
+            terminal_reason = 'work_budget_exhausted',
+            settlement_reconciliation_terminal = 1
+         WHERE id = ?
+           AND ${eligibility}
+           AND work_unit_budget IS NOT NULL
+           AND work_units_used >= work_unit_budget
+      `).run(id);
 
-      if (
-         watch.workUnitBudget !== undefined &&
-         watch.workUnitsUsed >= watch.workUnitBudget
-      ) {
-         const exhausted = this.database.prepare(`
-            UPDATE roundwatch_watches
-            SET
-               state = 'indeterminate',
-               terminal_reason = 'work_budget_exhausted',
-               settlement_reconciliation_terminal = 1
-            WHERE id = ?
-              AND state IN ('settlement_pending', 'settlement_unknown', 'active')
-              AND work_unit_budget IS NOT NULL
-              AND work_units_used >= work_unit_budget
-         `).run(id);
-
-         return exhausted.changes === 1 ? 'exhausted' : 'inactive';
-      }
-
-      return 'inactive';
+      return exhausted.changes === 1 ? 'exhausted' : 'inactive';
    }
 
    recordPollingFailure(
@@ -900,7 +891,9 @@ export class RoundWatchStore {
       this.database.prepare(`UPDATE roundwatch_watches
          SET reconciliation_attempts = reconciliation_attempts + 1,
              reconciliation_next_attempt_at = ?
-         WHERE id = ? AND settlement_reconciliation_terminal = 0
+         WHERE id = ?
+           AND state IN ('settlement_pending', 'settlement_unknown')
+           AND settlement_reconciliation_terminal = 0
       `).run(nextAttemptAt.toISOString(), id);
    }
    recordRefundEvidence(
