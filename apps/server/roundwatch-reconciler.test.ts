@@ -209,6 +209,344 @@ test('legacy candidate lacking immutable evidence stays unresolved instead of re
    } finally { store.close(); }
 });
 
+test('C3 reconciliation sessions are reclaimed through terminal churn even with an empty due set', async () => {
+   const now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+   const worker = reconciler(store, indexer, () => now);
+   const sessions = absenceProofSessions(worker);
+   const states = ['settlement_unknown', 'active', 'matched', 'expired', 'indeterminate'] as const;
+   try {
+      for (let i = 0; i < 25; i += 1) {
+         const transaction = `C3_CHURN_${i}`;
+         const watch = store.prepareWatch(
+            { ...SPEC, idempotencyKey: `c3-reconcile-churn-${i}` }, terms(transaction),
+         ).watch;
+         indexer.pages.push({ transactions: [], currentRound: 901, nextToken: `page-${i}` });
+         await worker.reconcileOnce();
+         assert.equal(sessions.size, 1);
+         assert.equal(sessions.get(watch.id)?.nextToken, `page-${i}`);
+         const state = states[i % states.length]!;
+         if (state === 'settlement_unknown') store.markSettlementInvalid(watch.id);
+         else {
+            store.activateWatch(watch.id, { transaction, network: ALGORAND_TESTNET, payer: PAYER }, 850);
+            if (state === 'matched') store.markMatched(watch.id, 'INVOICE', 851);
+            else if (state === 'expired') {
+               store.setClosingRound(watch.id, 850);
+               assert.equal(store.markExpired(watch.id, 850, 850), true);
+            } else if (state === 'indeterminate') {
+               store.recordPollingFailure(watch.id, {
+                  code: 'synthetic_permanent_failure', disposition: 'permanent',
+               });
+            }
+         }
+         const before = store.getWatch(watch.id)!;
+         assert.equal(before.state, state);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+         const requests = indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls;
+         assert.deepEqual(await worker.reconcileOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+         assert.equal(sessions.size, 0, `retained session after churn watch ${i}`);
+         assert.equal(indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls, requests);
+         assert.deepEqual(store.getWatch(watch.id), before);
+         if (state === 'active') store.markMatched(watch.id, 'INVOICE', 851);
+      }
+      assert.equal(indexer.lookupCalls, 25);
+      assert.equal(indexer.currentRoundCalls, 25);
+      assert.equal(indexer.pageCalls, 25);
+   } finally { store.close(); }
+});
+
+for (const missing of ['watch', 'expected transaction'] as const) {
+   test(`C3 absence-session pruning uses its retained ID point lookup when ${missing} is missing`, async t => {
+      const now = new Date('2026-09-18T10:00:00Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const indexer = new FakeLookup();
+      indexer.round = 901;
+      const worker = reconciler(store, indexer, () => now);
+      const sessions = absenceProofSessions(worker);
+      try {
+         const watch = store.prepareWatch(SPEC, terms('C3_MISSING')).watch;
+         indexer.pages.push({ transactions: [], currentRound: 901, nextToken: 'page-2' });
+         await worker.reconcileOnce();
+         assert.equal(sessions.size, 1);
+         const getWatch = store.getWatch.bind(store);
+         const { expectedServiceTransaction: _transaction, ...withoutTransaction } = getWatch(watch.id)!;
+         // Simulate the durable point-read result for a removed/legacy row.
+         const pointReads = t.mock.method(store, 'getWatch', (id: string) => {
+            assert.equal(id, watch.id);
+            return missing === 'watch' ? undefined : withoutTransaction;
+         });
+         assert.deepEqual(await worker.reconcileOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+         assert.equal(sessions.size, 0);
+         assert.equal(pointReads.mock.callCount(), 1);
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.equal(indexer.pageCalls, 1);
+      } finally { store.close(); }
+   });
+}
+
+for (const state of ['settlement_pending', 'settlement_unknown'] as const) {
+   test(`C3 live ${state} absence pagination survives backoff and resumes its token and minimum coverage`, async () => {
+      let now = new Date('2026-09-18T10:00:00Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const indexer = new FakeLookup();
+      indexer.round = 901;
+      const worker = reconciler(store, indexer, () => now);
+      const sessions = absenceProofSessions(worker);
+      try {
+         const watch = store.prepareWatch(SPEC, terms('C3_BACKOFF')).watch;
+         if (state === 'settlement_unknown') store.markSettlementUnknown(watch.id);
+         indexer.pages.push(
+            { transactions: [], currentRound: 901, nextToken: 'page-2' },
+            { transactions: [], currentRound: 903, nextToken: 'page-3' },
+            { transactions: [], currentRound: 902 },
+         );
+         await worker.reconcileOnce();
+         const session = sessions.get(watch.id)!;
+         assert.equal(session.nextToken, 'page-2');
+         assert.equal(session.coverage, 901);
+         assert.deepEqual([...session.seenTokens], ['page-2']);
+         const deferred = store.getWatch(watch.id)!;
+         assert.equal(deferred.state, state);
+         assert.equal(deferred.reconciliationNextAttemptAt, '2026-09-18T10:00:01.000Z');
+         assert.equal(deferred.workUnitsUsed, 1);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+         assert.deepEqual(await worker.reconcileOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+         assert.equal(sessions.get(watch.id), session);
+         assert.deepEqual(store.getWatch(watch.id), deferred);
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.deepEqual(indexer.pageTokens, [undefined]);
+
+         now = new Date('2026-09-18T10:00:01Z');
+         const continued = await worker.reconcileOnce();
+         assert.deepEqual(continued, {
+            attempted: 1, succeeded: 0, failed: 0, providerEvidenceOnly: 1, providerEvidence: 1,
+         });
+         assert.equal(sessions.get(watch.id), session);
+         assert.equal(session.nextToken, 'page-3');
+         assert.equal(session.coverage, 901);
+         assert.deepEqual([...session.seenTokens], ['page-2', 'page-3']);
+         assert.equal(store.getWatch(watch.id)?.workUnitsUsed, 2);
+
+         now = new Date('2026-09-18T10:00:03Z');
+         const completed = await worker.reconcileOnce();
+         assert.deepEqual(completed, { attempted: 1, succeeded: 1, failed: 0, providerEvidence: 1 });
+         assert.equal(sessions.size, 0);
+         const terminal = store.getWatch(watch.id)!;
+         assert.equal(terminal.state, 'settlement_unknown');
+         assert.equal(terminal.settlementReconciliationTerminal, true);
+         assert.equal(terminal.workUnitsUsed, 3);
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.deepEqual(indexer.pageTokens, [undefined, 'page-2', 'page-3']);
+         assert.equal(indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls, 5);
+      } finally { store.close(); }
+   });
+}
+
+for (const failure of ['stalled', 'repeated'] as const) {
+   test(`C3 retained absence pagination still rejects ${failure} tokens and releases its session`, async () => {
+      const store = new RoundWatchStore(':memory:');
+      const indexer = new FakeLookup();
+      indexer.round = 901;
+      const worker = reconciler(store, indexer);
+      const sessions = absenceProofSessions(worker);
+      try {
+         const watch = store.prepareWatch(SPEC, terms('C3_BAD_TOKEN')).watch;
+         indexer.pages.push({ transactions: [], currentRound: 901, nextToken: 'page-2' });
+         if (failure === 'repeated') {
+            indexer.pages.push({ transactions: [], currentRound: 902, nextToken: 'page-3' });
+         }
+         indexer.pages.push({ transactions: [], currentRound: 903, nextToken: 'page-2' });
+         await worker.reconcileOnce();
+         if (failure === 'repeated') {
+            store.recordReconciliationFailure(watch.id, new Date(0));
+            await worker.reconcileOnce();
+         }
+         assert.equal(sessions.size, 1);
+         store.recordReconciliationFailure(watch.id, new Date(0));
+         assert.deepEqual(await worker.reconcileOnce(), { attempted: 1, succeeded: 0, failed: 1 });
+         assert.equal(sessions.size, 0);
+         const unresolved = store.getWatch(watch.id)!;
+         assert.equal(unresolved.state, 'settlement_pending');
+         assert.equal(unresolved.settlementReconciliationTerminal, false);
+         assert.equal(unresolved.workUnitsUsed, failure === 'stalled' ? 2 : 3);
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.deepEqual(indexer.pageTokens, failure === 'stalled'
+            ? [undefined, 'page-2'] : [undefined, 'page-2', 'page-3']);
+      } finally { store.close(); }
+   });
+}
+
+for (const transition of ['terminalized', 'activated'] as const) {
+   test(`C3 retained absence session cannot authorize a stale ${transition} candidate`, async t => {
+      const now = new Date('2026-09-18T10:00:00Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const indexer = new FakeLookup();
+      indexer.round = 901;
+      const worker = reconciler(store, indexer, () => now);
+      const sessions = absenceProofSessions(worker);
+      try {
+         const watch = store.prepareWatch(SPEC, terms('C3_STALE_SESSION')).watch;
+         indexer.pages.push({ transactions: [], currentRound: 901, nextToken: 'page-2' });
+         await worker.reconcileOnce();
+         assert.equal(sessions.size, 1);
+         store.recordReconciliationFailure(watch.id, new Date(0));
+         const listCandidates = store.listSettlementReconciliationCandidates.bind(store);
+         let before: WatchRecord | undefined;
+         t.mock.method(store, 'listSettlementReconciliationCandidates', () => {
+            const candidates = listCandidates();
+            assert.equal(candidates.length, 1);
+            if (transition === 'terminalized') store.markSettlementInvalid(watch.id);
+            else store.activateWatch(watch.id, {
+               transaction: 'C3_STALE_SESSION', network: ALGORAND_TESTNET, payer: PAYER,
+            }, 850);
+            before = store.getWatch(watch.id)!;
+            return candidates;
+         });
+         assert.deepEqual(await worker.reconcileOnce(), { attempted: 1, succeeded: 0, failed: 0, noOp: 1 });
+         assert.equal(sessions.size, 0);
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.equal(indexer.pageCalls, 1);
+         assert.deepEqual(store.getWatch(watch.id), before);
+      } finally { store.close(); }
+   });
+}
+
+test('C3 an absence session created by a stopped turn is pruned on the next sweep after activation', async t => {
+   const now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+   const worker = reconciler(store, indexer, () => now);
+   const sessions = absenceProofSessions(worker);
+   let releasePage!: (page: TransactionIdPage) => void;
+   const pageResult = new Promise<TransactionIdPage>(resolve => { releasePage = resolve; });
+   let signalAwaited!: () => void;
+   const awaited = new Promise<void>(resolve => { signalAwaited = resolve; });
+   t.mock.method(indexer, 'searchTransactionPage', async () => {
+      indexer.pageCalls += 1;
+      signalAwaited();
+      return pageResult;
+   });
+   let sweep: ReturnType<SettlementReconciler['reconcileOnce']> | undefined;
+   try {
+      const watch = store.prepareWatch(SPEC, terms('C3_IN_FLIGHT')).watch;
+      sweep = worker.reconcileOnce();
+      await awaited;
+      assert.equal(sessions.size, 1);
+      worker.stop();
+      const active = store.activateWatch(watch.id, {
+         transaction: 'C3_IN_FLIGHT', network: ALGORAND_TESTNET, payer: PAYER,
+      }, 850);
+      releasePage({ transactions: [], currentRound: 901, nextToken: 'page-2' });
+      assert.deepEqual(await sweep, {
+         attempted: 1, succeeded: 0, failed: 0, providerEvidenceOnly: 1, providerEvidence: 1,
+      });
+      assert.equal(sessions.size, 1);
+      assert.deepEqual(store.getWatch(watch.id), active);
+      assert.equal(indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls, 3);
+      assert.equal(worker.healthSnapshot().started, false);
+      assert.equal(worker.healthSnapshot().generation, 1);
+      assert.deepEqual(await worker.reconcileOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+      assert.equal(sessions.size, 0);
+   } finally {
+      releasePage({ transactions: [], currentRound: 901, nextToken: 'page-2' });
+      await sweep;
+      worker.stop();
+      store.close();
+   }
+});
+
+test('C3 P3 stopped reconciler skips final retained-session reads after SQLite closes', async t => {
+   const now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+   const worker = reconciler(store, indexer, () => now);
+   const sessions = absenceProofSessions(worker);
+   let release!: (value: IndexedAssetTransfer) => void;
+   const lookup = new Promise<IndexedAssetTransfer>(resolve => { release = resolve; });
+   let entered!: () => void;
+   const requested = new Promise<void>(resolve => { entered = resolve; });
+   let sweep: ReturnType<SettlementReconciler['reconcileOnce']> | undefined;
+   let closed = false;
+   let readsBeforeClose = 0;
+   try {
+      const watch = store.prepareWatch(SPEC, terms('C3_P3_RETAINED')).watch;
+      indexer.pages.push({ transactions: [], currentRound: 901, nextToken: 'retained-page' });
+      await worker.reconcileOnce();
+      const session = sessions.get(watch.id);
+      assert.ok(session);
+      store.prepareWatch({ ...SPEC, idempotencyKey: 'c3-p3-awaiting' }, terms('AWAITING'));
+      t.mock.method(indexer, 'lookupAssetTransfer', () => {
+         indexer.lookupCalls += 1;
+         entered();
+         return lookup;
+      });
+      const reads = t.mock.method(store, 'getWatch');
+      sweep = worker.reconcileOnce(() => {
+         // Reconciliation has existing post-provider writes; close only once those
+         // finish, so this test isolates the new C3 final read from undrained writes.
+         readsBeforeClose = reads.mock.callCount();
+         store.close();
+         closed = true;
+      });
+      await requested;
+      worker.stop();
+      const stoppedHealth = worker.healthSnapshot();
+      release(transfer('AWAITING'));
+      assert.deepEqual(await sweep, { attempted: 1, succeeded: 1, failed: 0, providerEvidence: 1 });
+      assert.ok(closed);
+      assert.equal(reads.mock.callCount(), readsBeforeClose);
+      assert.equal(sessions.get(watch.id), session);
+      assert.deepEqual(worker.healthSnapshot(), stoppedHealth);
+      assert.equal(indexer.lookupCalls, 2);
+      assert.equal(indexer.pageCalls, 1);
+   } finally {
+      release(transfer('AWAITING'));
+      try { await sweep; } finally {
+         worker.stop();
+         if (!closed) store.close();
+      }
+   }
+});
+
+test('C3 P3 valid-generation final reconciliation pruning errors remain visible', async t => {
+   const now = new Date('2026-09-18T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+   const worker = reconciler(store, indexer, () => now);
+   try {
+      const watch = store.prepareWatch(SPEC, terms('C3_P3_PRUNING_FAILURE')).watch;
+      indexer.pages.push({ transactions: [], currentRound: 901, nextToken: 'retained-page' });
+      await worker.reconcileOnce();
+      const getWatch = store.getWatch.bind(store);
+      const failure = new Error('final reconciliation pruning store failure');
+      const health = worker.healthSnapshot();
+      let reads = 0;
+      const pruning = t.mock.method(store, 'getWatch', (id: string) => {
+         reads += 1;
+         if (reads === 2) throw failure;
+         return getWatch(id);
+      });
+      await assert.rejects(worker.reconcileOnce(), error => error === failure);
+      assert.equal(reads, 2);
+      assert.deepEqual(worker.healthSnapshot(), health);
+      assert.equal(absenceProofSessions(worker).size, 1);
+      pruning.mock.restore();
+      assert.deepEqual(await worker.reconcileOnce(), { attempted: 0, succeeded: 0, failed: 0 }, 'failure releases the running flag');
+      assert.equal(indexer.lookupCalls, 1);
+      assert.equal(indexer.pageCalls, 1);
+   } finally { store.close(); }
+});
+
 for (const workUnitBudget of [1, 2]) {
    for (const exhausted of [false, true]) {
       const used = exhausted ? workUnitBudget : workUnitBudget - 1;
@@ -499,6 +837,7 @@ class FakeLookup implements SettlementLookupIndexer {
    lookupCalls = 0;
    currentRoundCalls = 0;
    pageCalls = 0;
+   pageTokens: (string | undefined)[] = [];
    async lookupAssetTransfer(transactionId: string): Promise<IndexedAssetTransfer | undefined> {
       this.lookupCalls += 1;
       if (this.throwFor.has(transactionId)) throw new Error('synthetic lookup failure');
@@ -508,8 +847,19 @@ class FakeLookup implements SettlementLookupIndexer {
       this.currentRoundCalls += 1;
       return this.round;
    }
-   async searchTransactionPage(): Promise<TransactionIdPage> {
+   async searchTransactionPage(_transactionId: string, nextToken?: string): Promise<TransactionIdPage> {
       this.pageCalls += 1;
+      this.pageTokens.push(nextToken);
       const page = this.pages.shift(); if (!page) throw new Error('missing fake absence page'); return page;
    }
+}
+
+function absenceProofSessions(worker: SettlementReconciler): Map<string, {
+   nextToken?: string;
+   seenTokens: Set<string>;
+   coverage?: number;
+}> {
+   return (worker as unknown as {
+      absenceProofSessions: Map<string, { nextToken?: string; seenTokens: Set<string>; coverage?: number }>;
+   }).absenceProofSessions;
 }
