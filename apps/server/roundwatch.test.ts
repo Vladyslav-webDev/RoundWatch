@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { FacilitatorClient } from '@x402/core/server';
@@ -3760,6 +3760,30 @@ test('recovery lookup returns only an exact existing activated watch and never i
       assert.equal(missing.status, 404);
       assert.equal(missing.headers.get('payment-required'), null);
       assert.equal(facilitatorCalls, 0);
+
+      const wrongSpec = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+            ...SPEC,
+            idempotencyKey: 'recovery-lookup-existing',
+            atomicAmount: '1',
+            servicePayer: PAYER,
+         }),
+      });
+      assert.equal(wrongSpec.status, 404);
+      assert.equal(wrongSpec.headers.get('cache-control'), 'no-store');
+
+      const legacySpec = { ...SPEC, idempotencyKey: 'recovery-lookup-null-payer' };
+      store.prepareWatch(legacySpec);
+      const legacy = await app.request('/spike/watch/recover', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({ ...legacySpec, servicePayer: PAYER }),
+      });
+      assert.equal(legacy.status, 404);
+      assert.equal(legacy.headers.get('cache-control'), 'no-store');
+      assert.equal(facilitatorCalls, 0);
    } finally {
       store.close();
    }
@@ -6894,6 +6918,157 @@ test('one watch page failure does not block later watches in the same fair sweep
          1,
       );
    } finally { store.close(); }
+});
+
+test('recovery and preparation idempotency lookups search the unique scope index with durable history', async t => {
+   for (const targetFirst of [true, false]) {
+      await t.test(`target inserted ${targetFirst ? 'before' : 'after'} history`, t => {
+         const directory = mkdtempSync(join(tmpdir(), 'roundwatch-recovery-plan-'));
+         const path = join(directory, 'watch.sqlite');
+         const store = new RoundWatchStore(path);
+         const database = (store as unknown as { database: DatabaseSync }).database;
+
+         try {
+            const sharedSpec = { ...SPEC, idempotencyKey: 'indexed-shared-key' };
+            const legacySpec = { ...SPEC, idempotencyKey: 'indexed-legacy-key' };
+            const firstIntent = intent('INDEXED_PAYER_A_TX');
+            const secondIntent = { ...intent('INDEXED_PAYER_B_TX'), payer: WATCH_SENDER };
+            const targets = () => ({
+               first: store.prepareWatch(sharedSpec, firstIntent).watch,
+               second: store.prepareWatch(sharedSpec, secondIntent).watch,
+               legacy: store.prepareWatch(legacySpec).watch,
+            });
+            let expected = targetFirst ? targets() : undefined;
+
+            // Real durable schema, including its uniqueness constraints. Each
+            // payer has many keys and each historical key has multiple payers.
+            const insert = database.prepare(`
+               INSERT INTO roundwatch_watches (
+                  id, idempotency_key, state, expected_sender, expected_receiver,
+                  asset_id, atomic_amount, expected_service_payer, created_at,
+                  work_unit_budget
+               ) VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?, 500)
+            `);
+            database.exec('BEGIN IMMEDIATE;');
+            for (let i = 0; i < 2_000; i += 1) {
+               for (const payer of [PAYER, WATCH_SENDER, RECEIVER]) {
+                  insert.run(
+                     `history-${i}-${payer}`, `history-key-${i}`,
+                     SPEC.expectedSender, SPEC.expectedReceiver, SPEC.assetId,
+                     SPEC.atomicAmount, payer, '2026-01-01T00:00:00.000Z',
+                  );
+               }
+            }
+            database.exec('COMMIT;');
+            expected ??= targets();
+            assert.equal(
+               (database.prepare('SELECT count(*) AS n FROM roundwatch_watches').get() as { n: number }).n,
+               6_003,
+            );
+
+            const prepare = database.prepare.bind(database);
+            const plans: string[][] = [];
+            // Explain the actual SQL and bindings executed by the store, so a
+            // production predicate regression cannot hide behind copied SQL.
+            t.mock.method(database, 'prepare', (sql: string) => {
+               const statement = prepare(sql);
+               if (/SELECT \* FROM roundwatch_watches\s+WHERE/.test(sql) && sql.includes('idempotency_key')) {
+                  const get = statement.get.bind(statement);
+                  t.mock.method(statement, 'get', (...bindings: SQLInputValue[]) => {
+                     const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...bindings) as Array<{ detail: string }>;
+                     plans.push(plan.map(row => row.detail));
+                     return get(...bindings);
+                  });
+               }
+               return statement;
+            });
+
+            assert.equal(store.getByPayerAndIdempotencyKey(PAYER, sharedSpec.idempotencyKey)?.id, expected.first.id);
+            assert.equal(store.getByPayerAndIdempotencyKey(WATCH_SENDER, sharedSpec.idempotencyKey)?.id, expected.second.id);
+            assert.equal(store.getByPayerAndIdempotencyKey(RECEIVER, sharedSpec.idempotencyKey), undefined);
+            assert.equal(store.getByPayerAndIdempotencyKey(PAYER, 'missing-key'), undefined);
+            assert.equal(store.getByPayerAndIdempotencyKey(PAYER, legacySpec.idempotencyKey), undefined);
+            // Even an internal empty-string caller must not acquire NULL ownership.
+            assert.equal(store.getByPayerAndIdempotencyKey('', legacySpec.idempotencyKey), undefined);
+            assert.equal(store.prepareWatch(sharedSpec, firstIntent).watch.id, expected.first.id);
+            assert.throws(
+               () => store.prepareWatch({ ...sharedSpec, atomicAmount: '1' }, firstIntent),
+               IdempotencyConflictError,
+            );
+            assert.equal(store.prepareWatch(legacySpec).watch.id, expected.legacy.id);
+            assert.throws(
+               () => store.prepareWatch(legacySpec, intent('INDEXED_LEGACY_RETRY')),
+               LegacyIdempotencyReservationError,
+            );
+            assert.equal(store.prepareWatch({ ...SPEC, idempotencyKey: 'indexed-new-key' }, intent('INDEXED_NEW_TX')).created, true);
+
+            assert.ok(plans.length >= 11, 'must capture recovery, exact preparation, and legacy/fallback lookups');
+            for (const plan of plans) {
+               const detail = plan.join('\n');
+               assert.doesNotMatch(detail, /\bSCAN\s+roundwatch_watches\b/i);
+               assert.ok(
+                  plan.some(row => /\bSEARCH\s+roundwatch_watches\b/i.test(row) &&
+                     /\bUSING INDEX roundwatch_idempotency_scope_unique\b/i.test(row) &&
+                     /<expr>\s*=\s*\?/.test(row) && /idempotency_key\s*=\s*\?/.test(row)),
+                  `both scope index keys must constrain the search: ${detail}`,
+               );
+            }
+            t.diagnostic(`Actual idempotency query plans: ${[...new Set(plans.flat())].join('; ')}`);
+         } finally {
+            store.close();
+            rmSync(directory, { recursive: true, force: true });
+         }
+      });
+   }
+});
+
+test('indexed preparation preserves exact-payer precedence when a legacy reservation also exists', () => {
+   const store = new RoundWatchStore(':memory:');
+   const database = (store as unknown as { database: DatabaseSync }).database;
+   try {
+      const prepared = store.prepareWatch(SPEC, intent()).watch;
+      // This coexistence is permitted by the durable unique index. It can arise
+      // in imported history even though new preparation reserves legacy keys.
+      database.prepare(`
+         INSERT INTO roundwatch_watches (
+            id, idempotency_key, state, expected_sender, expected_receiver,
+            asset_id, atomic_amount, created_at, work_unit_budget
+         ) VALUES ('coexisting-legacy', ?, 'expired', ?, ?, ?, ?, ?, 500)
+      `).run(SPEC.idempotencyKey, SPEC.expectedSender, SPEC.expectedReceiver,
+         SPEC.assetId, SPEC.atomicAmount, '2025-01-01T00:00:00.000Z');
+
+      assert.equal(store.prepareWatch(SPEC, intent()).watch.id, prepared.id);
+      assert.throws(
+         () => store.prepareWatch({ ...SPEC, atomicAmount: '1' }, intent()),
+         IdempotencyConflictError,
+      );
+      assert.throws(
+         () => store.prepareWatch(SPEC, { ...intent('COEXISTING_OTHER_TX'), payer: WATCH_SENDER }),
+         LegacyIdempotencyReservationError,
+      );
+      assert.equal(store.getByPayerAndIdempotencyKey(PAYER, SPEC.idempotencyKey)?.id, prepared.id);
+      assert.equal(store.getByPayerAndIdempotencyKey(WATCH_SENDER, SPEC.idempotencyKey), undefined);
+   } finally {
+      store.close();
+   }
+});
+
+test('payer-scoped identity lookup is independent of terminal and nonterminal watch state', () => {
+   const store = new RoundWatchStore(':memory:');
+   const database = (store as unknown as { database: DatabaseSync }).database;
+   try {
+      const prepared = store.prepareWatch(SPEC, intent()).watch;
+      for (const state of ['settlement_pending', 'active', 'matched', 'settlement_unknown', 'expired', 'indeterminate']) {
+         database.prepare('UPDATE roundwatch_watches SET state = ? WHERE id = ?').run(state, prepared.id);
+         const recovered = store.getByPayerAndIdempotencyKey(PAYER, SPEC.idempotencyKey);
+         assert.equal(recovered?.id, prepared.id);
+         assert.equal(recovered?.state, state);
+         assert.equal(store.getByPayerAndIdempotencyKey(WATCH_SENDER, SPEC.idempotencyKey), undefined);
+         assert.equal(store.getByPayerAndIdempotencyKey(PAYER, 'missing-key'), undefined);
+      }
+   } finally {
+      store.close();
+   }
 });
 
 test('idempotency keys are scoped by service payer and exact replays stay within one payer scope', () => {

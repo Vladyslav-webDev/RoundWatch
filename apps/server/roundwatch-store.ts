@@ -827,14 +827,26 @@ export class RoundWatchStore {
       payer: string,
       idempotencyKey: string,
    ): WatchRecord | undefined {
+      const row = this.findPayerIdempotencyRow(payer, idempotencyKey);
+
+      return row ? mapRow(row) : undefined;
+   }
+
+   private findPayerIdempotencyRow(
+      payer: string,
+      idempotencyKey: string,
+   ): WatchRow | undefined {
+      // Match the unique scope index expression. The explicit NULL guard keeps
+      // legacy ownership opaque even for an internal empty-string caller.
       const row = this.database.prepare(`
          SELECT * FROM roundwatch_watches
-         WHERE expected_service_payer = ?
+         WHERE COALESCE(expected_service_payer, '') = ?
+           AND expected_service_payer IS NOT NULL
            AND idempotency_key = ?
          LIMIT 1
       `).get(payer, idempotencyKey) as unknown as WatchRow | undefined;
 
-      return row ? mapRow(row) : undefined;
+      return row;
    }
 
    listActiveWatches(): WatchRecord[] {
@@ -1315,35 +1327,23 @@ export class RoundWatchStore {
       idempotencyKey: string,
       payer?: string,
    ): WatchRow | undefined {
-      if (!payer) {
-         return this.database.prepare(`
-            SELECT * FROM roundwatch_watches
-            WHERE expected_service_payer IS NULL
-              AND idempotency_key = ?
-            ORDER BY created_at ASC
-            LIMIT 1
-         `).get(idempotencyKey) as unknown as WatchRow | undefined;
+      if (payer) {
+         const exact = this.findPayerIdempotencyRow(payer, idempotencyKey);
+         if (exact) return exact;
       }
 
       // Exact payer scope is authoritative. A legacy row with no persisted
       // payer remains a conservative global reservation until it is explicitly
-      // resolved/migrated with trustworthy payer evidence.
+      // resolved/migrated with trustworthy payer evidence. Probe that scope
+      // separately through the same unique expression index.
       return this.database.prepare(`
          SELECT * FROM roundwatch_watches
-         WHERE idempotency_key = ?
-           AND (
-              expected_service_payer = ?
-              OR expected_service_payer IS NULL
-           )
-         ORDER BY
-            CASE WHEN expected_service_payer = ? THEN 0 ELSE 1 END,
-            created_at ASC
+         WHERE COALESCE(expected_service_payer, '') = ''
+           AND expected_service_payer IS NULL
+           AND idempotency_key = ?
+         ORDER BY created_at ASC
          LIMIT 1
-      `).get(
-         idempotencyKey,
-         payer,
-         payer,
-      ) as unknown as WatchRow | undefined;
+      `).get(idempotencyKey) as unknown as WatchRow | undefined;
    }
    private createRefundAuditTable(): void {
       this.database.exec(`
