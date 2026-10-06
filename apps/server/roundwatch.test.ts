@@ -7793,7 +7793,7 @@ test('legacy migration is idempotent and does not fabricate proof or alter match
          assert.equal(legacy?.evidenceVersion, 0);
          assert.equal(legacy?.expiresAt, undefined);
          assert.equal(legacy?.closingRound, undefined);
-         assert.equal(legacy?.workUnitBudget, 500);
+         assert.equal(legacy?.workUnitBudget, undefined);
          assert.equal(legacy?.workUnitsUsed, 0);
          store.close();
       }
