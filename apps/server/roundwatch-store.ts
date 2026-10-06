@@ -220,12 +220,168 @@ interface RefundRow {
    recorded_at: string;
 }
 
-// Keep the partial index and both capacity reads on exactly the same durable
+// Keep the partial index, budget repair, and capacity reads on the same durable
 // open-obligation predicate, including legacy pending/active rows.
 const OPEN_OBLIGATION_PREDICATE = `
    state IN ('settlement_pending', 'active')
    OR (state = 'settlement_unknown' AND settlement_reconciliation_terminal = 0)
 `;
+
+type OpenIndexToken = {
+   kind: 'word' | 'identifier' | 'string' | 'integer' | 'symbol';
+   value: string;
+};
+type OpenIndexPredicate =
+   | { kind: 'and' | 'or'; terms: OpenIndexPredicate[] }
+   | { kind: '=' | 'in'; column: string; values: string[] };
+
+// SQLite folds ASCII identifier case; literal data must keep its exact case.
+const sqliteIdentifier = (value: string) =>
+   value.replace(/[A-Z]/g, character => character.toLowerCase());
+
+// This lexer only supports the index prerequisite, not general SQL parsing.
+// Quoted contents and comments can never become a structural WHERE token.
+function tokenizeOpenIndexSql(sql: string): OpenIndexToken[] {
+   const tokens: OpenIndexToken[] = [];
+   let offset = 0;
+   while (offset < sql.length) {
+      const character = sql[offset]!;
+      // SQLite treats a BOM at a token boundary as trivia. Other non-ASCII
+      // spaces remain unsupported identifier contents, never whitespace.
+      if (/[ \t\n\r\f\uFEFF]/.test(character)) { offset++; continue; }
+      if (sql.startsWith('--', offset)) {
+         const end = sql.indexOf('\n', offset + 2);
+         offset = end < 0 ? sql.length : end + 1;
+         continue;
+      }
+      if (sql.startsWith('/*', offset)) {
+         const end = sql.indexOf('*/', offset + 2);
+         // SQLite permits block comments to continue through end-of-input.
+         offset = end < 0 ? sql.length : end + 2;
+         continue;
+      }
+      if (character === "'" || character === '"' || character === '`' || character === '[') {
+         const closing = character === '[' ? ']' : character;
+         let value = '';
+         let closed = false;
+         offset++;
+         while (offset < sql.length) {
+            const next = sql[offset++]!;
+            if (next !== closing) { value += next; continue; }
+            if (character !== '[' && sql[offset] === closing) {
+               value += closing;
+               offset++;
+            } else {
+               closed = true;
+               break;
+            }
+         }
+         if (!closed) throw new Error('Unterminated index quote');
+         tokens.push({ kind: character === "'" ? 'string' : 'identifier',
+            value: character === "'" ? value : sqliteIdentifier(value) });
+         continue;
+      }
+      // A BOM inside an unquoted identifier belongs to that identifier; consume
+      // it here so the trivia branch cannot erase it on the next iteration.
+      const word = /^[A-Za-z_][A-Za-z_0-9$\uFEFF]*/.exec(sql.slice(offset));
+      const integer = /^[0-9]+/.exec(sql.slice(offset));
+      if (word || integer) {
+         const value = (word ?? integer)![0];
+         tokens.push({ kind: word ? 'word' : 'integer',
+            value: word ? sqliteIdentifier(value) : value.replace(/^0+(?=\d)/, '') });
+         offset += value.length;
+      } else {
+         tokens.push({ kind: 'symbol', value: character });
+         offset++;
+      }
+   }
+   return tokens;
+}
+
+function normalizeOpenIndexPredicate(tokens: OpenIndexToken[]): string {
+   let offset = 0;
+   const take = (kind: OpenIndexToken['kind'], value: string) => {
+      if (tokens[offset]?.kind !== kind || tokens[offset]?.value !== value) return false;
+      offset++;
+      return true;
+   };
+   const requireToken = (kind: OpenIndexToken['kind'], value: string) => {
+      if (!take(kind, value)) throw new Error('Unsupported index predicate');
+   };
+   const literal = () => {
+      const token = tokens[offset++];
+      if (!token || (token.kind !== 'string' && token.kind !== 'integer')) {
+         throw new Error('Unsupported index literal');
+      }
+      return JSON.stringify([token.kind, token.value]);
+   };
+   const primary = (): OpenIndexPredicate => {
+      if (take('symbol', '(')) {
+         const expression = or();
+         requireToken('symbol', ')');
+         return expression;
+      }
+      const column = tokens[offset++];
+      if (!column || (column.kind !== 'word' && column.kind !== 'identifier')) {
+         throw new Error('Unsupported index column');
+      }
+      if (take('symbol', '=')) return { kind: '=', column: column.value, values: [literal()] };
+      requireToken('word', 'in');
+      requireToken('symbol', '(');
+      const values = [literal()];
+      while (take('symbol', ',')) values.push(literal());
+      requireToken('symbol', ')');
+      return { kind: 'in', column: column.value, values: values.sort() };
+   };
+   const and = (): OpenIndexPredicate => {
+      const terms = [primary()];
+      while (take('word', 'and')) terms.push(primary());
+      return terms.length === 1 ? terms[0]! : { kind: 'and', terms };
+   };
+   const or = (): OpenIndexPredicate => {
+      const terms = [and()];
+      while (take('word', 'or')) terms.push(and());
+      return terms.length === 1 ? terms[0]! : { kind: 'or', terms };
+   };
+   const normalize = (predicate: OpenIndexPredicate): string => {
+      if ('column' in predicate) return JSON.stringify([predicate.kind, predicate.column, predicate.values]);
+      const terms = (term: OpenIndexPredicate): OpenIndexPredicate[] =>
+         term.kind === predicate.kind && 'terms' in term ? term.terms.flatMap(terms) : [term];
+      return JSON.stringify([predicate.kind, predicate.terms.flatMap(terms).map(normalize).sort()]);
+   };
+   const predicate = or();
+   // sqlite_schema normally omits the terminator, but accept a single one.
+   take('symbol', ';');
+   if (offset !== tokens.length) throw new Error('Unsupported index predicate suffix');
+   return normalize(predicate);
+}
+
+function hasOpenObligationPartialIndex(database: DatabaseSync): boolean {
+   // index_list establishes ownership and actual partialness independently of
+   // DDL text. Resolve the real name before querying its schema definition.
+   const indexes = database.prepare('PRAGMA index_list(roundwatch_watches)').all() as
+      Array<{ name: string; partial: number }>;
+   const index = indexes.find(row => sqliteIdentifier(row.name) === 'roundwatch_open_obligations_idx');
+   if (!index || index.partial !== 1) return false;
+   const schema = database.prepare(`
+      SELECT sql FROM sqlite_schema
+      WHERE type = 'index' AND name = ? AND tbl_name = 'roundwatch_watches' COLLATE NOCASE
+   `).get(index.name) as { sql: string | null } | undefined;
+   if (!schema?.sql) return false;
+   try {
+      const tokens = tokenizeOpenIndexSql(schema.sql);
+      let depth = 0;
+      const where = tokens.findIndex(token => {
+         if (token.kind === 'symbol' && token.value === '(') depth++;
+         if (token.kind === 'symbol' && token.value === ')') depth--;
+         return depth === 0 && token.kind === 'word' && token.value === 'where';
+      });
+      return where >= 0 && normalizeOpenIndexPredicate(tokens.slice(where + 1)) ===
+         normalizeOpenIndexPredicate(tokenizeOpenIndexSql(OPEN_OBLIGATION_PREDICATE));
+   } catch {
+      return false;
+   }
+}
 
 export class RoundWatchStore {
    private readonly database: DatabaseSync;
@@ -361,15 +517,6 @@ export class RoundWatchStore {
       // retargeted to a temporary legacy table during ALTER TABLE RENAME.
       this.createRefundAuditTable();
 
-      // Existing rows predate the durable work contract. Give them a fresh
-      // conservative budget from migration time instead of leaving an
-      // accidentally unbounded obligation after deploy.
-      this.database.prepare(`
-         UPDATE roundwatch_watches
-         SET work_unit_budget = ?
-         WHERE work_unit_budget IS NULL
-      `).run(this.workUnitBudget);
-
       this.database.exec(`
          CREATE UNIQUE INDEX IF NOT EXISTS roundwatch_idempotency_scope_unique
          ON roundwatch_watches(
@@ -403,6 +550,40 @@ export class RoundWatchStore {
          ON roundwatch_watches(state, polling_retry_at, created_at)
          WHERE state = 'active';
       `);
+
+      // IF NOT EXISTS alone would accept a same-named, broader index and make
+      // even an explicitly indexed repair traverse terminal history.
+      if (!hasOpenObligationPartialIndex(this.database)) {
+         this.database.close();
+         throw new Error(
+            'RoundWatch budget backfill requires roundwatch_open_obligations_idx with the open-obligation partial predicate',
+         );
+      }
+
+      // Repair only open obligations after all columns and the C2 partial index
+      // exist. Terminal NULL budgets and all existing budgets/usage stay intact.
+      const budgetRepairSql = `
+         UPDATE roundwatch_watches
+         INDEXED BY roundwatch_open_obligations_idx
+         SET work_unit_budget = ?
+         WHERE (${OPEN_OBLIGATION_PREDICATE})
+           AND work_unit_budget IS NULL
+      `;
+      // SQLite's partial-index implication rules are narrower than semantic
+      // equivalence (e.g. reordered IN lists). Preserve the canonical repair
+      // and fail explicitly if an equivalent index cannot support that SQL.
+      const budgetRepair = (() => {
+         try {
+            return this.database.prepare(budgetRepairSql);
+         } catch (cause) {
+            this.database.close();
+            throw new Error(
+               'RoundWatch budget backfill requires roundwatch_open_obligations_idx with the open-obligation partial predicate usable by the forced repair',
+               { cause },
+            );
+         }
+      })();
+      budgetRepair.run(this.workUnitBudget);
 
       // evidence_version=0 rows are legacy. No new proof fields are fabricated.
    }
