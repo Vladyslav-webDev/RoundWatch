@@ -220,6 +220,12 @@ interface RefundRow {
    recorded_at: string;
 }
 
+// Keep the partial index and both capacity reads on exactly the same durable
+// open-obligation predicate, including legacy pending/active rows.
+const OPEN_OBLIGATION_PREDICATE = `
+   state IN ('settlement_pending', 'active')
+   OR (state = 'settlement_unknown' AND settlement_reconciliation_terminal = 0)
+`;
 
 export class RoundWatchStore {
    private readonly database: DatabaseSync;
@@ -387,12 +393,11 @@ export class RoundWatchStore {
          WHERE state IN ('settlement_pending', 'settlement_unknown')
            AND expected_service_transaction IS NOT NULL;
 
-         CREATE INDEX IF NOT EXISTS roundwatch_open_payer_idx
-         ON roundwatch_watches(
-            COALESCE(expected_service_payer, service_payer),
-            state,
-            settlement_reconciliation_terminal
-         );
+         CREATE INDEX IF NOT EXISTS roundwatch_open_obligations_idx
+         ON roundwatch_watches(COALESCE(expected_service_payer, service_payer))
+         WHERE ${OPEN_OBLIGATION_PREDICATE};
+
+         DROP INDEX IF EXISTS roundwatch_open_payer_idx;
 
          CREATE INDEX IF NOT EXISTS roundwatch_polling_due_idx
          ON roundwatch_watches(state, polling_retry_at, created_at)
@@ -987,56 +992,28 @@ export class RoundWatchStore {
          );
       }
 
-      const counts = this.database.prepare(`
+      // Without INDEXED BY, SQLite can choose a state-index OR plan that
+      // traverses terminal settlement_unknown history before filtering it.
+      // Require the open-only access path even before planner statistics exist.
+      const openRows = this.database.prepare(`
          SELECT
-            SUM(
-               CASE
-                  WHEN (
-                     state IN ('settlement_pending', 'active')
-                     OR (
-                        state = 'settlement_unknown'
-                        AND settlement_reconciliation_terminal = 0
-                     )
-                  ) THEN 1
-                  ELSE 0
-               END
-            ) AS unfinished,
-            SUM(CASE WHEN state = 'active' THEN 1 ELSE 0 END) AS active,
-            SUM(
-               CASE WHEN state = 'settlement_pending' THEN 1 ELSE 0 END
-            ) AS pending,
-            SUM(
-               CASE
-                  WHEN state = 'settlement_unknown'
-                     AND settlement_reconciliation_terminal = 0
-                  THEN 1
-                  ELSE 0
-               END
-            ) AS unresolved_unknown
-         FROM roundwatch_watches
-      `).get() as unknown as {
-         unfinished: number | null;
-         active: number | null;
-         pending: number | null;
-         unresolved_unknown: number | null;
-      };
-
-      const activeRows = this.database.prepare(`
-         SELECT
+            state,
             scan_after_round,
             closing_round,
             activated_at,
             created_at,
             expires_at
-         FROM roundwatch_watches
-         WHERE state = 'active'
+         FROM roundwatch_watches INDEXED BY roundwatch_open_obligations_idx
+         WHERE (${OPEN_OBLIGATION_PREDICATE})
       `).all() as unknown as Array<{
+         state: WatchState;
          scan_after_round: number | null;
          closing_round: number | null;
          activated_at: string | null;
          created_at: string;
          expires_at: string | null;
       }>;
+      const activeRows = openRows.filter(row => row.state === 'active');
 
       const nowMs = this.currentTime().getTime();
       const activeAges = activeRows
@@ -1069,11 +1046,14 @@ export class RoundWatchStore {
       }).length;
 
       return {
-         unfinishedWatches: counts.unfinished ?? 0,
-         activeWatches: counts.active ?? 0,
-         settlementPendingWatches: counts.pending ?? 0,
-         unresolvedSettlementUnknownWatches:
-            counts.unresolved_unknown ?? 0,
+         unfinishedWatches: openRows.length,
+         activeWatches: activeRows.length,
+         settlementPendingWatches: openRows.filter(
+            row => row.state === 'settlement_pending',
+         ).length,
+         unresolvedSettlementUnknownWatches: openRows.filter(
+            row => row.state === 'settlement_unknown',
+         ).length,
          activeWatchesMissingScanBaseline: activeRows.filter(
             row => row.scan_after_round === null,
          ).length,
@@ -1132,14 +1112,8 @@ export class RoundWatchStore {
          : '';
       const row = this.database.prepare(`
          SELECT COUNT(*) AS count
-         FROM roundwatch_watches
-         WHERE (
-            state IN ('settlement_pending', 'active')
-            OR (
-               state = 'settlement_unknown'
-               AND settlement_reconciliation_terminal = 0
-            )
-         )
+         FROM roundwatch_watches INDEXED BY roundwatch_open_obligations_idx
+         WHERE (${OPEN_OBLIGATION_PREDICATE})
          ${payerClause}
       `).get(...(payer ? [payer] : [])) as unknown as { count: number };
 

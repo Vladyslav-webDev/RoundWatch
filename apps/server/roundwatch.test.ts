@@ -1985,7 +1985,8 @@ test('store creates indexes for active, reconciliation, and payer-capacity queri
 
       assert.ok(names.has('roundwatch_active_created_idx'));
       assert.ok(names.has('roundwatch_reconcile_due_idx'));
-      assert.ok(names.has('roundwatch_open_payer_idx'));
+      assert.ok(names.has('roundwatch_open_obligations_idx'));
+      assert.equal(names.has('roundwatch_open_payer_idx'), false);
 
       database.close();
    } finally {
