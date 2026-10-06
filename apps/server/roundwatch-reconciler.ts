@@ -175,6 +175,7 @@ export class SettlementReconciler {
       const generation = this.generation;
       this.running = true;
       try {
+         this.pruneAbsenceProofSessions();
          for (const watch of this.store.listSettlementReconciliationCandidates()) {
             outcome.attempted += 1;
             try {
@@ -202,8 +203,27 @@ export class SettlementReconciler {
          }
       } finally {
          this.running = false;
+         // Stop may be followed by closing SQLite while provider work is in
+         // flight. An invalidated sweep leaves pruning to the next sweep.
+         if (generation === this.generation) this.pruneAbsenceProofSessions();
       }
       return outcome;
+   }
+
+   private pruneAbsenceProofSessions(): void {
+      for (const watchId of this.absenceProofSessions.keys()) {
+         const watch = this.store.getWatch(watchId);
+         // Due-candidate selection excludes backoff rows. Their pagination
+         // state still belongs to a live reconciliation obligation.
+         if (
+            !watch ||
+            (watch.state !== 'settlement_pending' && watch.state !== 'settlement_unknown') ||
+            watch.settlementReconciliationTerminal ||
+            !watch.expectedServiceTransaction
+         ) {
+            this.absenceProofSessions.delete(watchId);
+         }
+      }
    }
 
    private async reconcileWatch(watch: WatchRecord): Promise<CustomerTurnOutcome> {

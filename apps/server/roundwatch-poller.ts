@@ -179,6 +179,39 @@ export class RoundWatchPoller {
    ): Promise<WorkerCycleOutcome> {
       const generation = this.generation;
       const cycleStartedAt = performance.now();
+      let outcome: WorkerCycleOutcome;
+      try {
+         this.pruneScanSessions();
+         outcome = await this.runPollingSweep(generation, onProgress);
+      } finally {
+         // Stop may be followed by closing SQLite while provider work is in
+         // flight. An invalidated sweep leaves pruning to the next sweep.
+         if (generation === this.generation) this.pruneScanSessions();
+      }
+      return this.finishCapacityCycle(outcome, cycleStartedAt);
+   }
+
+   private pruneScanSessions(): void {
+      // Check only retained IDs through the primary-key lookup. Scheduling
+      // backoff is not loss of durable eligibility to own a continuation.
+      for (const [id, session] of this.sessions) {
+         const watch = this.store.getWatch(id);
+         if (
+            watch?.state !== 'active' ||
+            watch.evidenceVersion !== 1 ||
+            watch.scanAfterRound === undefined ||
+            watch.expiresAt === undefined ||
+            session.minRound !== watch.scanAfterRound + 1
+         ) {
+            this.sessions.delete(id);
+         }
+      }
+   }
+
+   private async runPollingSweep(
+      generation: number,
+      onProgress?: () => void,
+   ): Promise<WorkerCycleOutcome> {
       const outcome: WorkerCycleOutcome = {
          attempted: 0,
          succeeded: 0,
@@ -188,7 +221,7 @@ export class RoundWatchPoller {
 
       if (watches.length === 0) {
          this.nextWatchIndex = 0;
-         return this.finishCapacityCycle(outcome, cycleStartedAt);
+         return outcome;
       }
 
       const startIndex = this.nextWatchIndex % watches.length;
@@ -309,7 +342,7 @@ export class RoundWatchPoller {
          }
       }
 
-      return this.finishCapacityCycle(outcome, cycleStartedAt);
+      return outcome;
    }
 
    private finishCapacityCycle(

@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -4361,6 +4362,332 @@ test('low coverage, pagination failure, and repeated tokens cannot advance or ex
       assert.equal(store.getWatch(watch.id)?.scanAfterRound, 100);
    } finally { store.close(); }
 });
+
+const pollerSessions = (poller: RoundWatchPoller): ReadonlyMap<string, unknown> =>
+   (poller as unknown as { sessions: ReadonlyMap<string, unknown> }).sessions;
+
+test('C3 poller terminal churn reclaims sessions even with an empty due set', async () => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   try {
+      for (let i = 0; i < 36; i += 1) {
+         const transaction = `C3_POLL_CHURN_${i}`;
+         const watch = store.prepareWatch(
+            { ...SPEC, idempotencyKey: `c3-poll-churn-${i}` }, intent(transaction),
+         ).watch;
+         store.activateWatch(watch.id, { transaction, network: ALGORAND_TESTNET, payer: PAYER }, 100);
+         indexer.pages.push({ transactions: [], currentRound: 105, nextToken: `page-${i}` });
+         await poller.runOnce();
+         assert.equal(pollerSessions(poller).size, 1);
+         assert.equal(store.getWatch(watch.id)?.scanAfterRound, 100);
+
+         // Another owner terminalizes the watch, without finishing pagination.
+         if (i % 3 === 0) store.markMatched(watch.id, `C3_INVOICE_${i}`, 101);
+         else if (i % 3 === 1) {
+            store.setClosingRound(watch.id, 100);
+            assert.equal(store.markExpired(watch.id, 100, 100), true);
+         } else store.recordPollingFailure(watch.id, {
+            code: 'synthetic_permanent_failure', disposition: 'permanent',
+         });
+         const terminal = store.getWatch(watch.id);
+         assert.equal(store.listPollingCandidates().length, 0);
+         assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+         assert.equal(pollerSessions(poller).size, 0, `retained state after watch ${i}`);
+         assert.deepEqual(store.getWatch(watch.id), terminal);
+         assert.equal(indexer.currentRoundCalls, i + 1);
+         assert.equal(indexer.pageCalls.length, i + 1);
+      }
+   } finally { store.close(); }
+});
+
+test('C3 poller preserves a valid continuation across a non-due empty sweep', async () => {
+   let now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'retained-page' });
+      await poller.runOnce();
+      store.recordPollingFailure(watch.id, {
+         code: 'synthetic_defer', disposition: 'transient',
+         retryAt: new Date('2026-10-06T10:01:00Z'),
+      });
+      const deferred = store.getWatch(watch.id);
+      const session = pollerSessions(poller).get(watch.id);
+      assert.ok(session);
+      assert.equal(store.listPollingCandidates().length, 0);
+      assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+      assert.equal(pollerSessions(poller).get(watch.id), session);
+      assert.deepEqual(store.getWatch(watch.id), deferred);
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+
+      now = new Date('2026-10-06T10:01:00Z');
+      indexer.pages.push({ transactions: [], currentRound: 105 });
+      await poller.runOnce();
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.deepEqual(indexer.pageCalls.at(-1), { min: 101, max: 105, nextToken: 'retained-page' });
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 105);
+      assert.equal(store.getWatch(watch.id)?.workUnitsUsed, 2);
+      assert.equal(pollerSessions(poller).size, 0);
+   } finally { store.close(); }
+});
+
+test('C3 poller discards incoherent pagination after another owner advances coverage', async () => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'old-window' });
+      await poller.runOnce();
+      assert.equal(store.advanceScanRound(watch.id, 100, 102), true);
+      indexer.pages.push({ transactions: [], currentRound: 105 });
+      await poller.runOnce();
+      assert.deepEqual(indexer.pageCalls.at(-1), { min: 103, max: 105 });
+      assert.equal(indexer.currentRoundCalls, 2);
+      assert.equal(store.getWatch(watch.id)?.scanAfterRound, 105);
+      assert.equal(pollerSessions(poller).size, 0);
+   } finally { store.close(); }
+});
+
+for (const tokens of [['same', 'same'], ['first', 'second', 'first']]) {
+   test(`C3 poller continuation protection retains seen tokens: ${tokens.join(' -> ')}`, async () => {
+      const now = new Date('2026-10-06T10:00:00Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const indexer = new FakeIndexer(105);
+      const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+      try {
+         const watch = store.prepareWatch(SPEC, intent()).watch;
+         store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+         for (const [i, nextToken] of tokens.entries()) {
+            indexer.pages.push({ transactions: [], currentRound: 105, nextToken });
+            const outcome = await poller.runOnce();
+            assert.equal(outcome.failed, i === tokens.length - 1 ? 1 : 0);
+            assert.equal(pollerSessions(poller).size, i === tokens.length - 1 ? 0 : 1);
+            assert.deepEqual(indexer.pageCalls.at(-1), {
+               min: 101, max: 105, ...(i === 0 ? {} : { nextToken: tokens[i - 1] }),
+            });
+         }
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.equal(store.getWatch(watch.id)?.scanAfterRound, 100);
+         assert.equal(store.getWatch(watch.id)?.workUnitsUsed, tokens.length);
+         assert.equal(store.getWatch(watch.id)?.pollingFailureCode, 'indexer_protocol_failure');
+      } finally { store.close(); }
+   });
+}
+
+test('C3 poller stale selected candidate cannot spend work or reuse its session', async t => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'stale-page' });
+      await poller.runOnce();
+      const stale = store.getWatch(watch.id)!;
+      let terminal: WatchRecord | undefined;
+      t.mock.method(store, 'listPollingCandidates', () => {
+         store.markMatched(watch.id, 'C3_RACE_INVOICE', 101);
+         terminal = store.getWatch(watch.id);
+         return [stale];
+      });
+      assert.deepEqual(await poller.runOnce(), { attempted: 1, succeeded: 0, failed: 0, noOp: 1 });
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+      assert.deepEqual(store.getWatch(watch.id), terminal);
+      assert.equal(store.getWatch(watch.id)?.workUnitsUsed, 1);
+      assert.equal(pollerSessions(poller).size, 0);
+   } finally { store.close(); }
+});
+
+test('C3 poller defers stopped-sweep pruning until the next sweep after terminalization', async t => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   let release!: (page: TransactionPage) => void;
+   const page = new Promise<TransactionPage>(resolve => { release = resolve; });
+   let entered!: () => void;
+   const requested = new Promise<void>(resolve => { entered = resolve; });
+   let sweep: Promise<unknown> | undefined;
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'in-flight-page' });
+      await poller.runOnce();
+      t.mock.method(indexer, 'searchWatchPage', (_watch: WatchRecord, min: number, max: number, nextToken?: string) => {
+         indexer.pageCalls.push({ min, max, nextToken });
+         entered();
+         return page;
+      });
+      sweep = poller.runOnce();
+      await requested;
+      assert.equal(indexer.pageCalls.at(-1)?.nextToken, 'in-flight-page');
+      store.markMatched(watch.id, 'C3_IN_FLIGHT_INVOICE', 101);
+      const terminal = store.getWatch(watch.id);
+      poller.stop();
+      release({ transactions: [], currentRound: 105, nextToken: 'late-page' });
+      await sweep;
+      assert.equal(pollerSessions(poller).size, 1);
+      assert.deepEqual(store.getWatch(watch.id), terminal);
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 2);
+      assert.equal(poller.healthSnapshot().started, false);
+      assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+      assert.equal(pollerSessions(poller).size, 0);
+   } finally {
+      release({ transactions: [], currentRound: 105 });
+      await sweep;
+      poller.stop();
+      store.close();
+   }
+});
+
+test('C3 P3 stopped poller skips final retained-session reads after SQLite closes', async t => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   let release!: (round: number) => void;
+   const round = new Promise<number>(resolve => { release = resolve; });
+   let entered!: () => void;
+   const requested = new Promise<void>(resolve => { entered = resolve; });
+   let sweep: ReturnType<RoundWatchPoller['runOnce']> | undefined;
+   let closed = false;
+   try {
+      const retained = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(retained.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'retained-page' });
+      await poller.runOnce();
+      store.recordPollingFailure(retained.id, {
+         code: 'synthetic_defer', disposition: 'transient', retryAt: new Date('2026-10-06T10:01:00Z'),
+      });
+      const session = pollerSessions(poller).get(retained.id);
+      assert.ok(session);
+      const awaiting = store.prepareWatch({ ...SPEC, idempotencyKey: 'c3-p3-awaiting' }, intent('AWAITING')).watch;
+      store.activateWatch(awaiting.id, { transaction: 'AWAITING', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      t.mock.method(indexer, 'getCurrentRound', () => {
+         indexer.currentRoundCalls += 1;
+         entered();
+         return round;
+      });
+      const reads = t.mock.method(store, 'getWatch');
+      sweep = poller.runOnce();
+      await requested;
+      poller.stop();
+      const stoppedHealth = poller.healthSnapshot();
+      const readsBeforeClose = reads.mock.callCount();
+      // Production closes SQLite immediately after stopping workers, without draining.
+      store.close();
+      closed = true;
+      release(100); // No new rounds: the provider turn completes without a store write.
+      assert.deepEqual(await sweep, { attempted: 1, succeeded: 0, failed: 0, noOp: 1 });
+      assert.equal(reads.mock.callCount(), readsBeforeClose);
+      assert.equal(pollerSessions(poller).get(retained.id), session);
+      assert.deepEqual(poller.healthSnapshot(), stoppedHealth);
+      assert.equal(indexer.currentRoundCalls, 2);
+      assert.equal(indexer.pageCalls.length, 1);
+   } finally {
+      release(100);
+      try { await sweep; } finally {
+         poller.stop();
+         if (!closed) store.close();
+      }
+   }
+});
+
+test('C3 P3 completed empty poll cycles include initial and final pruning in monotonic duration', async t => {
+   let now = new Date('2026-10-06T10:00:00Z');
+   let monotonic = 100;
+   const clock = t.mock.method(performance, 'now', () => monotonic);
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeIndexer(105);
+   const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+      indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'retained-page' });
+      await poller.runOnce();
+      store.recordPollingFailure(watch.id, {
+         code: 'synthetic_defer', disposition: 'transient', retryAt: new Date('2026-10-06T10:01:00Z'),
+      });
+      const getWatch = store.getWatch.bind(store);
+      const candidates = store.listPollingCandidates.bind(store);
+      t.mock.method(store, 'listPollingCandidates', () => { monotonic += 3; return candidates(); });
+      const health = poller.healthSnapshot();
+      for (const terminal of [false, true]) {
+         if (terminal) store.markMatched(watch.id, 'C3_TIMING_INVOICE', 101);
+         now = new Date(now.getTime() + 1_000);
+         const previous = poller.capacitySnapshot();
+         let reads = 0;
+         const pruning = t.mock.method(store, 'getWatch', (id: string) => {
+            reads += 1;
+            assert.equal(id, watch.id);
+            if (reads === 2) assert.deepEqual(poller.capacitySnapshot(), previous, 'final pruning precedes publication');
+            monotonic += reads === 1 ? 7 : 11;
+            return getWatch(id);
+         });
+         const clockReads = clock.mock.callCount();
+         assert.deepEqual(await poller.runOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+         assert.deepEqual(poller.capacitySnapshot(), {
+            ...previous, lastCycleCompletedAt: now.toISOString(), lastCycleDurationMs: terminal ? 10 : 21,
+            watchesAttemptedLastCycle: 0, watchesSucceededLastCycle: 0, watchesFailedLastCycle: 0,
+         });
+         assert.equal(reads, terminal ? 1 : 2);
+         assert.equal(clock.mock.callCount() - clockReads, 2, 'only the existing cycle clock is used');
+         assert.equal(pollerSessions(poller).size, terminal ? 0 : 1);
+         assert.deepEqual(poller.healthSnapshot(), health);
+         pruning.mock.restore();
+      }
+      assert.equal(indexer.currentRoundCalls, 1);
+      assert.equal(indexer.pageCalls.length, 1);
+   } finally { store.close(); }
+});
+
+for (const phase of ['initial', 'final'] as const) {
+   test(`C3 P3 valid-generation ${phase} poll pruning errors reject without replacing completion`, async t => {
+      let now = new Date('2026-10-06T10:00:00Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const indexer = new FakeIndexer(105);
+      const poller = new RoundWatchPoller(store, indexer, 5_000, 100, () => now);
+      try {
+         const watch = store.prepareWatch(SPEC, intent()).watch;
+         store.activateWatch(watch.id, { transaction: 'SERVICE_TX', network: ALGORAND_TESTNET, payer: PAYER }, 100);
+         indexer.pages.push({ transactions: [], currentRound: 105, nextToken: 'retained-page' });
+         await poller.runOnce();
+         store.recordPollingFailure(watch.id, {
+            code: 'synthetic_defer', disposition: 'transient', retryAt: new Date('2026-10-06T10:01:00Z'),
+         });
+         const previous = poller.capacitySnapshot();
+         const health = poller.healthSnapshot();
+         const getWatch = store.getWatch.bind(store);
+         const failure = new Error(`${phase} pruning store failure`);
+         let reads = 0;
+         t.mock.method(store, 'getWatch', (id: string) => {
+            reads += 1;
+            if (reads === (phase === 'initial' ? 1 : 2)) throw failure;
+            return getWatch(id);
+         });
+         now = new Date(now.getTime() + 1_000);
+         await assert.rejects(poller.runOnce(), error => error === failure);
+         assert.equal(reads, 2, 'the real initial and final retained-ID pruning paths execute');
+         assert.deepEqual(poller.capacitySnapshot(), previous);
+         assert.deepEqual(poller.healthSnapshot(), health);
+         assert.equal(pollerSessions(poller).size, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.equal(indexer.pageCalls.length, 1);
+      } finally { store.close(); }
+   });
+}
 
 test('restart mid-pagination replays the bounded window from the durable cursor', async () => {
    const directory = mkdtempSync(join(tmpdir(), 'roundwatch-page-'));
