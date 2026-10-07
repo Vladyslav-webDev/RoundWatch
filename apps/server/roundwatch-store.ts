@@ -20,7 +20,18 @@ export type WatchTerminalReason =
    | 'work_budget_exhausted'
    | 'indexer_permanent_failure';
 
-export type WatchWorkPurpose = 'reconciliation' | 'polling';
+export type WorkClaim =
+   | {
+      purpose: 'polling';
+      expectedScanAfterRound: number;
+      expectedClosingRound: number | null;
+      expectedPollingFailureCount: number;
+   }
+   | {
+      purpose: 'reconciliation';
+      expectedServiceTransaction: string;
+      expectedReconciliationAttempts: number;
+   };
 
 export type PollingFailureDisposition =
    | 'permanent'
@@ -835,13 +846,29 @@ export class RoundWatchStore {
 
    claimWorkUnit(
       id: string,
-      purpose: WatchWorkPurpose,
+      claim: WorkClaim,
    ): 'claimed' | 'exhausted' | 'inactive' {
-      // Candidate snapshots cannot authorize either mutation. Re-establish
-      // this turn's eligibility in each atomic durable UPDATE.
-      const eligibility = purpose === 'reconciliation'
-         ? "state IN ('settlement_pending', 'settlement_unknown') AND settlement_reconciliation_terminal = 0"
-         : "state = 'active'";
+      // The successful conditional UPDATE is the charge's linearization point.
+      // Re-establish eligibility, selected plan compatibility, and current due
+      // status atomically with either mutation. Later staleness does not refund
+      // a legitimate claim; two still-fresh owners may both claim without leases.
+      const claimNow = this.currentTime().toISOString();
+      const eligibility = claim.purpose === 'polling'
+         ? `state = 'active'
+            AND evidence_version = 1
+            AND scan_after_round = ?
+            AND expires_at IS NOT NULL
+            AND closing_round IS ?
+            AND polling_failure_count = ?
+            AND (polling_retry_at IS NULL OR polling_retry_at <= ?)`
+         : `state IN ('settlement_pending', 'settlement_unknown')
+            AND settlement_reconciliation_terminal = 0
+            AND expected_service_transaction = ?
+            AND reconciliation_attempts = ?
+            AND (reconciliation_next_attempt_at IS NULL OR reconciliation_next_attempt_at <= ?)`;
+      const expectations = claim.purpose === 'polling'
+         ? [claim.expectedScanAfterRound, claim.expectedClosingRound, claim.expectedPollingFailureCount, claimNow]
+         : [claim.expectedServiceTransaction, claim.expectedReconciliationAttempts, claimNow];
       const claimed = this.database.prepare(`
          UPDATE roundwatch_watches
          SET work_units_used = work_units_used + 1
@@ -849,7 +876,7 @@ export class RoundWatchStore {
            AND ${eligibility}
            AND work_unit_budget IS NOT NULL
            AND work_units_used < work_unit_budget
-      `).run(id);
+      `).run(id, ...expectations);
 
       if (claimed.changes === 1) {
          return 'claimed';
@@ -865,7 +892,7 @@ export class RoundWatchStore {
            AND ${eligibility}
            AND work_unit_budget IS NOT NULL
            AND work_units_used >= work_unit_budget
-      `).run(id);
+      `).run(id, ...expectations);
 
       return exhausted.changes === 1 ? 'exhausted' : 'inactive';
    }

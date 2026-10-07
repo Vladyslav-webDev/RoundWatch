@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 
+import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { RoundWatchStore, type WatchRecord, type WatchState } from './roundwatch-store.js';
 
 const OPEN_INDEX = 'roundwatch_open_obligations_idx';
@@ -531,24 +532,40 @@ test('C4 NULL repairs preserve B4 purpose eligibility and usage below, at, and a
       store.close();
       store = new RoundWatchStore(path, { workUnitBudget: BUDGET });
       for (const fixture of fixtures) {
+         const repaired: WatchRecord = store.getWatch(fixture.id)!;
+         assert.equal(repaired.workUnitBudget, BUDGET);
+         assert.equal(repaired.workUnitsUsed, fixture.used);
+         const purpose = fixture.state === 'active' ? 'polling' : 'reconciliation';
+         // Migration eligibility deliberately includes missing proof/transaction
+         // terms and future retries. C5 claim admission must still reject them.
+         assert.equal(store.claimWorkUnit(fixture.id, currentWorkClaim(store, fixture.id, purpose)), 'inactive');
+         assert.deepEqual(store.getWatch(fixture.id), repaired);
+         if (purpose === 'polling') {
+            databaseOf(store).prepare(`UPDATE roundwatch_watches
+               SET evidence_version = 1, scan_after_round = 100, polling_retry_at = NULL
+               WHERE id = ?`).run(fixture.id);
+         } else {
+            databaseOf(store).prepare(`UPDATE roundwatch_watches
+               SET expected_service_transaction = ?, reconciliation_next_attempt_at = NULL
+               WHERE id = ?`).run(`service-${fixture.id}`, fixture.id);
+         }
          const before: WatchRecord = store.getWatch(fixture.id)!;
          assert.equal(before.workUnitBudget, BUDGET);
          assert.equal(before.workUnitsUsed, fixture.used);
-         const purpose = fixture.state === 'active' ? 'polling' : 'reconciliation';
          const wrongPurpose = purpose === 'polling' ? 'reconciliation' : 'polling';
-         assert.equal(store.claimWorkUnit(fixture.id, wrongPurpose), 'inactive');
+         assert.equal(store.claimWorkUnit(fixture.id, currentWorkClaim(store, fixture.id, wrongPurpose)), 'inactive');
          assert.deepEqual(store.getWatch(fixture.id), before);
          if (fixture.id === 'pending-flagged') {
-            assert.equal(store.claimWorkUnit(fixture.id, purpose), 'inactive');
+            assert.equal(store.claimWorkUnit(fixture.id, currentWorkClaim(store, fixture.id, purpose)), 'inactive');
             assert.deepEqual(store.getWatch(fixture.id), before);
          } else if (fixture.used! < BUDGET) {
-            assert.equal(store.claimWorkUnit(fixture.id, purpose), 'claimed');
+            assert.equal(store.claimWorkUnit(fixture.id, currentWorkClaim(store, fixture.id, purpose)), 'claimed');
             assert.deepEqual(store.getWatch(fixture.id), { ...before, workUnitsUsed: fixture.used! + 1 });
          } else {
-            assert.equal(store.claimWorkUnit(fixture.id, purpose), 'exhausted');
+            assert.equal(store.claimWorkUnit(fixture.id, currentWorkClaim(store, fixture.id, purpose)), 'exhausted');
             const terminal = { ...before, state: 'indeterminate', terminalReason: 'work_budget_exhausted', settlementReconciliationTerminal: true };
             assert.deepEqual(store.getWatch(fixture.id), terminal);
-            assert.equal(store.claimWorkUnit(fixture.id, purpose), 'inactive');
+            assert.equal(store.claimWorkUnit(fixture.id, currentWorkClaim(store, fixture.id, purpose)), 'inactive');
             assert.deepEqual(store.getWatch(fixture.id), terminal);
          }
       }

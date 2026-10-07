@@ -21,6 +21,7 @@ import {
 } from '@x402/core/http';
 import { getTransactionId, isValidAlgorandAddress } from '@x402/avm';
 
+import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { ALGORAND_TESTNET, createApp, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, TESTNET_USDC_ASSET_ID } from './app.js';
 import {
    MAINNET_NETWORK_CONFIG,
@@ -3258,7 +3259,7 @@ for (const outcome of ['success', 'failure', 'timeout'] as const) {
          assert.equal(watch.state, 'settlement_pending');
          assert.equal(facilitator.settleCalls, 1);
          assert.equal(metrics.activeWatchMetricCount(), 1);
-         assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+         assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
          metrics.recordWorkUnit(watch.id);
          await new SettlementReconciler(store, indexer, {
             network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
@@ -3886,8 +3887,8 @@ test('recovery lookup keeps confirmed-settlement terminal watches recoverable', 
          },
          160,
       );
-      assert.equal(store.claimWorkUnit(indeterminate.id, 'polling'), 'claimed');
-      assert.equal(store.claimWorkUnit(indeterminate.id, 'polling'), 'exhausted');
+      assert.equal(store.claimWorkUnit(indeterminate.id, currentWorkClaim(store, indeterminate.id, 'polling')), 'claimed');
+      assert.equal(store.claimWorkUnit(indeterminate.id, currentWorkClaim(store, indeterminate.id, 'polling')), 'exhausted');
       assert.equal(store.getWatch(indeterminate.id)?.state, 'indeterminate');
 
       const app = createApp({
@@ -7555,8 +7556,8 @@ test('refund audit evidence persists separately and never rewrites the watch lif
          { ...SPEC, idempotencyKey: 'refund-audit-watch' },
          intent('REFUND_AUDIT_SERVICE_TX'),
       ).watch;
-      assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
-      assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'exhausted');
+      assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
+      assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'exhausted');
       assert.equal(store.getWatch(watch.id)?.state, 'indeterminate');
 
       const first = store.recordRefundEvidence(watch.id, {
@@ -7716,8 +7717,8 @@ test('refund CLI appends evidence to an existing current store without changing 
          { ...SPEC, idempotencyKey: 'refund-cli-success-watch' },
          intent('REFUND_CLI_SUCCESS_SERVICE_TX'),
       ).watch;
-      assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
-      assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'exhausted');
+      assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
+      assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'exhausted');
       const before = store.getWatch(watch.id)!;
       assert.equal(before.state, 'indeterminate');
       store.close();

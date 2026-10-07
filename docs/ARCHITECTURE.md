@@ -189,6 +189,54 @@ The challenge-release contract gives each new watch a server-controlled deadline
 
 A work turn is claimed durably before background polling or reconciliation work. If all 500 turns are consumed before either an exact match or complete expiry proof, the watch terminates as `indeterminate` with `terminalReason=work_budget_exhausted`. This state is deliberately weaker than `expired`: it bounds the service obligation without inventing proof of absence.
 
+### Worker claim freshness (C5)
+
+`claimWorkUnit(id, claim)` requires a purpose-specific selected snapshot. Polling
+supplies its scan cursor, nullable closing round, and failure count; reconciliation
+supplies its expected service transaction and attempt count. The same conditional
+SQLite predicate guards both consumption and budget exhaustion:
+
+- Polling requires an active evidence-version-1 watch, the selected cursor and
+  closing round (null-safe equality), required expiry metadata, the selected
+  failure count, and a retry timestamp that is absent or due.
+- Reconciliation requires pending or nonterminal unknown settlement, the selected
+  expected transaction and attempt count, and a next-attempt timestamp that is
+  absent or due. Pending becoming nonterminal unknown remains eligible. Immutable
+  purchase terms remain a separate provider/evidence check for legacy rows.
+
+Due status uses the store clock when the claim executes. Wall-clock expiry does
+not exclude an active watch from closing/finalization work. Selected usage is not
+compared: another legitimate charge alone does not make the plan stale. Existing
+budget conditions still permit the final unit and exhaust only a subsequent
+fresh, eligible claim once usage reaches the cap.
+
+The successful conditional durable mutation is the charge's linearization point:
+selection → compatible, due claim → consumed unit → provider work. If relevant
+durable progress or scheduling changed before claim, the stale candidate returns
+`inactive` without consuming or terminalizing, starting provider work, recording
+work-unit economics, or writing failure/defer state. A primary-key reload only
+decides whether retained pagination remains compatible; it does not authorize the
+charge. No SQLite transaction spans provider awaits.
+
+Polling retains a continuation across scheduling-only backoff, but discards it
+when the proof baseline, active lifecycle, cursor, or required metadata becomes
+incompatible, or its upper query bound exceeds a newly fixed closing round. Both
+sweep pruning and reuse check these bounds. A discarded session restarts with
+fresh bounds; an old continuation token is never clamped into a different query.
+Reconciliation similarly keeps tokens, seen-token history, and minimum coverage
+across retry/attempt changes while the same nonterminal transaction obligation
+remains eligible, and discards sessions whose obligation identity changed.
+
+Staleness after a successful claim leaves that unit legitimately consumed; cursor
+CAS and guarded lifecycle transitions continue to protect newer progress. C5
+does not establish leases or duplicate prevention: two owners whose snapshots
+are still compatible at their respective claims may both consume units. A later
+provider response can still clear or overwrite scheduling written by another
+owner during its await; post-claim scheduling ownership remains separate future
+work. The production worker topology and shutdown ownership are unchanged. This
+is defensive hardening for future concurrency, with no demonstrated competing
+pre-claim owner in the documented single-process production topology.
+
 An open obligation is `settlement_pending`, `active`, or non-terminal `settlement_unknown`. `matched`, `expired`, `indeterminate`, and definitive terminal settlement mismatches do not consume open-obligation capacity. Admission is capped at 50 open obligations globally and 5 for the deterministic service payer derived from the verified AVM payment payload. The store opens an immediate SQLite transaction, checks the idempotency key and both caps, and inserts the pending row without an asynchronous gap. Capacity failure returns HTTP `429` before after-handler settlement.
 
 Schema additions are idempotent. Pre-hardening rows retain evidence version 0; missing validity terms, closing proof, deadlines, or historical coverage are never fabricated. Existing matched results remain unchanged, while ambiguous legacy rows stay conservative rather than being silently expired or declared unpaid.

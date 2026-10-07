@@ -236,16 +236,22 @@ export class RoundWatchPoller {
       // backoff is not loss of durable eligibility to own a continuation.
       for (const [id, session] of this.sessions) {
          const watch = this.store.getWatch(id);
-         if (
-            watch?.state !== 'active' ||
-            watch.evidenceVersion !== 1 ||
-            watch.scanAfterRound === undefined ||
-            watch.expiresAt === undefined ||
-            session.minRound !== watch.scanAfterRound + 1
-         ) {
+         if (!this.isScanSessionCompatible(watch, session)) {
             this.sessions.delete(id);
          }
       }
+   }
+
+   private isScanSessionCompatible(
+      watch: WatchRecord | undefined,
+      session: ScanSession,
+   ): boolean {
+      return watch?.state === 'active' &&
+         watch.evidenceVersion === 1 &&
+         watch.scanAfterRound !== undefined &&
+         watch.expiresAt !== undefined &&
+         session.minRound === watch.scanAfterRound + 1 &&
+         (watch.closingRound === undefined || session.maxRound <= watch.closingRound);
    }
 
    private async runPollingSweep(
@@ -480,7 +486,12 @@ export class RoundWatchPoller {
          return { kind: 'noOp', providerEvidence: false };
       }
 
-      const workClaim = this.store.claimWorkUnit(initial.id, 'polling');
+      const workClaim = this.store.claimWorkUnit(initial.id, {
+         purpose: 'polling',
+         expectedScanAfterRound: initial.scanAfterRound,
+         expectedClosingRound: initial.closingRound ?? null,
+         expectedPollingFailureCount: initial.pollingFailureCount ?? 0,
+      });
       if (workClaim === 'exhausted') {
          this.sessions.delete(initial.id);
          context.metrics = captureWatchEconomicsTurn(this.economicsMetrics, initial.id);
@@ -490,7 +501,16 @@ export class RoundWatchPoller {
          ));
          return { kind: 'noOp', providerEvidence: false };
       }
-      if (workClaim !== 'claimed') return { kind: 'noOp', providerEvidence: false };
+      if (workClaim !== 'claimed') {
+         // A stale scheduling snapshot does not invalidate query coverage.
+         // Re-read only retained IDs; discard a continuation only when current
+         // durable identity/bounds no longer cover the same query.
+         const retained = this.sessions.get(initial.id);
+         if (retained && !this.isScanSessionCompatible(this.store.getWatch(initial.id), retained)) {
+            this.sessions.delete(initial.id);
+         }
+         return { kind: 'noOp', providerEvidence: false };
+      }
 
       context.metrics = captureWatchEconomicsTurn(this.economicsMetrics, initial.id);
       const watchMetrics = context.metrics?.recorder;
@@ -526,7 +546,7 @@ export class RoundWatchPoller {
       }
 
       let session = this.sessions.get(watch.id);
-      if (session && session.minRound !== watch.scanAfterRound + 1) {
+      if (session && !this.isScanSessionCompatible(watch, session)) {
          this.sessions.delete(watch.id);
          session = undefined;
       }

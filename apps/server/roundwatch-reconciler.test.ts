@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { ALGORAND_TESTNET, TESTNET_USDC_ASSET_ID } from './app.js';
 import type { TransactionIdPage } from './roundwatch-indexer.js';
 import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
@@ -557,13 +558,13 @@ for (const workUnitBudget of [1, 2]) {
          try {
             const watch = store.prepareWatch(SPEC, terms('TERMINAL')).watch;
             for (let i = 0; i < used; i += 1) {
-               assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+               assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
             }
             store.markSettlementInvalid(watch.id);
             const before = store.getWatch(watch.id)!;
             assert.equal(before.state, 'settlement_unknown');
             assert.equal(before.settlementReconciliationTerminal, true);
-            assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'inactive');
+            assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'inactive');
             assert.deepEqual(store.getWatch(watch.id), before);
          } finally { store.close(); }
       });
@@ -576,7 +577,7 @@ for (const workUnitBudget of [1, 2]) {
                   const watch = store.prepareWatch(SPEC, terms('MATRIX')).watch;
                   if (terminalState === 'settlement_unknown') {
                      for (let i = 0; i < used; i += 1) {
-                        assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+                        assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
                      }
                      store.markSettlementInvalid(watch.id);
                   } else {
@@ -584,7 +585,7 @@ for (const workUnitBudget of [1, 2]) {
                         transaction: 'MATRIX', network: ALGORAND_TESTNET, payer: PAYER,
                      }, 850);
                      for (let i = 0; i < used; i += 1) {
-                        assert.equal(store.claimWorkUnit(watch.id, 'polling'), 'claimed');
+                        assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'polling')), 'claimed');
                      }
                      if (terminalState === 'matched') store.markMatched(watch.id, 'INVOICE', 851);
                      else if (terminalState === 'expired') {
@@ -599,7 +600,7 @@ for (const workUnitBudget of [1, 2]) {
                   const before = store.getWatch(watch.id)!;
                   assert.equal(before.state, terminalState);
                   assert.equal(before.workUnitsUsed, used);
-                  assert.equal(store.claimWorkUnit(watch.id, purpose), 'inactive');
+                  assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, purpose)), 'inactive');
                   assert.deepEqual(store.getWatch(watch.id), before);
                } finally { store.close(); }
             });
@@ -615,7 +616,7 @@ for (const workUnitBudget of [1, 2]) {
             try {
                const watch = store.prepareWatch(SPEC, terms('STALE')).watch;
                for (let i = 0; i < used; i += 1) {
-                  assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+                  assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
                }
                metrics.captureWatch(watch.id).recordWorkUnit();
                const listCandidates = store.listSettlementReconciliationCandidates.bind(store);
@@ -667,21 +668,21 @@ for (const workUnitBudget of [1, 2]) {
             } else if (state === 'settlement_unknown') store.markSettlementUnknown(watch.id);
             for (let i = 0; i < workUnitBudget; i += 1) {
                const before = store.getWatch(watch.id)!;
-               assert.equal(store.claimWorkUnit(watch.id, wrongPurpose), 'inactive');
+               assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, wrongPurpose)), 'inactive');
                assert.deepEqual(store.getWatch(watch.id), before);
-               assert.equal(store.claimWorkUnit(watch.id, purpose), 'claimed');
+               assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, purpose)), 'claimed');
                assert.deepEqual(store.getWatch(watch.id), { ...before, workUnitsUsed: i + 1 });
             }
             const beforeExhaustion = store.getWatch(watch.id)!;
-            assert.equal(store.claimWorkUnit(watch.id, wrongPurpose), 'inactive');
+            assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, wrongPurpose)), 'inactive');
             assert.deepEqual(store.getWatch(watch.id), beforeExhaustion);
-            assert.equal(store.claimWorkUnit(watch.id, purpose), 'exhausted');
+            assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, purpose)), 'exhausted');
             const terminal = store.getWatch(watch.id)!;
             assert.deepEqual(terminal, {
                ...beforeExhaustion, state: 'indeterminate',
                terminalReason: 'work_budget_exhausted', settlementReconciliationTerminal: true,
             });
-            assert.equal(store.claimWorkUnit(watch.id, purpose), 'inactive');
+            assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, purpose)), 'inactive');
             assert.deepEqual(store.getWatch(watch.id), terminal);
          } finally { store.close(); }
       });

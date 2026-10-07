@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import type { FacilitatorClient } from '@x402/core/server';
 
+import { currentWorkClaim } from './roundwatch-test-claims.js';
 import {
    ALGORAND_TESTNET,
    createApp,
@@ -756,7 +757,7 @@ for (const terminal of ['mismatch', 'absence', 'budget'] as const) {
                assert.equal(metrics.snapshotWatch(watch.id)?.workUnitsClaimed, 1);
                assert.equal(metrics.snapshotWatch(watch.id)?.indexer.reconciliation.successes, 2);
             } else if (terminal === 'budget') {
-               assert.equal(store.claimWorkUnit(watch.id, 'reconciliation'), 'claimed');
+               assert.equal(store.claimWorkUnit(watch.id, currentWorkClaim(store, watch.id, 'reconciliation')), 'claimed');
             }
             warmup = false;
             requests = 0;

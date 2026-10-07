@@ -233,13 +233,19 @@ function createWatchInState(
       return;
    }
 
-   const claimed = store.claimWorkUnit(active.id, 'polling');
+   const claim = {
+      purpose: 'polling' as const,
+      expectedScanAfterRound: active.scanAfterRound!,
+      expectedClosingRound: active.closingRound ?? null,
+      expectedPollingFailureCount: active.pollingFailureCount ?? 0,
+   };
+   const claimed = store.claimWorkUnit(active.id, claim);
    if (claimed !== 'claimed') {
       throw new Error(
          `expected claimed work unit, got ${claimed}`,
       );
    }
-   const exhausted = store.claimWorkUnit(active.id, 'polling');
+   const exhausted = store.claimWorkUnit(active.id, claim);
    if (exhausted !== 'exhausted') {
       throw new Error(
          `expected exhausted work budget, got ${exhausted}`,
