@@ -8,6 +8,7 @@ import {
    type WatchEconomicsTurn,
 } from './roundwatch-metrics.js';
 import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
+import { ShutdownInterrupted, isShutdownInterrupted } from './roundwatch-shutdown.js';
 import type { RoundWatchStore, WatchRecord } from './roundwatch-store.js';
 import {
    IndexerRequestTurnBudget,
@@ -67,6 +68,10 @@ export class SettlementReconciler {
    private timer: NodeJS.Timeout | undefined;
    private running = false;
    private scheduledRunning = false;
+   private shutdownStarted = false;
+   private ownedWork = 0;
+   private drainPromise?: Promise<void>;
+   private resolveDrain?: () => void;
    private generation = 0;
    private readonly absenceProofSessions = new Map<string, AbsenceProofSession>();
    private readonly now: () => Date;
@@ -88,17 +93,18 @@ export class SettlementReconciler {
    }
 
    start(): void {
-      if (this.timer) return;
+      if (this.shutdownStarted || this.timer) return;
       this.generation += 1;
       this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
       this.workerHealth.markStarted();
       const run = () => {
-         if (this.scheduledRunning) return;
+         if (this.shutdownStarted || this.scheduledRunning) return;
          this.scheduledRunning = true;
          const generation = this.generation;
 
          this.workerHealth.markCycleStarted();
-         void this.reconcileOnce(() =>
+         // The wrapper owns the post-sweep probe as well as reconciliation.
+         void this.ownWork(() => this.reconcileOnce(() =>
             { if (generation === this.generation) this.workerHealth.markCycleProgress(); },
          )
             .then(async outcome => {
@@ -124,6 +130,7 @@ export class SettlementReconciler {
                this.workerHealth.markCycleCompleted(outcome);
             })
             .catch(error => {
+               if (isShutdownInterrupted(error)) return;
                if (generation === this.generation) {
                   this.healthProbe?.invalidateForProviderFailure();
                   this.workerHealth.markCycleFailed();
@@ -133,9 +140,10 @@ export class SettlementReconciler {
                   safeErrorMessage(error),
                );
             })
-            .finally(() => { this.scheduledRunning = false; });
+            .finally(() => { this.scheduledRunning = false; }));
       };
       run();
+      if (this.shutdownStarted) return;
       this.timer = setInterval(run, this.config.intervalMilliseconds);
       this.timer.unref();
    }
@@ -145,6 +153,24 @@ export class SettlementReconciler {
       this.workerHealth.markStopped();
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
+   }
+
+   // Unlike operational stop(), this boundary permanently prevents restart.
+   stopScheduling(): void {
+      if (this.shutdownStarted) return;
+      this.shutdownStarted = true;
+      this.stop();
+   }
+
+   // Establish the terminal boundary, then join direct sweeps and wrappers.
+   drain(): Promise<void> {
+      this.stopScheduling();
+      if (!this.drainPromise) {
+         this.drainPromise = this.ownedWork === 0
+            ? Promise.resolve()
+            : new Promise(resolve => { this.resolveDrain = resolve; });
+      }
+      return this.drainPromise;
    }
 
    healthSnapshot(): WorkerHealthSnapshot {
@@ -163,7 +189,28 @@ export class SettlementReconciler {
       return this.healthSnapshot().ready;
    }
 
-   async reconcileOnce(
+   reconcileOnce(
+      onProgress?: () => void,
+   ): Promise<WorkerCycleOutcome> {
+      if (this.shutdownStarted) return Promise.reject(new ShutdownInterrupted());
+      return this.ownWork(() => this.reconcileSweep(onProgress));
+   }
+
+   private async ownWork<T>(operation: () => Promise<T>): Promise<T> {
+      this.ownedWork += 1;
+      try {
+         return await operation();
+      } finally {
+         this.ownedWork -= 1;
+         if (this.ownedWork === 0) this.resolveDrain?.();
+      }
+   }
+
+   private assertSchedulingOpen(): void {
+      if (this.shutdownStarted) throw new ShutdownInterrupted();
+   }
+
+   private async reconcileSweep(
       onProgress?: () => void,
    ): Promise<WorkerCycleOutcome> {
       const outcome: WorkerCycleOutcome = {
@@ -177,6 +224,7 @@ export class SettlementReconciler {
       try {
          this.pruneAbsenceProofSessions();
          for (const watch of this.store.listSettlementReconciliationCandidates()) {
+            this.assertSchedulingOpen();
             outcome.attempted += 1;
             try {
                const turn = await this.reconcileWatch(watch);
@@ -188,6 +236,7 @@ export class SettlementReconciler {
                   (outcome.providerEvidence ?? 0) + 1;
                onProgress?.();
             } catch (error) {
+               if (isShutdownInterrupted(error)) throw error;
                outcome.failed += 1;
                if (generation === this.generation) {
                   // Invalidate before the next customer turn; the sweep's
@@ -203,8 +252,8 @@ export class SettlementReconciler {
          }
       } finally {
          this.running = false;
-         // Stop may be followed by closing SQLite while provider work is in
-         // flight. An invalidated sweep leaves pruning to the next sweep.
+         // Preserve operational stop/start generation fencing: an invalidated
+         // sweep leaves pruning to the next sweep.
          if (generation === this.generation) this.pruneAbsenceProofSessions();
       }
       return outcome;
@@ -236,6 +285,7 @@ export class SettlementReconciler {
       const captureMetrics = () => captureWatchEconomicsTurn(
          this.economicsMetrics, watch.id, !!metricWasTerminal,
       );
+      this.assertSchedulingOpen();
       const workClaim = this.store.claimWorkUnit(watch.id, 'reconciliation');
       if (workClaim === 'exhausted') {
          this.absenceProofSessions.delete(watch.id);
@@ -272,6 +322,7 @@ export class SettlementReconciler {
       let session = this.absenceProofSessions.get(watch.id);
 
       if (!session) {
+         this.assertSchedulingOpen();
          const transfer = await requestBudget.run(() =>
             this.indexer.lookupAssetTransfer(
                expectedTransaction,
@@ -286,6 +337,7 @@ export class SettlementReconciler {
             return { kind: 'progressed', providerEvidence: true };
          }
 
+         this.assertSchedulingOpen();
          const currentRound = await requestBudget.run(() =>
             this.indexer.getCurrentRound(
                'reconciliation',
@@ -304,6 +356,7 @@ export class SettlementReconciler {
          this.absenceProofSessions.set(watch.id, session);
       }
 
+      this.assertSchedulingOpen();
       const page = await requestBudget.run(() =>
          this.indexer.searchTransactionPage(
             expectedTransaction,

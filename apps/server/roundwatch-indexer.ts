@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isShutdownInterrupted } from './roundwatch-shutdown.js';
 import type { IndexedAssetTransfer } from './roundwatch-reconciler.js';
 import type { WatchRecord } from './roundwatch-store.js';
 import {
@@ -371,7 +372,8 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
       let tip: number;
       try {
          tip = await this.getCurrentRound('health');
-      } catch {
+      } catch (error) {
+         if (isShutdownInterrupted(error)) throw error;
          return { polling: false, reconciliation: false };
       }
 
@@ -392,7 +394,10 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
             await this.getBlock(tip);
             polling = true;
          }
-      } catch { /* The scan and checkpoint routes must both be validated. */ }
+      } catch (error) {
+         if (isShutdownInterrupted(error)) throw error;
+         // The scan and checkpoint routes must both be validated.
+      }
 
       let reconciliation = false;
       try {
@@ -400,7 +405,10 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
          await this.lookupAssetTransfer(transactionId, 'reconciliation');
          const page = await this.searchTransactionPage(transactionId);
          reconciliation = page.currentRound >= tip;
-      } catch { /* Both reconciliation routes must succeed. */ }
+      } catch (error) {
+         if (isShutdownInterrupted(error)) throw error;
+         // Both reconciliation routes must succeed.
+      }
 
       return { polling, reconciliation };
    }
@@ -624,6 +632,7 @@ export class AlgorandIndexerClient implements RoundWatchIndexer {
 
          return result;
       } catch (error) {
+         if (isShutdownInterrupted(error)) throw error;
          // Bounded fallback only if dispatch rejected before its observer.
          recordCompletion({
             outcome: isTimeoutError(error) ? 'timeout' : 'failure',

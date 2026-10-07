@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { ShutdownInterrupted, isShutdownInterrupted } from './roundwatch-shutdown.js';
 
 export const DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS = 15_000;
 export const DEFAULT_INDEXER_IDLE_HEALTH_PROBE_INTERVAL_MS = 120_000;
@@ -33,6 +34,8 @@ export class IndexerHealthProbe {
    private failureEpoch = 0;
    private providerFailureRevision = 0;
    private providerEvidenceInvalidated = false;
+   private schedulingStopped = false;
+   private drainPromise?: Promise<void>;
 
    constructor(
       private readonly source: IndexerCapabilitySource,
@@ -60,6 +63,18 @@ export class IndexerHealthProbe {
    currentFailureEpoch(): number { return this.failureEpoch; }
 
    currentSample(): IndexerProbeSample | undefined { return this.latest; }
+
+   /** Terminal acquisition fence; an existing probe keeps its completion ownership. */
+   stopScheduling(): void { this.schedulingStopped = true; }
+
+   /** Establish the terminal fence and join the complete pending probe lifetime. */
+   drain(): Promise<void> {
+      this.stopScheduling();
+      this.drainPromise ??= this.pending
+         ? this.pending.then(() => undefined, () => undefined)
+         : Promise.resolve();
+      return this.drainPromise;
+   }
 
    invalidateForProviderFailure(): number {
       // Even a coalesced observation makes an earlier in-flight probe obsolete.
@@ -106,11 +121,17 @@ export class IndexerHealthProbe {
    runIfDue(
       maximumEvidenceAgeMs = this.minimumIntervalMs,
    ): Promise<IndexerProbeSample> {
+      if (this.schedulingStopped) {
+         return Promise.reject(new ShutdownInterrupted());
+      }
       this.assertMaximumEvidenceAge(maximumEvidenceAgeMs);
 
       if (this.pending) return this.pending;
 
       const at = this.now();
+      if (this.schedulingStopped) {
+         return Promise.reject(new ShutdownInterrupted());
+      }
       const latestHealthy =
          this.latest?.evidence.polling === true &&
          this.latest.evidence.reconciliation === true;
@@ -132,8 +153,17 @@ export class IndexerHealthProbe {
       const revision = ++this.revision;
       const failureEpoch = this.failureEpoch;
       const providerFailureRevision = this.providerFailureRevision;
-      const pending = this.source.probeReadinessCapabilities(this.assetId)
-         .catch(() => ({ polling: false, reconciliation: false }))
+      let resolveAcquisition!: (evidence: IndexerCapabilityEvidence) => void;
+      let rejectAcquisition!: (error: unknown) => void;
+      const acquisition = new Promise<IndexerCapabilityEvidence>((resolve, reject) => {
+         resolveAcquisition = resolve;
+         rejectAcquisition = reject;
+      });
+      const pending = acquisition
+         .catch(error => {
+            if (isShutdownInterrupted(error)) throw error;
+            return { polling: false, reconciliation: false };
+         })
          .then(evidence => {
             const sample = {
                revision,
@@ -153,7 +183,14 @@ export class IndexerHealthProbe {
             return sample;
          })
          .finally(() => { this.pending = undefined; });
+      // Establish ownership before a source can synchronously trigger shutdown.
       this.pending = pending;
+      try {
+         this.source.probeReadinessCapabilities(this.assetId)
+            .then(resolveAcquisition, rejectAcquisition);
+      } catch (error) {
+         rejectAcquisition(error);
+      }
       return pending;
    }
 

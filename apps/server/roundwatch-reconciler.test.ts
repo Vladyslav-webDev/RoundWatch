@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { ALGORAND_TESTNET, TESTNET_USDC_ASSET_ID } from './app.js';
 import type { TransactionIdPage } from './roundwatch-indexer.js';
+import { IndexerHealthProbe, type IndexerCapabilityEvidence } from './roundwatch-health-probe.js';
 import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import {
    SettlementReconciler,
@@ -13,6 +14,7 @@ import {
    type SettlementLookupIndexer,
 } from './roundwatch-reconciler.js';
 import { RoundWatchStore, type SettlementIntent, type WatchRecord, type WatchSpec } from './roundwatch-store.js';
+import { ShutdownInterrupted, isShutdownInterrupted } from './roundwatch-shutdown.js';
 import { MAX_INDEXER_REQUESTS_PER_RECONCILIATION_WORK_TURN } from './roundwatch-work-budget.js';
 
 const PAYER = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
@@ -821,6 +823,361 @@ test('B4 follow-up stale reconciler defer after claimed work and awaited activat
       store.close();
    }
 });
+
+test('S1 terminal reconciliation rejects direct work before store access and cannot restart', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeLookup();
+   const worker = reconciler(store, indexer);
+   try {
+      const reads = t.mock.method(store, 'getWatch');
+      const candidates = t.mock.method(store, 'listSettlementReconciliationCandidates');
+      const claims = t.mock.method(store, 'claimWorkUnit');
+      worker.stopScheduling();
+      const stopped = worker.healthSnapshot();
+      await assert.rejects(worker.reconcileOnce(), isShutdownInterrupted);
+      worker.start();
+      worker.stopScheduling();
+      const drained = worker.drain();
+      assert.equal(worker.drain(), drained);
+      await drained;
+      assert.equal(reads.mock.callCount(), 0);
+      assert.equal(candidates.mock.callCount(), 0);
+      assert.equal(claims.mock.callCount(), 0);
+      assert.equal(indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls, 0);
+      assert.deepEqual(worker.healthSnapshot(), stopped);
+      assert.equal(stopped.ready, false);
+      assert.equal(stopped.started, false);
+   } finally { store.close(); }
+});
+
+test('S1 reconciliation drain owns direct work and preserves dispatched activation while fencing the next candidate', async t => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeLookup();
+   const response = shutdownGate<IndexedAssetTransfer | undefined>();
+   const requested = shutdownGate<void>();
+   t.mock.method(indexer, 'lookupAssetTransfer', async (transaction: string) => {
+      indexer.lookupCalls += 1;
+      assert.equal(transaction, 'S1_FIRST');
+      requested.resolve();
+      return response.promise;
+   });
+   const worker = reconciler(store, indexer, () => now);
+   let sweep: Promise<unknown> | undefined;
+   let drained: Promise<void> | undefined;
+   try {
+      const first = store.prepareWatch(SPEC, terms('S1_FIRST')).watch;
+      const second = store.prepareWatch({ ...SPEC, idempotencyKey: 's1-second' }, terms('S1_SECOND')).watch;
+      const claims = t.mock.method(store, 'claimWorkUnit');
+      const retries = t.mock.method(store, 'recordReconciliationFailure');
+      sweep = worker.reconcileOnce();
+      const interrupted = assert.rejects(sweep, isShutdownInterrupted);
+      await requested.promise;
+      const claimed = store.getWatch(first.id)!;
+      // The overlap guard remains a no-op and does not claim another unit.
+      assert.deepEqual(await worker.reconcileOnce(), { attempted: 0, succeeded: 0, failed: 0 });
+      worker.stopScheduling();
+      const stopped = worker.healthSnapshot();
+      let drainSettled = false;
+      drained = worker.drain();
+      void drained.then(() => { drainSettled = true; });
+      await Promise.resolve();
+      assert.equal(drainSettled, false);
+      assert.equal(claims.mock.callCount(), 1);
+      response.resolve(transfer('S1_FIRST'));
+      await interrupted;
+      await drained;
+      assert.deepEqual(store.getWatch(first.id), {
+         ...claimed, state: 'active', serviceTransaction: 'S1_FIRST',
+         serviceNetwork: ALGORAND_TESTNET, servicePayer: PAYER,
+         activationRound: 850, activatedAt: now.toISOString(), scanAfterRound: 850,
+      });
+      assert.deepEqual(store.getWatch(second.id), second);
+      assert.equal(retries.mock.callCount(), 0);
+      assert.equal(claims.mock.callCount(), 1);
+      assert.equal(indexer.lookupCalls, 1);
+      assert.equal(indexer.currentRoundCalls + indexer.pageCalls, 0);
+      assert.deepEqual(worker.healthSnapshot(), stopped);
+   } finally {
+      response.resolve(transfer('S1_FIRST'));
+      await sweep?.catch(() => {});
+      await drained;
+      await worker.drain();
+      store.close();
+   }
+});
+
+for (const boundary of ['lookup', 'tip'] as const) {
+   test(`S1 absent reconciliation ${boundary} cannot acquire its dependent request after stop or persist a retry`, async t => {
+      const store = new RoundWatchStore(':memory:');
+      const indexer = new FakeLookup();
+      const requested = shutdownGate<void>();
+      const lookupResponse = shutdownGate<IndexedAssetTransfer | undefined>();
+      const tipResponse = shutdownGate<number>();
+      if (boundary === 'lookup') {
+         t.mock.method(indexer, 'lookupAssetTransfer', async () => {
+            indexer.lookupCalls += 1;
+            requested.resolve();
+            return lookupResponse.promise;
+         });
+      } else {
+         t.mock.method(indexer, 'getCurrentRound', async () => {
+            indexer.currentRoundCalls += 1;
+            requested.resolve();
+            return tipResponse.promise;
+         });
+      }
+      const probe = new IndexerHealthProbe({
+         async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+      }, TESTNET_USDC_ASSET_ID);
+      const worker = new SettlementReconciler(store, indexer, {
+         network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+      }, undefined, probe);
+      let sweep: Promise<unknown> | undefined;
+      try {
+         const watch = store.prepareWatch(SPEC, terms('S1_DEPENDENT')).watch;
+         const retries = t.mock.method(store, 'recordReconciliationFailure');
+         const invalidations = t.mock.method(probe, 'invalidateForProviderFailure');
+         sweep = worker.reconcileOnce();
+         const interrupted = assert.rejects(sweep, isShutdownInterrupted);
+         await requested.promise;
+         const claimed = store.getWatch(watch.id)!;
+         worker.stopScheduling();
+         const stopped = worker.healthSnapshot();
+         lookupResponse.resolve(undefined);
+         tipResponse.resolve(901);
+         await interrupted;
+         await worker.drain();
+         assert.deepEqual(store.getWatch(watch.id), claimed);
+         assert.equal(claimed.workUnitsUsed, watch.workUnitsUsed + 1);
+         assert.equal(retries.mock.callCount(), 0);
+         assert.equal(invalidations.mock.callCount(), 0);
+         assert.equal(probe.currentFailureEpoch(), 0);
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, boundary === 'tip' ? 1 : 0);
+         assert.equal(indexer.pageCalls, 0);
+         assert.deepEqual(worker.healthSnapshot(), stopped);
+      } finally {
+         lookupResponse.resolve(undefined);
+         tipResponse.resolve(901);
+         await sweep?.catch(() => {});
+         await worker.drain();
+         store.close();
+      }
+   });
+}
+
+for (const result of ['confirmed', 'absent', 'pagination'] as const) {
+   test(`S1 already-dispatched reconciliation search may persist valid ${result} evidence after terminal stop`, async t => {
+      const now = new Date('2026-10-06T10:00:00Z');
+      const store = new RoundWatchStore(':memory:', { now: () => now });
+      const indexer = new FakeLookup();
+      indexer.round = 901;
+      const response = shutdownGate<TransactionIdPage>();
+      const requested = shutdownGate<void>();
+      t.mock.method(indexer, 'searchTransactionPage', async () => {
+         indexer.pageCalls += 1;
+         requested.resolve();
+         return response.promise;
+      });
+      const page: TransactionIdPage = result === 'confirmed'
+         ? { transactions: [transfer('S1_PAGE')], currentRound: 901 }
+         : { transactions: [], currentRound: 901, ...(result === 'pagination' ? { nextToken: 'next-page' } : {}) };
+      const worker = reconciler(store, indexer, () => now);
+      let sweep: ReturnType<SettlementReconciler['reconcileOnce']> | undefined;
+      try {
+         const watch = store.prepareWatch(SPEC, terms('S1_PAGE')).watch;
+         sweep = worker.reconcileOnce();
+         await requested.promise;
+         const claimed = store.getWatch(watch.id)!;
+         worker.stopScheduling();
+         const stopped = worker.healthSnapshot();
+         const drained = worker.drain();
+         response.resolve(page);
+         const outcome = await sweep;
+         await drained;
+         assert.equal(outcome.attempted, 1);
+         assert.equal(outcome.failed, 0);
+         assert.equal(outcome.providerEvidence, 1);
+         if (result === 'confirmed') {
+            assert.deepEqual(store.getWatch(watch.id), {
+               ...claimed, state: 'active', serviceTransaction: 'S1_PAGE',
+               serviceNetwork: ALGORAND_TESTNET, servicePayer: PAYER,
+               activationRound: 850, activatedAt: now.toISOString(), scanAfterRound: 850,
+            });
+            assert.equal(absenceProofSessions(worker).size, 0);
+         } else if (result === 'absent') {
+            assert.deepEqual(store.getWatch(watch.id), {
+               ...claimed, state: 'settlement_unknown', settlementReconciliationTerminal: true,
+            });
+            assert.equal(absenceProofSessions(worker).size, 0);
+         } else {
+            assert.deepEqual(store.getWatch(watch.id), {
+               ...claimed, reconciliationAttempts: claimed.reconciliationAttempts + 1,
+               reconciliationNextAttemptAt: new Date(now.getTime() + 1_000).toISOString(),
+            });
+            const session = absenceProofSessions(worker).get(watch.id)!;
+            assert.equal(session.nextToken, 'next-page');
+            assert.equal(session.coverage, 901);
+            assert.deepEqual([...session.seenTokens], ['next-page']);
+         }
+         assert.equal(indexer.lookupCalls, 1);
+         assert.equal(indexer.currentRoundCalls, 1);
+         assert.equal(indexer.pageCalls, 1);
+         assert.deepEqual(worker.healthSnapshot(), stopped);
+      } finally {
+         response.resolve(page);
+         await sweep;
+         await worker.drain();
+         store.close();
+      }
+   });
+}
+
+test('S1 dispatcher interruption during reconciliation preserves pagination and durable retry state', async t => {
+   const now = new Date('2026-10-06T10:00:00Z');
+   const store = new RoundWatchStore(':memory:', { now: () => now });
+   const indexer = new FakeLookup();
+   indexer.round = 901;
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { return { polling: true, reconciliation: true }; },
+   }, TESTNET_USDC_ASSET_ID);
+   const worker = new SettlementReconciler(store, indexer, {
+      network: ALGORAND_TESTNET, intervalMilliseconds: 5_000, now: () => now,
+   }, undefined, probe);
+   try {
+      const watch = store.prepareWatch(SPEC, terms('S1_QUEUED_PAGE')).watch;
+      indexer.pages.push({ transactions: [], currentRound: 901, nextToken: 'retained-page' });
+      await worker.reconcileOnce();
+      store.recordReconciliationFailure(watch.id, new Date(0));
+      const before = store.getWatch(watch.id)!;
+      const session = absenceProofSessions(worker).get(watch.id)!;
+      const health = worker.healthSnapshot();
+      const retries = t.mock.method(store, 'recordReconciliationFailure');
+      const invalidations = t.mock.method(probe, 'invalidateForProviderFailure');
+      const errors = t.mock.method(console, 'error', () => {});
+      t.mock.method(indexer, 'searchTransactionPage', async () => {
+         throw new ShutdownInterrupted();
+      });
+      await assert.rejects(worker.reconcileOnce(), isShutdownInterrupted);
+      assert.deepEqual(store.getWatch(watch.id), { ...before, workUnitsUsed: before.workUnitsUsed + 1 });
+      assert.equal(absenceProofSessions(worker).get(watch.id), session);
+      assert.equal(session.nextToken, 'retained-page');
+      assert.equal(session.coverage, 901);
+      assert.equal(retries.mock.callCount(), 0);
+      assert.equal(invalidations.mock.callCount(), 0);
+      assert.equal(errors.mock.callCount(), 0);
+      assert.deepEqual(worker.healthSnapshot(), health);
+   } finally { await worker.drain(); store.close(); }
+});
+
+test('S1 reconciler drain owns the complete scheduled wrapper while its health probe is pending', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeLookup();
+   const response = shutdownGate<IndexerCapabilityEvidence>();
+   const requested = shutdownGate<void>();
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { requested.resolve(); return response.promise; },
+   }, TESTNET_USDC_ASSET_ID);
+   const worker = new SettlementReconciler(store, indexer, {
+      network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+   }, undefined, probe);
+   try {
+      const invalidations = t.mock.method(probe, 'invalidateForProviderFailure');
+      const errors = t.mock.method(console, 'error', () => {});
+      worker.start();
+      await requested.promise;
+      worker.stopScheduling();
+      const stopped = worker.healthSnapshot();
+      let drainSettled = false;
+      const drained = worker.drain();
+      void drained.then(() => { drainSettled = true; });
+      await Promise.resolve();
+      assert.equal(drainSettled, false, 'the direct sweep is done but the scheduled probe is still owned');
+      response.reject(new ShutdownInterrupted());
+      await drained;
+      assert.equal(invalidations.mock.callCount(), 0);
+      assert.equal(probe.currentFailureEpoch(), 0);
+      assert.equal(probe.currentSample(), undefined);
+      assert.equal(errors.mock.callCount(), 0);
+      assert.deepEqual(worker.healthSnapshot(), stopped);
+      assert.equal(indexer.lookupCalls + indexer.currentRoundCalls + indexer.pageCalls, 0);
+   } finally {
+      response.resolve({ polling: true, reconciliation: true });
+      await worker.drain();
+      store.close();
+   }
+});
+
+test('S1 scheduled reconciliation interruption makes no defer or provider-failure observation', async t => {
+   const store = new RoundWatchStore(':memory:');
+   const indexer = new FakeLookup();
+   const response = shutdownGate<IndexedAssetTransfer | undefined>();
+   const requested = shutdownGate<void>();
+   t.mock.method(indexer, 'lookupAssetTransfer', async () => {
+      indexer.lookupCalls += 1;
+      requested.resolve();
+      return response.promise;
+   });
+   const probe = new IndexerHealthProbe({
+      async probeReadinessCapabilities() { throw new Error('interrupted sweep must not probe'); },
+   }, TESTNET_USDC_ASSET_ID);
+   const worker = new SettlementReconciler(store, indexer, {
+      network: ALGORAND_TESTNET, intervalMilliseconds: 5_000,
+   }, undefined, probe);
+   try {
+      const watch = store.prepareWatch(SPEC, terms('S1_SCHEDULED')).watch;
+      const retries = t.mock.method(store, 'recordReconciliationFailure');
+      const invalidations = t.mock.method(probe, 'invalidateForProviderFailure');
+      const errors = t.mock.method(console, 'error', () => {});
+      worker.start();
+      await requested.promise;
+      const claimed = store.getWatch(watch.id)!;
+      worker.stopScheduling();
+      const stopped = worker.healthSnapshot();
+      response.reject(new ShutdownInterrupted());
+      await worker.drain();
+      assert.deepEqual(store.getWatch(watch.id), claimed);
+      assert.equal(retries.mock.callCount(), 0);
+      assert.equal(invalidations.mock.callCount(), 0);
+      assert.equal(errors.mock.callCount(), 0);
+      assert.equal(probe.currentFailureEpoch(), 0);
+      assert.deepEqual(worker.healthSnapshot(), stopped);
+   } finally {
+      response.resolve(undefined);
+      await worker.drain();
+      store.close();
+   }
+});
+
+test('S1 ordinary reconciler stop still allows operational restart', async () => {
+   const store = new RoundWatchStore(':memory:');
+   const worker = reconciler(store, new FakeLookup());
+   try {
+      worker.start();
+      const started = worker.healthSnapshot();
+      worker.stop();
+      assert.equal(worker.healthSnapshot().started, false);
+      worker.start();
+      const restarted = worker.healthSnapshot();
+      assert.equal(restarted.started, true);
+      assert.equal(restarted.generation, started.generation! + 2);
+   } finally { await worker.drain(); store.close(); }
+});
+
+function shutdownGate<T>(): {
+   promise: Promise<T>;
+   resolve: (value: T) => void;
+   reject: (error: unknown) => void;
+} {
+   let resolve!: (value: T) => void;
+   let reject!: (error: unknown) => void;
+   const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+   });
+   return { promise, resolve, reject };
+}
 
 function reconciler(store: RoundWatchStore, indexer: SettlementLookupIndexer, now = () => new Date('2026-09-18T10:00:00Z')): SettlementReconciler {
    return new SettlementReconciler(store, indexer, {
