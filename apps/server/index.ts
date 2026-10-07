@@ -1,11 +1,19 @@
 import { isAbsolute, resolve } from 'node:path';
 
 import { config } from 'dotenv';
-import { serve } from '@hono/node-server';
-import { HTTPFacilitatorClient } from '@x402/core/server';
+import { createAdaptorServer, type ServerType } from '@hono/node-server';
 import { isValidAlgorandAddress } from '@x402/avm';
 
-import { createApp } from './app.js';
+import { createAppRuntime } from './app.js';
+import { ApplicationLifetime, ownApplicationFetch } from './roundwatch-application-lifetime.js';
+import { RoundWatchFacilitatorClient } from './roundwatch-facilitator.js';
+import {
+   closeNodeServer,
+   createShutdownCoordinator,
+   parseShutdownDeadline,
+   type BackgroundShutdownOwner,
+} from './roundwatch-shutdown-coordinator.js';
+import { installShutdownSignals, startProductionRuntime } from './roundwatch-startup.js';
 import {
    resolveRoundWatchNetwork,
    resolveRoundWatchPublicBaseUrl,
@@ -114,8 +122,10 @@ let signedPaymentConcurrency;
 let minimumFreeDiskBytes;
 let indexerIdleProbeIntervalMilliseconds;
 let paidAdmissionProbeMaxAgeMilliseconds;
+let shutdownDeadlineMilliseconds;
 
 try {
+   shutdownDeadlineMilliseconds = parseShutdownDeadline(process.env.ROUNDWATCH_SHUTDOWN_DEADLINE_MS);
    networkConfig = resolveRoundWatchNetwork(process.env.ROUNDWATCH_NETWORK);
    publicBaseUrl = resolveRoundWatchPublicBaseUrl(
       process.env.ROUNDWATCH_PUBLIC_BASE_URL,
@@ -284,7 +294,7 @@ try {
    process.exit(1);
 }
 
-const facilitatorClient = new HTTPFacilitatorClient({
+const facilitatorClient = new RoundWatchFacilitatorClient({
    url: facilitatorUrl,
 });
 const storeOptions = {
@@ -296,221 +306,258 @@ const storeOptions = {
 const store = faultExitAfterSettle
    ? new TestnetExitAfterSettleStore(databasePath, storeOptions)
    : new RoundWatchStore(databasePath, storeOptions);
-const dispatcher = new IndexerRequestDispatcher({
-   requestsPerSecond: indexerRequestsPerSecond,
-   burst: indexerBurst,
-   concurrency: indexerConcurrency,
+const application = new ApplicationLifetime();
+let server: ServerType | undefined;
+let runtimeSampler: ReturnType<typeof createObservatoryRuntimeSampler>;
+// Register cleanup immediately after SQLite exists, including partial startup.
+const background: Partial<Record<'poller' | 'reconciler' | 'healthProbe' | 'dispatcher', BackgroundShutdownOwner>> = {};
+function backgroundOwner(name: keyof typeof background): BackgroundShutdownOwner {
+   return {
+      stopScheduling: () => background[name]?.stopScheduling(),
+      drain: () => background[name]?.drain() ?? Promise.resolve(),
+   };
+}
+const coordinator = createShutdownCoordinator({
+   application,
+   facilitator: facilitatorClient,
+   poller: backgroundOwner('poller'),
+   reconciler: backgroundOwner('reconciler'),
+   healthProbe: backgroundOwner('healthProbe'),
+   dispatcher: backgroundOwner('dispatcher'),
+   runtimeSampler: { stop: () => runtimeSampler?.stop() },
+   closeServer: () => server ? closeNodeServer(server) : Promise.resolve(),
+   closeStore: () => { store.close(); console.log('x402 Resource Server CLOSED'); },
+   deadlineMs: shutdownDeadlineMilliseconds,
+   terminate: code => process.exit(code),
+   // Do not serialize transport causes, headers or provider response bodies.
+   report: (message, error) => console.error(message, error instanceof Error ? error.name : ''),
 });
-const economicsMetrics = economicsInstrumentationEnabled
-   ? new RoundWatchEconomicsMetrics()
-   : undefined;
-const indexer = new AlgorandIndexerClient(
-   indexerUrl,
-   dispatcher,
-   fetch,
-   10_000,
-   economicsMetrics,
-   scanQueryVariant,
-);
-const healthProbe = new IndexerHealthProbe(
-   indexer,
-   networkConfig.usdcAssetIdNumber,
-   undefined,
-   DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS,
-   indexerIdleProbeIntervalMilliseconds,
-);
-const poller = new RoundWatchPoller(
-   store,
-   indexer,
-   pollIntervalMilliseconds,
-   scanRoundWindow,
-   undefined,
-   economicsMetrics,
-   scanPageCacheEntries,
-   scanPageCacheBytes,
-   healthProbe,
-);
-const reconciler = new SettlementReconciler(
-   store,
-   indexer,
-   {
-      network: networkConfig.network,
-      intervalMilliseconds: reconciliationIntervalMilliseconds,
-   },
-   economicsMetrics,
-   healthProbe,
-);
-const observatorySamples = initializeObservatorySampleRetention();
-// Boot-scoped core only; no route or readiness work is wired here.
-export const observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
-   network: networkConfig.name,
-   assetId: networkConfig.usdcAssetId,
-   economicsMetricsEnabled: economicsInstrumentationEnabled,
-   pollerHealthSnapshot: () => poller.healthSnapshot(),
-   reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
-   dispatcherSnapshot: () => dispatcher.snapshot(),
-   cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
-   pollCycleSnapshot: () => poller.capacitySnapshot(),
-   retainedRuntimeSample: observatorySamples === undefined
-      ? undefined : () => observatorySamples!.snapshot(),
-});
+const setExitCode = (code: number) => { process.exitCode = code; };
+installShutdownSignals(process, coordinator, setExitCode);
+export let observatoryRuntimeSnapshot: ReturnType<typeof createObservatoryRuntimeSnapshotBuilder>;
 
-const currentReadinessSnapshot = () => {
-   const storage = store.readinessCheck();
-   const pollerHealth = poller.healthSnapshot();
-   const reconcilerHealth = reconciler.healthSnapshot();
-   const pollerReady = pollerHealth.ready;
-   const reconcilerReady = reconcilerHealth.ready;
-   const backgroundWorkers = pollerReady && reconcilerReady;
-   const diskHeadroom = hasDatabaseDiskHeadroom(
-      databasePath,
-      minimumFreeDiskBytes,
+try {
+   const dispatcher = new IndexerRequestDispatcher({
+      requestsPerSecond: indexerRequestsPerSecond,
+      burst: indexerBurst,
+      concurrency: indexerConcurrency,
+   });
+   background.dispatcher = dispatcher;
+   const economicsMetrics = economicsInstrumentationEnabled
+      ? new RoundWatchEconomicsMetrics()
+      : undefined;
+   const indexer = new AlgorandIndexerClient(
+      indexerUrl,
+      dispatcher,
+      fetch,
+      10_000,
+      economicsMetrics,
+      scanQueryVariant,
    );
-   const ready = storage && backgroundWorkers && diskHeadroom;
-   const checks = {
-      storage,
-      poller: pollerReady,
-      reconciler: reconcilerReady,
-      backgroundWorkers,
-      diskHeadroom,
+   const healthProbe = new IndexerHealthProbe(
+      indexer,
+      networkConfig.usdcAssetIdNumber,
+      undefined,
+      DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS,
+      indexerIdleProbeIntervalMilliseconds,
+   );
+   background.healthProbe = healthProbe;
+   const poller = new RoundWatchPoller(
+      store,
+      indexer,
+      pollIntervalMilliseconds,
+      scanRoundWindow,
+      undefined,
+      economicsMetrics,
+      scanPageCacheEntries,
+      scanPageCacheBytes,
+      healthProbe,
+   );
+   background.poller = poller;
+   const reconciler = new SettlementReconciler(
+      store,
+      indexer,
+      {
+         network: networkConfig.network,
+         intervalMilliseconds: reconciliationIntervalMilliseconds,
+      },
+      economicsMetrics,
+      healthProbe,
+   );
+   background.reconciler = reconciler;
+   const observatorySamples = initializeObservatorySampleRetention();
+   // Boot-scoped core only; no route or readiness work is wired here.
+   observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
+      network: networkConfig.name,
+      assetId: networkConfig.usdcAssetId,
+      economicsMetricsEnabled: economicsInstrumentationEnabled,
+      pollerHealthSnapshot: () => poller.healthSnapshot(),
+      reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
+      dispatcherSnapshot: () => dispatcher.snapshot(),
+      cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
+      pollCycleSnapshot: () => poller.capacitySnapshot(),
+      retainedRuntimeSample: observatorySamples === undefined
+         ? undefined : () => observatorySamples!.snapshot(),
+   });
+
+   const currentReadinessSnapshot = () => {
+      const storage = store.readinessCheck();
+      const pollerHealth = poller.healthSnapshot();
+      const reconcilerHealth = reconciler.healthSnapshot();
+      const pollerReady = pollerHealth.ready;
+      const reconcilerReady = reconcilerHealth.ready;
+      const backgroundWorkers = pollerReady && reconcilerReady;
+      const diskHeadroom = hasDatabaseDiskHeadroom(
+         databasePath,
+         minimumFreeDiskBytes,
+      );
+      const ready = storage && backgroundWorkers && diskHeadroom;
+      const checks = {
+         storage,
+         poller: pollerReady,
+         reconciler: reconcilerReady,
+         backgroundWorkers,
+         diskHeadroom,
+      };
+
+      if (!ready) {
+         console.warn(JSON.stringify({
+            event: 'roundwatch_readiness_blocked',
+            timestamp: new Date().toISOString(),
+            checks,
+            poller: pollerHealth,
+            reconciler: reconcilerHealth,
+         }));
+      }
+
+      return { ready, checks };
    };
 
-   if (!ready) {
-      console.warn(JSON.stringify({
-         event: 'roundwatch_readiness_blocked',
-         timestamp: new Date().toISOString(),
-         checks,
-         poller: pollerHealth,
-         reconciler: reconcilerHealth,
-      }));
-   }
-
-   return { ready, checks };
-};
-
-const paidAdmissionReadinessCheck = createPaidAdmissionReadinessCheck({
-   storageReady: () => store.readinessCheck(),
-   diskHeadroom: () =>
-      hasDatabaseDiskHeadroom(databasePath, minimumFreeDiskBytes),
-   poller,
-   reconciler,
-   healthProbe,
-   maximumEvidenceAgeMilliseconds: paidAdmissionProbeMaxAgeMilliseconds,
-});
-
-const app = createApp({
-   avmAddress,
-   facilitatorClient,
-   store,
-   indexer,
-   networkConfig,
-   publicBaseUrl,
-   economicsMetrics,
-   signedPaymentGateOptions: {
-      requestsPerSecond: signedPaymentRequestsPerSecond,
-      burst: signedPaymentBurst,
-      concurrency: signedPaymentConcurrency,
-   },
-   requestTelemetry: {},
-   readinessCheck: currentReadinessSnapshot,
-   paidAdmissionReadinessCheck,
-});
-const runtimeSampler = createObservatoryRuntimeSampler(
-   economicsMetrics,
-   dispatcher,
-   databasePath,
-   observatorySamples,
-   {
-      intervalMilliseconds: economicsSampleIntervalMilliseconds,
-      capacitySnapshot: () => {
-         const pollerCapacity = poller.capacitySnapshot();
-         return {
-            ...store.capacitySnapshot(
-               pollerCapacity.currentIndexerRound,
-            ),
-            ...pollerCapacity,
-         };
-      },
-   },
-);
-
-const port = parsePositiveInteger(process.env.PORT, 4021);
-
-const server = serve({
-   fetch: app.fetch,
-   port,
-});
-
-server.on('listening', () => {
-   reconciler.start();
-   poller.start();
-   runtimeSampler?.start();
-   console.log(
-      `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
-   );
-   console.log(`Network: ${networkConfig.name}`);
-   console.log(`USDC ASA: ${networkConfig.usdcAssetId}`);
-   console.log(`Indexer: ${indexerUrl}`);
-   console.log(`SQLite: ${databasePath}`);
-   console.log(`Watch TTL: ${watchTtlMilliseconds} ms`);
-   console.log(
-      `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
-   );
-   console.log(
-      `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
-   );
-   console.log(
-      `Conservative background Indexer ceiling: ${backgroundIndexerRequestCeiling} logical request opportunities / watch`,
-   );
-   console.log(
-      `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
-   );
-   console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
-   console.log(`Indexer scan query variant: ${scanQueryVariant}`);
-   console.log(
-      `Historical scan-page cache: ${scanPageCacheEntries} entries / ${scanPageCacheBytes} payload bytes`,
-   );
-   console.log(
-      `Readiness disk headroom floor: ${minimumFreeDiskBytes} bytes`,
-   );
-   console.log(
-      `Indexer capability probe: active=${DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS} ms idle=${indexerIdleProbeIntervalMilliseconds} ms paid-max-age=${paidAdmissionProbeMaxAgeMilliseconds} ms`,
-   );
-   console.log(
-      'Request telemetry: enabled (structured JSON; ephemeral HMAC fingerprints)',
-   );
-   console.log(
-      `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
-   );
-   if (economicsInstrumentationEnabled) {
-      console.log(
-         `Economics sample interval: ${economicsSampleIntervalMilliseconds} ms`,
-      );
-   }
-
-   if (faultExitAfterSettle) {
-      console.warn(
-         'TESTNET FAULT INJECTION ARMED: the process will exit after confirmed settlement and before SQLite activation',
-      );
-   }
-});
-
-server.on('close', () => {
-   reconciler.stop();
-   poller.stop();
-   runtimeSampler?.stop();
-   store.close();
-   console.log('x402 Resource Server CLOSED');
-});
-
-server.on('error', error => {
-   console.error('x402 Resource Server ERROR:', error);
-});
-
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-   process.once(signal, () => {
-      server.close();
+   const paidAdmissionReadinessCheck = createPaidAdmissionReadinessCheck({
+      storageReady: () => store.readinessCheck(),
+      diskHeadroom: () =>
+         hasDatabaseDiskHeadroom(databasePath, minimumFreeDiskBytes),
+      poller,
+      reconciler,
+      healthProbe,
+      maximumEvidenceAgeMilliseconds: paidAdmissionProbeMaxAgeMilliseconds,
    });
+
+   let appRuntime: ReturnType<typeof createAppRuntime>;
+   const initializePayments = () => {
+      appRuntime = createAppRuntime({
+         avmAddress,
+         facilitatorClient,
+         store,
+         indexer,
+         networkConfig,
+         publicBaseUrl,
+         economicsMetrics,
+         signedPaymentGateOptions: {
+            requestsPerSecond: signedPaymentRequestsPerSecond,
+            burst: signedPaymentBurst,
+            concurrency: signedPaymentConcurrency,
+         },
+         requestTelemetry: {},
+         readinessCheck: currentReadinessSnapshot,
+         paidAdmissionReadinessCheck,
+      });
+      return appRuntime.initializePayments();
+   };
+   runtimeSampler = createObservatoryRuntimeSampler(
+      economicsMetrics,
+      dispatcher,
+      databasePath,
+      observatorySamples,
+      {
+         intervalMilliseconds: economicsSampleIntervalMilliseconds,
+         capacitySnapshot: () => {
+            const pollerCapacity = poller.capacitySnapshot();
+            return {
+               ...store.capacitySnapshot(
+                  pollerCapacity.currentIndexerRound,
+               ),
+               ...pollerCapacity,
+            };
+         },
+      },
+   );
+
+   const port = parsePositiveInteger(process.env.PORT, 4021);
+
+   await startProductionRuntime({
+      application,
+      coordinator,
+      initializePayments,
+      createServer: () => {
+         server = createAdaptorServer({
+            fetch: ownApplicationFetch(application, appRuntime.app.fetch),
+         });
+         return server;
+      },
+      port,
+      setExitCode,
+      startWorkers: () => {
+         reconciler.start();
+         if (coordinator.isStopping()) return;
+         poller.start();
+         if (coordinator.isStopping()) return;
+         runtimeSampler?.start();
+      },
+      onListening: () => {
+         console.log(
+            `RoundWatch x402 Resource Server listening at http://localhost:${port}`,
+         );
+         console.log(`Network: ${networkConfig.name}`);
+         console.log(`USDC ASA: ${networkConfig.usdcAssetId}`);
+         console.log(`Indexer: ${indexerUrl}`);
+         console.log(`SQLite: ${databasePath}`);
+         console.log(`Watch TTL: ${watchTtlMilliseconds} ms`);
+         console.log(
+            `Open-watch capacity: ${maxOpenWatches} global / ${maxOpenWatchesPerPayer} per payer`,
+         );
+         console.log(
+            `Durable work budget: ${workUnitBudget} bounded background turns / watch`,
+         );
+         console.log(
+            `Conservative background Indexer ceiling: ${backgroundIndexerRequestCeiling} logical request opportunities / watch`,
+         );
+         console.log(
+            `Signed-payment gate: ${signedPaymentRequestsPerSecond}/s burst=${signedPaymentBurst} concurrency=${signedPaymentConcurrency}`,
+         );
+         console.log(`Indexer dispatcher: ${indexerRequestsPerSecond}/s burst=${indexerBurst} concurrency=${indexerConcurrency}; scan window=${scanRoundWindow} rounds`);
+         console.log(`Indexer scan query variant: ${scanQueryVariant}`);
+         console.log(
+            `Historical scan-page cache: ${scanPageCacheEntries} entries / ${scanPageCacheBytes} payload bytes`,
+         );
+         console.log(
+            `Readiness disk headroom floor: ${minimumFreeDiskBytes} bytes`,
+         );
+         console.log(
+            `Indexer capability probe: active=${DEFAULT_INDEXER_HEALTH_PROBE_INTERVAL_MS} ms idle=${indexerIdleProbeIntervalMilliseconds} ms paid-max-age=${paidAdmissionProbeMaxAgeMilliseconds} ms`,
+         );
+         console.log(
+            'Request telemetry: enabled (structured JSON; ephemeral HMAC fingerprints)',
+         );
+         console.log(
+            `Economics instrumentation: ${economicsInstrumentationEnabled ? 'enabled' : 'disabled'}`,
+         );
+         if (economicsInstrumentationEnabled) {
+            console.log(
+               `Economics sample interval: ${economicsSampleIntervalMilliseconds} ms`,
+            );
+         }
+
+         if (faultExitAfterSettle) {
+            console.warn(
+               'TESTNET FAULT INJECTION ARMED: the process will exit after confirmed settlement and before SQLite activation',
+            );
+         }
+      },
+   });
+} catch (error) {
+   const result = await coordinator.shutdown('resource startup failed', error);
+   setExitCode(result.exitCode);
 }
 
 function assertUrlSafety(

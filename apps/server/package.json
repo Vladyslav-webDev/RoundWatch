@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx --test roundwatch.test.ts roundwatch-capacity.test.ts roundwatch-budget-backfill.test.ts roundwatch-budget-migration.test.ts roundwatch-reconciler.test.ts roundwatch-provider-shutdown.test.ts roundwatch-poller-shutdown.test.ts roundwatch-readiness-evidence.test.ts roundwatch-metrics.test.ts roundwatch-observatory-runtime.test.ts free-payment-gate.test.ts request-telemetry.test.ts economics-benchmark.test.ts",
+    "test": "tsx --test roundwatch.test.ts roundwatch-capacity.test.ts roundwatch-budget-backfill.test.ts roundwatch-budget-migration.test.ts roundwatch-reconciler.test.ts roundwatch-provider-shutdown.test.ts roundwatch-poller-shutdown.test.ts roundwatch-application-lifetime.test.ts roundwatch-shutdown-coordinator.test.ts roundwatch-facilitator-shutdown.test.ts roundwatch-http-shutdown.test.ts roundwatch-startup.test.ts roundwatch-readiness-evidence.test.ts roundwatch-metrics.test.ts roundwatch-observatory-runtime.test.ts free-payment-gate.test.ts request-telemetry.test.ts economics-benchmark.test.ts",
     "dev": "tsx index.ts",
     "start": "tsx index.ts",
     "typecheck": "tsc --noEmit",
