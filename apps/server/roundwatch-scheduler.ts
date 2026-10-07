@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { ShutdownInterrupted, isShutdownInterrupted } from './roundwatch-shutdown.js';
 
 export type IndexerRequestPurpose =
    | 'activation'
@@ -64,6 +65,9 @@ export class IndexerRequestDispatcher {
    private lastRefill: number;
    private inFlight = 0;
    private timer: NodeJS.Timeout | undefined;
+   private schedulingStopped = false;
+   private drainPromise?: Promise<void>;
+   private resolveDrain?: () => void;
    private readonly requestCounts = new Map<string, number>();
    private successes = 0;
    private failures = 0;
@@ -95,17 +99,48 @@ export class IndexerRequestDispatcher {
       operation: () => Promise<T>,
       observer?: IndexerDispatchObserver,
    ): Promise<T> {
+      if (this.schedulingStopped) {
+         return Promise.reject(new ShutdownInterrupted());
+      }
+      const enqueuedAt = this.safeNow();
+      if (this.schedulingStopped) {
+         return Promise.reject(new ShutdownInterrupted());
+      }
       return new Promise<T>((resolve, reject) => {
          this.queue.push({
             purpose,
             operation,
             resolve: resolve as PendingRequest<unknown>['resolve'],
             reject,
-            enqueuedAt: this.safeNow(),
+            enqueuedAt,
             observer,
          });
          this.pump();
       });
+   }
+
+   /** Terminal admission fence; requests already dispatched retain ownership. */
+   stopScheduling(): void {
+      if (this.schedulingStopped) return;
+      this.schedulingStopped = true;
+      if (this.timer) {
+         clearTimeout(this.timer);
+         this.timer = undefined;
+      }
+      for (const pending of this.queue.splice(0)) {
+         pending.reject(new ShutdownInterrupted());
+      }
+      this.finishDrainIfIdle();
+   }
+
+   /** Establish the terminal fence and join dispatched completion continuations. */
+   drain(): Promise<void> {
+      this.stopScheduling();
+      if (!this.drainPromise) {
+         this.drainPromise = new Promise(resolve => { this.resolveDrain = resolve; });
+         this.finishDrainIfIdle();
+      }
+      return this.drainPromise;
    }
 
    snapshot(): IndexerDispatcherSnapshot {
@@ -120,6 +155,7 @@ export class IndexerRequestDispatcher {
    }
 
    private pump(): void {
+      if (this.schedulingStopped) return;
       if (this.timer) {
          clearTimeout(this.timer);
          this.timer = undefined;
@@ -128,12 +164,15 @@ export class IndexerRequestDispatcher {
       this.refill();
 
       while (
+         !this.schedulingStopped &&
          this.queue.length > 0 &&
          this.inFlight < this.concurrency &&
          this.tokens >= 1
       ) {
-         const pending = this.queue.shift()!;
+         // Keep the request queued while a supplied clock can synchronously stop admission.
          const startedAt = this.safeNow();
+         if (this.schedulingStopped) return;
+         const pending = this.queue.shift()!;
          const queueWaitMs = elapsedMilliseconds(
             pending.enqueuedAt,
             startedAt,
@@ -145,7 +184,14 @@ export class IndexerRequestDispatcher {
             (this.requestCounts.get(pending.purpose) ?? 0) + 1,
          );
 
-         void pending.operation().then(
+         // Own synchronous operation failures through the same completion path.
+         let operation: Promise<unknown>;
+         try {
+            operation = pending.operation();
+         } catch (error) {
+            operation = Promise.reject(error);
+         }
+         void operation.then(
             value => {
                this.successes += 1;
                const outcome: IndexerDispatchOutcome = 'success';
@@ -158,6 +204,10 @@ export class IndexerRequestDispatcher {
                pending.resolve(value);
             },
             error => {
+               if (isShutdownInterrupted(error)) {
+                  pending.reject(error);
+                  return;
+               }
                this.failures += 1;
                let outcome: IndexerDispatchOutcome = 'failure';
                if (isTimeout(error)) {
@@ -174,11 +224,15 @@ export class IndexerRequestDispatcher {
             },
          ).finally(() => {
             this.inFlight -= 1;
-            this.pump();
+            if (this.schedulingStopped) {
+               this.finishDrainIfIdle();
+            } else {
+               this.pump();
+            }
          });
       }
 
-      if (this.queue.length > 0 && this.inFlight < this.concurrency) {
+      if (!this.schedulingStopped && this.queue.length > 0 && this.inFlight < this.concurrency) {
          const missing = Math.max(0, 1 - this.tokens);
          const delay = Math.max(1, Math.ceil(missing * 1_000 / this.requestsPerSecond));
          this.timer = setTimeout(() => this.pump(), delay);
@@ -186,8 +240,15 @@ export class IndexerRequestDispatcher {
       }
    }
 
+   private finishDrainIfIdle(): void {
+      if (this.inFlight === 0 && this.queue.length === 0 && this.timer === undefined) {
+         this.resolveDrain?.();
+         this.resolveDrain = undefined;
+      }
+   }
+
    private refill(): void {
-      const current = this.now();
+      const current = this.safeNow();
       if (!Number.isFinite(current) || current <= this.lastRefill) {
          return;
       }
@@ -200,14 +261,23 @@ export class IndexerRequestDispatcher {
    }
 
    private safeNow(): number {
-      const value = this.now();
-      return Number.isFinite(value) ? value : this.lastRefill;
+      try {
+         const value = this.now();
+         return Number.isFinite(value) ? value : this.lastRefill;
+      } catch {
+         // Diagnostic timing must never prevent provider-result settlement.
+         return this.lastRefill;
+      }
    }
 
    private logCompletion(purpose: IndexerRequestPurpose, outcome: string): void {
-      console.debug(
-         `RoundWatch Indexer request purpose=${purpose} outcome=${outcome} inFlight=${this.inFlight} queued=${this.queue.length} successes=${this.successes} failures=${this.failures} timeouts=${this.timeouts}`,
-      );
+      try {
+         console.debug(
+            `RoundWatch Indexer request purpose=${purpose} outcome=${outcome} inFlight=${this.inFlight} queued=${this.queue.length} successes=${this.successes} failures=${this.failures} timeouts=${this.timeouts}`,
+         );
+      } catch {
+         // Diagnostics must not strand the request's original caller.
+      }
    }
 }
 
@@ -245,9 +315,13 @@ function notifyObserver(
    try {
       observer(observation);
    } catch (error) {
-      console.warn(
-         'RoundWatch Indexer instrumentation observer failed:',
-         error instanceof Error ? error.message : 'Unknown observer error',
-      );
+      try {
+         console.warn(
+            'RoundWatch Indexer instrumentation observer failed:',
+            error instanceof Error ? error.message : 'Unknown observer error',
+         );
+      } catch {
+         // A failed diagnostic sink must not escape completion ownership.
+      }
    }
 }

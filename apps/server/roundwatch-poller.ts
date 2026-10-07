@@ -15,6 +15,7 @@ import {
    type WatchEconomicsTurn,
 } from './roundwatch-metrics.js';
 import type { IndexerHealthProbe } from './roundwatch-health-probe.js';
+import { ShutdownInterrupted, isShutdownInterrupted } from './roundwatch-shutdown.js';
 import type {
    PollingFailureDisposition,
    RoundWatchStore,
@@ -72,6 +73,10 @@ export class RoundWatchPoller {
    private timer?: NodeJS.Timeout;
    private running = false;
    private started = false;
+   private schedulingStopped = false;
+   private ownedLifecycles = 0;
+   private drainPromise?: Promise<void>;
+   private resolveDrain?: () => void;
    private generation = 0;
    private nextWatchIndex = 0;
    private readonly sessions = new Map<string, ScanSession>();
@@ -118,7 +123,7 @@ export class RoundWatchPoller {
    }
 
    start(): void {
-      if (this.started) return;
+      if (this.schedulingStopped || this.started) return;
       this.started = true;
       this.generation += 1;
       this.lastObservedProbeRevision = this.healthProbe?.currentRevision() ?? 0;
@@ -126,12 +131,38 @@ export class RoundWatchPoller {
       void this.tick();
    }
 
+   /** Operational pause; start() can resume scheduling. Does not join active work. */
    stop(): void {
       this.started = false;
       this.generation += 1;
       this.workerHealth.markStopped();
       if (this.timer) clearTimeout(this.timer);
       this.timer = undefined;
+   }
+
+   /** Terminal scheduling fence. Keep the store open until drain() settles. */
+   stopScheduling(): void {
+      if (this.schedulingStopped) return;
+      this.schedulingStopped = true;
+      this.stop();
+   }
+
+   /** Establish terminal shutdown and join every direct call and scheduled wrapper. */
+   drain(): Promise<void> {
+      this.stopScheduling();
+      this.drainPromise ??= new Promise<void>(resolve => {
+         this.resolveDrain = resolve;
+      });
+      this.resolveDrainIfIdle();
+      return this.drainPromise;
+   }
+
+   private resolveDrainIfIdle(): void {
+      if (this.ownedLifecycles === 0) this.resolveDrain?.();
+   }
+
+   private assertAcquisitionOpen(): void {
+      if (this.schedulingStopped) throw new ShutdownInterrupted();
    }
 
    healthSnapshot(): WorkerHealthSnapshot {
@@ -177,18 +208,27 @@ export class RoundWatchPoller {
    async runOnce(
       onProgress?: () => void,
    ): Promise<WorkerCycleOutcome> {
-      const generation = this.generation;
-      const cycleStartedAt = performance.now();
-      let outcome: WorkerCycleOutcome;
+      this.assertAcquisitionOpen();
+      this.ownedLifecycles += 1;
       try {
-         this.pruneScanSessions();
-         outcome = await this.runPollingSweep(generation, onProgress);
+         const generation = this.generation;
+         const cycleStartedAt = performance.now();
+         let outcome: WorkerCycleOutcome;
+         try {
+            this.pruneScanSessions();
+            outcome = await this.runPollingSweep(generation, onProgress);
+         } finally {
+            // Ordinary stop/start invalidates session pruning. Terminal drain
+            // still owns this continuation, and requires the store to stay open.
+            if (generation === this.generation) this.pruneScanSessions();
+         }
+         return this.schedulingStopped
+            ? outcome
+            : this.finishCapacityCycle(outcome, cycleStartedAt);
       } finally {
-         // Stop may be followed by closing SQLite while provider work is in
-         // flight. An invalidated sweep leaves pruning to the next sweep.
-         if (generation === this.generation) this.pruneScanSessions();
+         this.ownedLifecycles -= 1;
+         this.resolveDrainIfIdle();
       }
-      return this.finishCapacityCycle(outcome, cycleStartedAt);
    }
 
    private pruneScanSessions(): void {
@@ -238,13 +278,16 @@ export class RoundWatchPoller {
       const sharedPages = new Map<string, Promise<TransactionPage>>();
 
       const getSweepTip = (): Promise<number> => {
-         sharedTipPromise ??= this.indexer.getCurrentRound('health').then(
-            round => {
-               this.lastObservedIndexerRound = round;
-               this.lastObservedIndexerRoundAt = this.now().toISOString();
-               return round;
-            },
-         );
+         if (!sharedTipPromise) {
+            this.assertAcquisitionOpen();
+            sharedTipPromise = this.indexer.getCurrentRound('health').then(
+               round => {
+                  this.lastObservedIndexerRound = round;
+                  this.lastObservedIndexerRoundAt = this.now().toISOString();
+                  return round;
+               },
+            );
+         }
          return sharedTipPromise;
       };
 
@@ -263,6 +306,7 @@ export class RoundWatchPoller {
          );
 
          if (!queryKey) {
+            this.assertAcquisitionOpen();
             return this.indexer.searchWatchPage(
                watch,
                minRound,
@@ -279,6 +323,7 @@ export class RoundWatchPoller {
 
          let pending = sharedPages.get(queryKey);
          if (!pending) {
+            this.assertAcquisitionOpen();
             pending = this.indexer.searchWatchPage(
                watch,
                minRound,
@@ -297,6 +342,7 @@ export class RoundWatchPoller {
       };
 
       for (const watch of ordered) {
+         this.assertAcquisitionOpen();
          outcome.attempted += 1;
          // Lexical to this turn, never shared with another watch or sweep.
          const context: { metrics?: WatchEconomicsTurn } = {};
@@ -311,6 +357,7 @@ export class RoundWatchPoller {
                (outcome.providerEvidence ?? 0) + 1;
             onProgress?.();
          } catch (error) {
+            if (isShutdownInterrupted(error)) throw error;
             outcome.failed += 1;
             const failure = classifyPollingFailure(error);
             if (
@@ -457,12 +504,14 @@ export class RoundWatchPoller {
       let watch = initial as WatchRecord & { scanAfterRound: number; expiresAt: string };
       if (watch.closingRound === undefined && this.now().getTime() >= Date.parse(watch.expiresAt)) {
          this.recordMetric(() => watchMetrics?.recordClosingRequest());
-         const tip = await requestBudget.run(() =>
-            this.indexer.getCurrentRound('checkpoint', watch.id, watchMetrics),
-         );
-         const block = await requestBudget.run(() =>
-            this.indexer.getBlock(tip, watch.id, watchMetrics),
-         );
+         const tip = await requestBudget.run(() => {
+            this.assertAcquisitionOpen();
+            return this.indexer.getCurrentRound('checkpoint', watch.id, watchMetrics);
+         });
+         const block = await requestBudget.run(() => {
+            this.assertAcquisitionOpen();
+            return this.indexer.getBlock(tip, watch.id, watchMetrics);
+         });
          if (block.timestamp * 1_000 >= Date.parse(watch.expiresAt)) {
             this.store.setClosingRound(watch.id, block.round);
             watch = this.store.getWatch(watch.id)! as WatchRecord & { scanAfterRound: number; expiresAt: string };
@@ -640,8 +689,9 @@ export class RoundWatchPoller {
    }
 
    private async tick(): Promise<void> {
-      if (this.running) return;
+      if (this.schedulingStopped || !this.started || this.running) return;
       this.running = true;
+      this.ownedLifecycles += 1;
       const generation = this.generation;
       this.workerHealth.markCycleStarted();
       try {
@@ -669,6 +719,7 @@ export class RoundWatchPoller {
          }
          this.workerHealth.markCycleCompleted(outcome);
       } catch (error) {
+         if (isShutdownInterrupted(error)) return;
          if (generation === this.generation) {
             this.healthProbe?.invalidateForProviderFailure();
             this.workerHealth.markCycleFailed();
@@ -676,13 +727,15 @@ export class RoundWatchPoller {
          console.error('RoundWatch poll failed:', safeErrorMessage(error));
       } finally {
          this.running = false;
-         if (this.started) {
+         if (this.started && !this.schedulingStopped) {
             this.timer = setTimeout(
                () => void this.tick(),
                this.intervalMilliseconds,
             );
             this.timer.unref();
          }
+         this.ownedLifecycles -= 1;
+         this.resolveDrainIfIdle();
       }
    }
 }
