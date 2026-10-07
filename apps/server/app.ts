@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
-import { paymentMiddleware, x402ResourceServer } from '@x402/hono';
+import { paymentMiddlewareFromHTTPServer, x402ResourceServer } from '@x402/hono';
+import { x402HTTPResourceServer } from '@x402/core/server';
 import type {
    FacilitatorClient,
    HTTPTransportContext,
@@ -370,6 +371,20 @@ function createWatchDiscovery(
 }
 
 export function createApp(dependencies: AppDependencies): Hono {
+   return buildAppRuntime(dependencies).app;
+}
+
+export interface AppRuntime {
+   app: Hono;
+   initializePayments(): Promise<void>;
+}
+
+/** Production explicitly owns initialization before opening the listener. */
+export function createAppRuntime(dependencies: AppDependencies): AppRuntime {
+   return buildAppRuntime({ ...dependencies, syncFacilitatorOnStart: false });
+}
+
+function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
    const {
       avmAddress,
       facilitatorClient,
@@ -1035,8 +1050,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       }
    });
 
-   app.use(
-      paymentMiddleware(
+   const paymentHttpServer = new x402HTTPResourceServer(
+         resourceServer,
          {
             'GET /demo': {
                accepts: [
@@ -1080,7 +1095,10 @@ export function createApp(dependencies: AppDependencies): Hono {
                extensions: watchDiscovery,
             },
          },
-         resourceServer,
+   );
+   app.use(
+      paymentMiddlewareFromHTTPServer(
+         paymentHttpServer,
          undefined,
          undefined,
          syncFacilitatorOnStart,
@@ -1337,7 +1355,14 @@ export function createApp(dependencies: AppDependencies): Hono {
       return c.json({ watch: publicWatch(watch) });
    });
 
-   return app;
+   let initialization: Promise<void> | undefined;
+   return {
+      app,
+      initializePayments: () => {
+         initialization ??= paymentHttpServer.initialize();
+         return initialization;
+      },
+   };
 }
 
 function recoveryDisposition(watch: WatchRecord): {
