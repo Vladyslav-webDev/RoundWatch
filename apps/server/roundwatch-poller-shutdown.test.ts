@@ -12,7 +12,7 @@ import { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import { RoundWatchPoller } from './roundwatch-poller.js';
 import { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
 import { ShutdownInterrupted, isShutdownInterrupted } from './roundwatch-shutdown.js';
-import { RoundWatchStore, type WatchRecord } from './roundwatch-store.js';
+import { RoundWatchStore, type WatchRecord, type WorkClaim } from './roundwatch-store.js';
 
 const NOW = new Date('2026-10-06T10:00:00.000Z');
 const PAYER = 'AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI';
@@ -85,8 +85,8 @@ test('S1 poller stops before claiming the second selected watch and retains the 
       const second = active(store, 'shutdown-second');
       const claim = store.claimWorkUnit.bind(store);
       t.mock.method(store, 'listPollingCandidates', () => [first, second]);
-      t.mock.method(store, 'claimWorkUnit', (id: string, purpose: 'polling' | 'reconciliation') => {
-         claims.push(id); return claim(id, purpose);
+      t.mock.method(store, 'claimWorkUnit', (id: string, expectation: WorkClaim) => {
+         claims.push(id); return claim(id, expectation);
       });
       const sweep = poller.runOnce();
       const interrupted = assert.rejects(sweep, isShutdownInterrupted);

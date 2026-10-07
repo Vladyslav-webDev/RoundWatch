@@ -59,6 +59,7 @@ export interface SettlementReconcilerConfig {
 }
 
 interface AbsenceProofSession {
+   expectedTransaction: string;
    nextToken?: string;
    seenTokens: Set<string>;
    coverage?: number;
@@ -260,22 +261,29 @@ export class SettlementReconciler {
    }
 
    private pruneAbsenceProofSessions(): void {
-      for (const watchId of this.absenceProofSessions.keys()) {
+      for (const [watchId, session] of this.absenceProofSessions) {
          const watch = this.store.getWatch(watchId);
          // Due-candidate selection excludes backoff rows. Their pagination
          // state still belongs to a live reconciliation obligation.
-         if (
-            !watch ||
-            (watch.state !== 'settlement_pending' && watch.state !== 'settlement_unknown') ||
-            watch.settlementReconciliationTerminal ||
-            !watch.expectedServiceTransaction
-         ) {
+         if (!this.isSessionCompatible(session, watch)) {
             this.absenceProofSessions.delete(watchId);
          }
       }
    }
 
+   private isSessionCompatible(
+      session: AbsenceProofSession,
+      watch: WatchRecord | undefined,
+   ): boolean {
+      return !!watch &&
+         (watch.state === 'settlement_pending' || watch.state === 'settlement_unknown') &&
+         !watch.settlementReconciliationTerminal &&
+         watch.expectedServiceTransaction === session.expectedTransaction;
+   }
+
    private async reconcileWatch(watch: WatchRecord): Promise<CustomerTurnOutcome> {
+      const expectedTransaction = watch.expectedServiceTransaction;
+      if (!expectedTransaction) return { kind: 'noOp', providerEvidence: false };
       // A candidate selected before another turn awaited may already have
       // been terminally rejected. Check before claiming work, which can itself
       // terminalize a watch through budget exhaustion.
@@ -286,7 +294,11 @@ export class SettlementReconciler {
          this.economicsMetrics, watch.id, !!metricWasTerminal,
       );
       this.assertSchedulingOpen();
-      const workClaim = this.store.claimWorkUnit(watch.id, 'reconciliation');
+      const workClaim = this.store.claimWorkUnit(watch.id, {
+         purpose: 'reconciliation',
+         expectedServiceTransaction: expectedTransaction,
+         expectedReconciliationAttempts: watch.reconciliationAttempts,
+      });
       if (workClaim === 'exhausted') {
          this.absenceProofSessions.delete(watch.id);
          this.finishMetric(watch, captureMetrics());
@@ -295,7 +307,15 @@ export class SettlementReconciler {
          ));
          return { kind: 'noOp', providerEvidence: false };
       }
-      if (workClaim !== 'claimed') return { kind: 'noOp', providerEvidence: false };
+      if (workClaim !== 'claimed') {
+         const session = this.absenceProofSessions.get(watch.id);
+         // Freshness rejection can be temporary scheduling/attempt staleness.
+         // Keep pagination unless the durable obligation identity changed.
+         if (session && !this.isSessionCompatible(session, this.store.getWatch(watch.id))) {
+            this.absenceProofSessions.delete(watch.id);
+         }
+         return { kind: 'noOp', providerEvidence: false };
+      }
 
       const metricTurn = captureMetrics();
       const watchMetrics = metricTurn?.recorder;
@@ -311,8 +331,6 @@ export class SettlementReconciler {
          'settlement reconciliation turn',
       );
 
-      const expectedTransaction = watch.expectedServiceTransaction;
-      if (!expectedTransaction) return { kind: 'noOp', providerEvidence: false };
       if (!hasImmutableTerms(watch)) {
          // Legacy rows cannot receive fabricated purchase terms or a terminal proof.
          this.defer(watch);
@@ -320,6 +338,10 @@ export class SettlementReconciler {
       }
 
       let session = this.absenceProofSessions.get(watch.id);
+      if (session && !this.isSessionCompatible(session, watch)) {
+         this.absenceProofSessions.delete(watch.id);
+         session = undefined;
+      }
 
       if (!session) {
          this.assertSchedulingOpen();
@@ -351,6 +373,7 @@ export class SettlementReconciler {
          }
 
          session = {
+            expectedTransaction,
             seenTokens: new Set<string>(),
          };
          this.absenceProofSessions.set(watch.id, session);

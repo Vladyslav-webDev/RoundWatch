@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 
+import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { ALGORAND_TESTNET_CAIP2 } from './network-config.js';
 import {
    RoundWatchStore,
@@ -331,8 +332,8 @@ test('open index follows durable lifecycle transitions without counters', () => 
       assert.equal(store.capacitySnapshot().unfinishedWatches, 0);
 
       const indeterminate = prepare('indeterminate');
-      assert.equal(store.claimWorkUnit(indeterminate.id, 'reconciliation'), 'claimed');
-      assert.equal(store.claimWorkUnit(indeterminate.id, 'reconciliation'), 'exhausted');
+      assert.equal(store.claimWorkUnit(indeterminate.id, currentWorkClaim(store, indeterminate.id, 'reconciliation')), 'claimed');
+      assert.equal(store.claimWorkUnit(indeterminate.id, currentWorkClaim(store, indeterminate.id, 'reconciliation')), 'exhausted');
       assert.equal(store.capacitySnapshot().unfinishedWatches, 0);
 
       const unknown = prepare('terminal-unknown');

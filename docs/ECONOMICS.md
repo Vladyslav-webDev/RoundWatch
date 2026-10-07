@@ -39,6 +39,11 @@ The consensus block-byte limit provides a finite per-round collision ceiling, bu
 
 With the current implementation a work turn is claimed before background Indexer work. Active polling performs at most four logical Indexer request opportunities in one turn; reconciliation performs at most three. A runtime turn guard enforces those ceilings, and regression tests exercise the four-request active path and three-request reconciliation path. The conservative service-side ceiling is therefore at most 2,000 background Indexer request opportunities for the 500-turn budget, plus the bounded initial purchase/activation path. Shared-tip and page-cache reuse can only reduce physical provider requests below that logical ceiling.
 
+The [C5 worker claim boundary](ARCHITECTURE.md#worker-claim-freshness-c5) atomically
+checks purpose eligibility, selected progress, current due status, and budget for
+both charging and exhaustion. Pre-claim stale plans consume no unit; plans that
+become stale after a successful claim keep their legitimate charge.
+
 ## Free-work audit
 
 A 5,000-request, concurrency-50 in-process benchmark covered health, status reads, unpaid creation, malformed payment headers, and syntactically valid but rejected x402 payments.
