@@ -36,6 +36,7 @@ import { RoundWatchPoller } from './roundwatch-poller.js';
 import { createObservatoryRuntimeSnapshotBuilder } from './roundwatch-observatory-runtime.js';
 import {
    initializeObservatorySampleRetention,
+   initializeObservatoryReadinessRetention,
    createObservatoryRuntimeSampler,
 } from './roundwatch-observatory-initialization.js';
 import { SettlementReconciler } from './roundwatch-reconciler.js';
@@ -386,7 +387,8 @@ try {
    );
    background.reconciler = reconciler;
    const observatorySamples = initializeObservatorySampleRetention();
-   // Boot-scoped core only; no route or readiness work is wired here.
+   const observatoryReadiness = initializeObservatoryReadinessRetention();
+   // Boot-scoped memory sources only; constructing these performs no readiness work.
    observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
       network: networkConfig.name,
       assetId: networkConfig.usdcAssetId,
@@ -398,6 +400,8 @@ try {
       pollCycleSnapshot: () => poller.capacitySnapshot(),
       retainedRuntimeSample: observatorySamples === undefined
          ? undefined : () => observatorySamples!.snapshot(),
+      retainedPublicReadiness: observatoryReadiness === undefined
+         ? undefined : () => observatoryReadiness.snapshot(),
    });
 
    const currentReadinessSnapshot = () => {
@@ -460,6 +464,7 @@ try {
          },
          requestTelemetry: {},
          readinessCheck: currentReadinessSnapshot,
+         publicReadinessObserver: observatoryReadiness?.observer,
          paidAdmissionReadinessCheck,
       });
       return appRuntime.initializePayments();

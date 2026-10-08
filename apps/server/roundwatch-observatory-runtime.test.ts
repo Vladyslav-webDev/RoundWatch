@@ -75,6 +75,7 @@ function sources(overrides: Partial<ObservatoryRuntimeSources> = {}): Observator
       cachedIndexerTip: () => ({}),
       pollCycleSnapshot: undefined,
       retainedRuntimeSample: undefined,
+      retainedPublicReadiness: undefined,
       ...overrides,
    };
 }

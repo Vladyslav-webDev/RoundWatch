@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { readRetainedPublicReadiness } from './roundwatch-observatory-readiness.js';
 import {
    readRetainedRuntimeSample,
    type RetainedRuntimeSample,
@@ -14,6 +15,7 @@ import type {
    Observation,
    ObservatoryRuntimeV01,
    PollCycleObservationV01,
+   PublicReadinessObservationV01,
    WorkerObservationV01,
 } from './roundwatch-observatory-types.js';
 
@@ -33,6 +35,7 @@ export interface ObservatoryRuntimeSources {
    cachedIndexerTip: () => CachedIndexerTip;
    pollCycleSnapshot?: () => PollerCapacitySnapshot;
    retainedRuntimeSample?: () => RetainedRuntimeSample;
+   retainedPublicReadiness?: () => Observation<PublicReadinessObservationV01>;
 }
 
 export interface ObservatoryClocks {
@@ -58,6 +61,7 @@ export function createObservatoryRuntimeSnapshotBuilder(
       pollerHealthSnapshot, reconcilerHealthSnapshot,
       dispatcherSnapshot, cachedIndexerTip, pollCycleSnapshot,
       retainedRuntimeSample,
+      retainedPublicReadiness,
    } = sources;
    const { epochMilliseconds, processMonotonicMilliseconds } = clocks;
    const processEpoch = initializeProcessEpoch(generateProcessEpoch);
@@ -103,7 +107,7 @@ export function createObservatoryRuntimeSnapshotBuilder(
          workers: { poller, reconciler },
          indexer: { dispatcher, observedRound },
          pollCycle,
-         readiness: emptyObservation('unavailable'),
+         readiness: readRetainedPublicReadiness(retainedPublicReadiness),
          capacity: sampled.capacity,
          resources: sampled.resources,
       };
