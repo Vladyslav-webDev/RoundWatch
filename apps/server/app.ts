@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { observePublicReadinessOutcome, type PublicReadinessObserver } from './roundwatch-observatory-readiness.js';
 
 import { paymentMiddlewareFromHTTPServer, x402ResourceServer } from '@x402/hono';
 import { x402HTTPResourceServer } from '@x402/core/server';
@@ -236,6 +237,7 @@ export interface AppDependencies {
    mcpRequestGateOptions?: SignedPaymentGateOptions;
    recoveryRequestGateOptions?: SignedPaymentGateOptions;
    readinessCheck?: () => ReadinessSnapshot;
+   publicReadinessObserver?: PublicReadinessObserver;
    paidAdmissionReadinessCheck?: PaidAdmissionReadinessCheck;
    requestTelemetry?: RequestTelemetryOptions;
 }
@@ -405,6 +407,12 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       paidAdmissionReadinessCheck,
       requestTelemetry,
    } = dependencies;
+   let publicReadinessObserver: PublicReadinessObserver | undefined;
+   try {
+      publicReadinessObserver = dependencies.publicReadinessObserver;
+   } catch {
+      // Optional Observatory wiring must not prevent app construction.
+   }
 
    const signedPaymentGate = new SignedPaymentGate(
       signedPaymentGateOptions ?? {
@@ -655,16 +663,19 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
    app.get('/ready', c => {
       c.header('cache-control', 'no-store');
 
+      let response: Response;
+      let snapshot: ReadinessSnapshot;
+      let completeOutcome = readinessCheck !== undefined;
       try {
          const storageReady = store.readinessCheck();
-         const snapshot = readinessCheck?.() ?? {
+         snapshot = readinessCheck?.() ?? {
             ready: storageReady,
             checks: {
                storage: storageReady,
             },
          };
 
-         return c.json(
+         response = c.json(
             {
                status: snapshot.ready ? 'ready' : 'not_ready',
                network: networkConfig.name,
@@ -673,7 +684,9 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             snapshot.ready ? 200 : 503,
          );
       } catch {
-         return c.json(
+         snapshot = { ready: false, checks: { readinessCheck: false } };
+         completeOutcome = true;
+         response = c.json(
             {
                status: 'not_ready',
                network: networkConfig.name,
@@ -684,6 +697,10 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             503,
          );
       }
+      // The operational catch above owns the original response semantics only.
+      // Projection/publication is independently isolated and cannot change it.
+      if (completeOutcome) observePublicReadinessOutcome(publicReadinessObserver, snapshot);
+      return response;
    });
 
    app.use('*', async (c, next) => {

@@ -2,6 +2,18 @@ import { createObservatorySampleRetention, type ObservatorySampleRetention } fro
 import { RoundWatchRuntimeSampler, type EconomicsRuntimeSamplerOptions } from './roundwatch-runtime-metrics.js';
 import type { RoundWatchEconomicsMetrics } from './roundwatch-metrics.js';
 import type { IndexerRequestDispatcher } from './roundwatch-scheduler.js';
+import { createObservatoryReadinessRetention, type ObservatoryReadinessRetention } from './roundwatch-observatory-readiness.js';
+
+/** Optional passive readiness retention must not abort operational startup. */
+export function initializeObservatoryReadinessRetention(
+   factory: () => ObservatoryReadinessRetention = createObservatoryReadinessRetention,
+): ObservatoryReadinessRetention | undefined {
+   try {
+      return factory();
+   } catch {
+      return undefined;
+   }
+}
 
 /** Optional passive construction must not abort operational startup. */
 export function initializeObservatorySampleRetention(
