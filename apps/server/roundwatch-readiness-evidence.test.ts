@@ -251,7 +251,7 @@ test('functional probe requires scan, checkpoint block, and both reconciliation 
                : Response.json({ transactions: [], 'current-round': 101 });
             if (url.pathname.startsWith('/v2/blocks/')) return failedRoute === 'block'
                ? Response.json({}, { status: 503 })
-               : Response.json({ round: 101, timestamp: 1_000 });
+               : Response.json({ round: 100, timestamp: 1_000 });
             if (url.pathname.startsWith('/v2/transactions/')) return failedRoute === 'lookup'
                ? Response.json({}, { status: 503 })
                : Response.json({}, { status: 404 });
@@ -265,9 +265,42 @@ test('functional probe requires scan, checkpoint block, and both reconciliation 
       assert.equal(result.reconciliation, failedRoute !== 'lookup' && failedRoute !== 'absence');
       assert.ok(paths.includes('/health'));
       assert.ok(paths.some(path => path.includes('/assets/')));
-      if (failedRoute !== 'scan') assert.ok(paths.includes('/v2/blocks/101'));
+      if (failedRoute !== 'scan') assert.ok(paths.includes('/v2/blocks/100'));
       assert.ok(paths.length <= 5);
    }
+});
+
+test('functional probe tolerates newest-round block propagation skew', async () => {
+   const paths: string[] = [];
+   const client = new AlgorandIndexerClient('https://indexer.invalid',
+      new IndexerRequestDispatcher({ requestsPerSecond: 1_000, burst: 10, concurrency: 1 }),
+      async input => {
+         const url = new URL(String(input)); paths.push(url.pathname);
+         if (url.pathname === '/health') return Response.json({ round: 101 });
+         if (url.pathname.includes('/assets/')) {
+            return Response.json({ transactions: [], 'current-round': 101 });
+         }
+         if (url.pathname === '/v2/blocks/101') {
+            return Response.json({}, { status: 404 });
+         }
+         if (url.pathname === '/v2/blocks/100') {
+            return Response.json({ round: 100, timestamp: 1_000 });
+         }
+         if (url.pathname.startsWith('/v2/transactions/')) {
+            return Response.json({}, { status: 404 });
+         }
+         if (url.pathname === '/v2/transactions') {
+            return Response.json({ transactions: [], 'current-round': 101 });
+         }
+         throw new Error(`unexpected path ${url.pathname}`);
+      });
+
+   const result = await client.probeReadinessCapabilities(ASSET);
+   assert.equal(result.polling, true);
+   assert.equal(result.reconciliation, true);
+   assert.ok(paths.includes('/v2/blocks/100'));
+   assert.equal(paths.includes('/v2/blocks/101'), false);
+   assert.ok(paths.length <= 5);
 });
 
 test('checkpoint 503 keeps an idle poller unready until that route recovers', async () => {
@@ -281,10 +314,10 @@ test('checkpoint 503 keeps an idle poller unready until that route recovers', as
          const path = new URL(String(input)).pathname;
          if (path === '/health') return Response.json({ round: 101 });
          if (path.startsWith('/v2/assets/')) return Response.json({ transactions: [], 'current-round': 101 });
-         if (path === '/v2/blocks/101') {
+         if (path === '/v2/blocks/100') {
             blockCalls += 1;
             return blockHealthy
-               ? Response.json({ round: 101, timestamp: 1_000 })
+               ? Response.json({ round: 100, timestamp: 1_000 })
                : Response.json({}, { status: 503 });
          }
          if (path.startsWith('/v2/transactions/')) return Response.json({}, { status: 404 });
