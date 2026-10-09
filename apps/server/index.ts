@@ -5,7 +5,8 @@ import { createAdaptorServer, type ServerType } from '@hono/node-server';
 import { isValidAlgorandAddress } from '@x402/avm';
 
 import { createAppRuntime } from './app.js';
-import { ApplicationLifetime, ownApplicationFetch } from './roundwatch-application-lifetime.js';
+import { ApplicationLifetime } from './roundwatch-application-lifetime.js';
+import { createRoundWatchHttpFetch } from './roundwatch-observatory-transport.js';
 import { RoundWatchFacilitatorClient } from './roundwatch-facilitator.js';
 import {
    closeNodeServer,
@@ -239,6 +240,8 @@ const faultExitAfterSettle =
    process.env.ROUNDWATCH_TESTNET_EXIT_AFTER_SETTLE?.trim() === '1';
 const economicsInstrumentationEnabled =
    process.env.ROUNDWATCH_ECONOMICS_METRICS?.trim() === '1';
+// Captured once; optional transport validates silently and fails closed.
+const observatoryToken = process.env.ROUNDWATCH_OBSERVATORY_TOKEN;
 
 if (faultExitAfterSettle && networkConfig.name !== 'testnet') {
    console.error(
@@ -335,7 +338,7 @@ const coordinator = createShutdownCoordinator({
 });
 const setExitCode = (code: number) => { process.exitCode = code; };
 installShutdownSignals(process, coordinator, setExitCode);
-export let observatoryRuntimeSnapshot: ReturnType<typeof createObservatoryRuntimeSnapshotBuilder>;
+export let observatoryRuntimeSnapshot: ReturnType<typeof createObservatoryRuntimeSnapshotBuilder> | undefined;
 
 try {
    const dispatcher = new IndexerRequestDispatcher({
@@ -389,20 +392,25 @@ try {
    const observatorySamples = initializeObservatorySampleRetention();
    const observatoryReadiness = initializeObservatoryReadinessRetention();
    // Boot-scoped memory sources only; constructing these performs no readiness work.
-   observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
-      network: networkConfig.name,
-      assetId: networkConfig.usdcAssetId,
-      economicsMetricsEnabled: economicsInstrumentationEnabled,
-      pollerHealthSnapshot: () => poller.healthSnapshot(),
-      reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
-      dispatcherSnapshot: () => dispatcher.snapshot(),
-      cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
-      pollCycleSnapshot: () => poller.capacitySnapshot(),
-      retainedRuntimeSample: observatorySamples === undefined
-         ? undefined : () => observatorySamples!.snapshot(),
-      retainedPublicReadiness: observatoryReadiness === undefined
-         ? undefined : () => observatoryReadiness.snapshot(),
-   });
+   try {
+      observatoryRuntimeSnapshot = createObservatoryRuntimeSnapshotBuilder({
+         network: networkConfig.name,
+         assetId: networkConfig.usdcAssetId,
+         economicsMetricsEnabled: economicsInstrumentationEnabled,
+         pollerHealthSnapshot: () => poller.healthSnapshot(),
+         reconcilerHealthSnapshot: () => reconciler.healthSnapshot(),
+         dispatcherSnapshot: () => dispatcher.snapshot(),
+         cachedIndexerTip: () => poller.capacitySnapshot(), // poller memory, never store SQL
+         pollCycleSnapshot: () => poller.capacitySnapshot(),
+         retainedRuntimeSample: observatorySamples === undefined
+            ? undefined : () => observatorySamples!.snapshot(),
+         retainedPublicReadiness: observatoryReadiness === undefined
+            ? undefined : () => observatoryReadiness.snapshot(),
+      });
+   } catch {
+      // Optional snapshot initialization must not prevent operational startup.
+      observatoryRuntimeSnapshot = undefined;
+   }
 
    const currentReadinessSnapshot = () => {
       const storage = store.readinessCheck();
@@ -496,7 +504,10 @@ try {
       initializePayments,
       createServer: () => {
          server = createAdaptorServer({
-            fetch: ownApplicationFetch(application, appRuntime.app.fetch),
+            fetch: createRoundWatchHttpFetch(application, appRuntime.app.fetch, {
+               token: observatoryToken,
+               runtimeSnapshot: observatoryRuntimeSnapshot,
+            }),
          });
          return server;
       },
