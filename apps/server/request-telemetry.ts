@@ -1,17 +1,15 @@
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 
 import type { MiddlewareHandler } from 'hono';
+import {
+   createAcceptanceContext, finishAcceptance, runAcceptanceContext, unknownAcceptance,
+   type AcceptanceSnapshot,
+} from './acceptance-funnel.js';
 
 export type RequestClassification =
+   | 'watch_create_acceptance'
    | 'health'
    | 'readiness'
-   | 'watch_create_challenge'
-   | 'watch_create_malformed'
-   | 'watch_create_payment_rejected'
-   | 'watch_create_rate_limited'
-   | 'watch_create_unavailable'
-   | 'watch_create_success'
-   | 'watch_create_failed'
    | 'watch_status_found'
    | 'watch_status_not_found'
    | 'watch_recovery'
@@ -23,10 +21,12 @@ export type PaymentTelemetryOutcome =
    | 'not_present'
    | 'challenge'
    | 'presented'
-   | 'rejected'
+   | 'verification_rejected'
+   | 'verified'
+   | 'ambiguous'
    | 'settled';
 
-export interface RequestTelemetryEvent {
+export interface RequestTelemetryEvent extends Partial<AcceptanceSnapshot> {
    event: 'roundwatch_http_request';
    timestamp: string;
    requestId: string;
@@ -35,6 +35,7 @@ export interface RequestTelemetryEvent {
    statusCode: number;
    durationMs: number;
    classification: RequestClassification;
+   classificationVersion: 2;
    uaClass: string;
    host: string;
    paymentPresented: boolean;
@@ -42,6 +43,8 @@ export interface RequestTelemetryEvent {
    clientFingerprint?: string;
    watchFingerprint?: string;
 }
+
+export type AcceptanceRequestTelemetryEvent = RequestTelemetryEvent & AcceptanceSnapshot;
 
 export interface RequestTelemetryOptions {
    hmacKey?: string | Buffer;
@@ -63,6 +66,7 @@ interface TelemetryContext {
    clientAddress?: string;
    requestId: string;
    timestamp: string;
+   acceptance?: AcceptanceSnapshot;
 }
 
 export function createRequestTelemetryMiddleware(
@@ -76,56 +80,71 @@ export function createRequestTelemetryMiddleware(
    const nextRequestId = options.requestId ?? randomUUID;
 
    return async (c, next) => {
-      const startedAt = monotonicNow();
-      const requestId = nextRequestId();
+      // Injected clocks/IDs/formatters are telemetry too: failure skips logging,
+      // never the request. No response cloning or payload parsing is needed.
+      let startedAt = 0;
+      let requestId = '';
+      let initialized = false;
+      let acceptance: ReturnType<typeof createAcceptanceContext> | undefined;
+      try {
+         startedAt = monotonicNow();
+         requestId = nextRequestId();
+         initialized = true;
+         if (c.req.method === 'POST' && c.req.path === watchPath) {
+            acceptance = createAcceptanceContext(requestId, c.req.header('payment-signature') !== undefined, log);
+         }
+      } catch { /* Telemetry initialization is optional. */ }
       let failed = false;
 
-      try {
-         await next();
-      } catch (error) {
-         failed = true;
-         throw error;
-      } finally {
-         const statusCode = failed ? 500 : c.res.status;
-         const event = buildRequestTelemetryEvent(
-            {
-               method: c.req.method,
-               path: c.req.path,
-               statusCode,
-               durationMs: Math.max(0, monotonicNow() - startedAt),
-               watchPath,
-               paymentPresented:
-                  c.req.header('payment-signature') !== undefined,
-               userAgent: c.req.header('user-agent'),
-               host: safeHost(c.req.url, c.req.header('host')),
-               clientAddress: requestClientAddress(
-                  c.req.header('cf-connecting-ip'),
-                  c.req.header('x-real-ip'),
-                  c.req.header('x-forwarded-for'),
-               ),
-               requestId,
-               timestamp: now().toISOString(),
-            },
-            hmacKey,
-         );
-
-         if (event) {
-            log(JSON.stringify(event));
+      return runAcceptanceContext(acceptance, async () => {
+         try {
+            await next();
+         } catch (error) {
+            failed = true;
+            throw error;
+         } finally {
+            try {
+               const statusCode = failed ? 500 : c.res.status;
+               const snapshot = acceptance ? finishAcceptance(acceptance, statusCode) : undefined;
+               if (initialized) {
+                  const event = buildRequestTelemetryEvent(
+                     {
+                        method: c.req.method,
+                        path: c.req.path,
+                        statusCode,
+                        durationMs: Math.max(0, monotonicNow() - startedAt),
+                        watchPath,
+                        paymentPresented: c.req.header('payment-signature') !== undefined,
+                        userAgent: c.req.header('user-agent'),
+                        host: safeHost(c.req.url, c.req.header('host')),
+                        clientAddress: requestClientAddress(
+                           c.req.header('cf-connecting-ip'),
+                           c.req.header('x-real-ip'),
+                           c.req.header('x-forwarded-for'),
+                        ),
+                        requestId,
+                        timestamp: now().toISOString(),
+                        acceptance: snapshot,
+                     },
+                     hmacKey,
+                  );
+                  if (event) log(JSON.stringify(event));
+               }
+            } catch { /* Sink and serialization failures cannot affect payments. */ }
          }
-      }
+      });
    };
 }
 
 export function buildRequestTelemetryEvent(
    context: TelemetryContext,
    hmacKey: string | Buffer,
-): RequestTelemetryEvent | undefined {
+): RequestTelemetryEvent | AcceptanceRequestTelemetryEvent | undefined {
    const route = normalizedRoute(context.path, context.watchPath);
    const classification = classifyRequest(
       context.method,
       route,
       context.statusCode,
-      context.paymentPresented,
       context.watchPath,
    );
 
@@ -145,14 +164,18 @@ export function buildRequestTelemetryEvent(
       statusCode: context.statusCode,
       durationMs: Number(context.durationMs.toFixed(2)),
       classification,
+      classificationVersion: 2,
       uaClass: classifyUserAgent(context.userAgent),
       host: sanitizeHost(context.host),
       paymentPresented: context.paymentPresented,
-      paymentOutcome: paymentOutcome(
-         classification,
-         context.paymentPresented,
-      ),
+      paymentOutcome: paymentOutcome(context.paymentPresented, context.acceptance),
    };
+
+   // v2 replaces ambiguous create classifications with a versioned source-owned
+   // funnel. The economics cost buckets in app.ts intentionally stay unchanged.
+   if (classification === 'watch_create_acceptance') {
+      Object.assign(event, context.acceptance ?? unknownAcceptance());
+   }
 
    if (context.clientAddress) {
       event.clientFingerprint = fingerprint(
@@ -223,7 +246,6 @@ function classifyRequest(
    method: string,
    route: string,
    statusCode: number,
-   paymentPresented: boolean,
    watchPath: string,
 ): RequestClassification {
    const upperMethod = method.toUpperCase();
@@ -243,39 +265,21 @@ function classifyRequest(
    }
 
    if (upperMethod === 'POST' && route === watchPath) {
-      if (statusCode === 402 && !paymentPresented) {
-         return 'watch_create_challenge';
-      }
-      if (statusCode === 400 && !paymentPresented) {
-         return 'watch_create_malformed';
-      }
-      if (statusCode === 429) return 'watch_create_rate_limited';
-      if (statusCode === 503) return 'watch_create_unavailable';
-      if (statusCode >= 500) return 'watch_create_failed';
-      if (
-         paymentPresented &&
-         (statusCode === 400 || statusCode === 402 || statusCode === 409)
-      ) {
-         return 'watch_create_payment_rejected';
-      }
-      if (statusCode >= 200 && statusCode < 300 && paymentPresented) {
-         return 'watch_create_success';
-      }
-      if (statusCode >= 400) return 'watch_create_malformed';
+      return 'watch_create_acceptance';
    }
 
    return 'other';
 }
 
 function paymentOutcome(
-   classification: RequestClassification,
    paymentPresented: boolean,
+   acceptance?: AcceptanceSnapshot,
 ): PaymentTelemetryOutcome {
-   if (classification === 'watch_create_challenge') return 'challenge';
-   if (classification === 'watch_create_success') return 'settled';
-   if (paymentPresented && classification === 'watch_create_payment_rejected') {
-      return 'rejected';
-   }
+   if (acceptance?.settlementConfirmed === true) return 'settled';
+   if (acceptance?.funnelEvent === 'challenge_issued') return 'challenge';
+   if (acceptance?.settlementClientInvoked === true) return 'ambiguous';
+   if (acceptance?.funnelEvent === 'payment_verification_rejected') return 'verification_rejected';
+   if (acceptance?.verificationConfirmed === true) return 'verified';
    return paymentPresented ? 'presented' : 'not_present';
 }
 
