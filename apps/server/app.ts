@@ -1,4 +1,8 @@
 import { Hono } from 'hono';
+import {
+   beginAcceptance, observeAcceptance, observeAcceptanceStage, observeFacilitatorClient,
+   observeReadinessFailure, startAcceptanceTiming, type AcceptanceReason,
+} from './acceptance-funnel.js';
 import { cors } from 'hono/cors';
 import { observePublicReadinessOutcome, type PublicReadinessObserver } from './roundwatch-observatory-readiness.js';
 
@@ -485,7 +489,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
    };
    const openApiDocument = buildOpenApiDocument(machineReadableDocsOptions);
    const llmsTxt = buildLlmsTxt(machineReadableDocsOptions);
-   const resourceServer = new x402ResourceServer(facilitatorClient);
+   const resourceServer = new x402ResourceServer(observeFacilitatorClient(facilitatorClient));
 
    resourceServer.register(networkConfig.network, new ExactAvmScheme());
    resourceServer.registerExtension(
@@ -510,6 +514,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       const watchId = getHeader(transport.responseHeaders, ROUNDWATCH_ID_HEADER);
 
       if (!watchId) {
+         observeAcceptance('activation_pending', 'unknown');
          throw new Error('Settled RoundWatch response had no watch ID');
       }
 
@@ -519,13 +524,22 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          ...(context.result.payer ? { payer: context.result.payer } : {}),
       };
 
-      const settlementWatch = store.recordSettlementCandidate(watchId, settlementEvidence);
+      let settlementWatch;
+      try {
+         settlementWatch = store.recordSettlementCandidate(watchId, settlementEvidence);
+      } catch (error) {
+         observeAcceptance('activation_pending', 'activation_write_failed');
+         throw error;
+      }
 
       const metricTurn = captureWatchEconomicsTurn(
          economicsMetrics, watchId,
          settlementWatch.state === 'matched' || settlementWatch.settlementReconciliationTerminal,
       );
 
+      const finishActivationTiming = startAcceptanceTiming('activation');
+      let activationFailureReason: AcceptanceReason<'activation_pending'> = 'indexer_unavailable';
+      let evidenceMismatch = false;
       try {
          const transfer = await indexer.lookupAssetTransfer(
             settlementEvidence.transaction,
@@ -533,8 +547,12 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             watchId,
             metricTurn?.recorder,
          );
+         activationFailureReason = 'unknown';
          const watch = store.getWatch(watchId);
-         if (!transfer || !watch) return;
+         if (!transfer || !watch) {
+            observeAcceptance('activation_pending', !transfer ? 'lookup_absent' : 'unknown');
+            return;
+         }
          const matches =
             transfer.transaction === settlementEvidence.transaction &&
             transfer.sender === watch.expectedServicePayer &&
@@ -544,17 +562,24 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             transfer.round >= (watch.serviceFirstValid ?? Number.MAX_SAFE_INTEGER) &&
             transfer.round <= (watch.serviceLastValid ?? -1);
          if (!matches) {
+            evidenceMismatch = true;
+            observeAcceptance('activation_rejected', 'evidence_mismatch');
             store.markSettlementInvalid(watchId);
             finishWatchEconomicsTurn(metricTurn, store.getWatch(watchId));
             return;
          }
+         activationFailureReason = 'activation_write_failed';
          store.activateWatch(watchId, settlementEvidence, transfer.round);
+         observeAcceptance('activation_confirmed', 'activated');
       } catch (error) {
+         if (!evidenceMismatch) observeAcceptance('activation_pending', activationFailureReason);
          console.warn(
             'RoundWatch could not confirm the service transaction activation round:',
             safeErrorMessage(error),
          );
          return;
+      } finally {
+         finishActivationTiming();
       }
    });
 
@@ -831,6 +856,9 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          return;
       }
 
+      beginAcceptance();
+      observeAcceptanceStage('readiness');
+      const finishReadinessTiming = startAcceptanceTiming('pre_challenge');
       try {
          const storageReady = store.readinessCheck();
          const snapshot = paidAdmissionReadinessCheck
@@ -841,6 +869,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
               };
 
          if (!snapshot.ready) {
+            observeReadinessFailure('pre_challenge', false, snapshot.checks);
             c.header('cache-control', 'no-store');
             return c.json(
                {
@@ -853,6 +882,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             );
          }
       } catch {
+         observeReadinessFailure('pre_challenge', true, { readinessCheck: false });
          c.header('cache-control', 'no-store');
          return c.json(
             {
@@ -863,6 +893,8 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             },
             503,
          );
+      } finally {
+         finishReadinessTiming();
       }
 
       await next();
@@ -890,6 +922,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       // concurrency merely by stalling ahead of the payment-verification gate.
       const bodyAdmission = signedWatchBodyGate.tryAcquire();
       if (!bodyAdmission.allowed) {
+         observeAcceptance('signed_request_rate_limited', bodyAdmission.reason === 'rate' ? 'body_rate' : 'body_concurrency');
          c.header('retry-after', '1');
          return c.json(
             {
@@ -901,6 +934,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          );
       }
 
+      observeAcceptanceStage('body_validation');
       try {
          try {
             const body = await readJsonBodyWithLimit(
@@ -911,6 +945,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             parsedWatchBodies.set(c.req.raw, body);
          } catch (error) {
             if (error instanceof RequestBodyTooLargeError) {
+               observeAcceptance('body_validation_rejected', 'body_too_large');
                return c.json(
                   {
                      error: 'Watch request body is too large',
@@ -921,6 +956,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             }
 
             if (error instanceof RequestBodyReadTimeoutError) {
+               observeAcceptance('body_validation_rejected', 'body_timeout');
                return c.json(
                   {
                      error: 'Watch request body read timed out',
@@ -930,6 +966,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
                );
             }
 
+            observeAcceptance('body_validation_rejected', 'json_invalid');
             return c.json({ error: 'Expected a JSON request body' }, 400);
          }
       } finally {
@@ -949,6 +986,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       }
 
       if (!parsedWatchBodies.has(c.req.raw)) {
+         observeAcceptance('body_validation_rejected', 'json_invalid');
          return c.json(
             {
                error: 'Expected a JSON request body',
@@ -964,6 +1002,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       );
 
       if ('error' in parsed) {
+         observeAcceptance('body_validation_rejected', parsed.reason);
          return c.json(
             { error: parsed.error, code: 'invalid_watch_request' },
             400,
@@ -972,6 +1011,9 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
 
       const admissionError = validateNewWatchAdmission(parsed.spec);
       if (admissionError) {
+         observeAcceptance('body_validation_rejected',
+            admissionError.code === 'example_idempotency_key' ? 'example_key' :
+            admissionError.code === 'example_invoice_note' ? 'example_note' : 'zero_sender');
          return c.json(admissionError, 400);
       }
 
@@ -1001,6 +1043,8 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             }),
             { status: 500, headers },
          );
+      } else {
+         observeAcceptance('purchase_completed', 'completed');
       }
    });
 
@@ -1027,6 +1071,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          Buffer.byteLength(paymentHeader, 'utf8') >
          MAX_PAYMENT_SIGNATURE_HEADER_BYTES
       ) {
+         observeAcceptance('payment_header_rejected', 'header_too_large');
          return c.json(
             {
                error: 'PAYMENT-SIGNATURE header is too large',
@@ -1039,6 +1084,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       try {
          decodePaymentSignatureHeader(paymentHeader);
       } catch {
+         observeAcceptance('payment_header_rejected', 'header_encoding_invalid');
          return c.json(
             {
                error: 'Invalid PAYMENT-SIGNATURE header',
@@ -1050,6 +1096,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
 
       const admission = signedPaymentGate.tryAcquire();
       if (!admission.allowed) {
+         observeAcceptance('signed_request_rate_limited', admission.reason === 'rate' ? 'verification_rate' : 'verification_concurrency');
          c.header('retry-after', '1');
          return c.json(
             {
@@ -1113,14 +1160,24 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             },
          },
    );
-   app.use(
-      paymentMiddlewareFromHTTPServer(
-         paymentHttpServer,
-         undefined,
-         undefined,
-         syncFacilitatorOnStart,
-      ),
+   const paymentMiddleware = paymentMiddlewareFromHTTPServer(
+      paymentHttpServer,
+      undefined,
+      undefined,
+      syncFacilitatorOnStart,
    );
+   app.use(async (c, next) => {
+      observeAcceptanceStage('payment_protocol');
+      const response = await paymentMiddleware(c, next);
+      const observedResponse = response instanceof Response ? response : c.res;
+      // This is the normal SDK unsigned offer response, observed after its
+      // construction. Other 402s and empty presented headers are not challenges.
+      if (c.req.header('payment-signature') === undefined && observedResponse.status === 402 &&
+          observedResponse.headers.has('payment-required')) {
+         observeAcceptance('challenge_issued', 'payment_required');
+      }
+      return response;
+   });
 
    // Known-good regression baseline when ROUNDWATCH_NETWORK is omitted/testnet.
    app.get('/demo', c => {
@@ -1134,10 +1191,12 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
    app.post(watchPath, async c => {
       const spec = validatedWatchSpecs.get(c.req.raw);
       if (!spec) {
+         observeAcceptance('internal_admission_failed', 'unknown');
          return c.json({ error: 'Watch request was not validated', code: 'invalid_watch_request' }, 400);
       }
 
       let settlementIntent: SettlementIntent | undefined;
+      observeAcceptanceStage('preparation');
       const paymentHeader = c.req.header('payment-signature');
 
       if (paymentHeader) {
@@ -1151,6 +1210,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             );
          } catch (error) {
             if (requireSettlementIntent) {
+               observeAcceptance('internal_admission_failed', 'settlement_identity');
                console.error(
                   'RoundWatch could not persist deterministic settlement identity:',
                   safeErrorMessage(error),
@@ -1164,6 +1224,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       }
 
       if (requireSettlementIntent && !settlementIntent) {
+         observeAcceptance('internal_admission_failed', 'settlement_identity');
          return c.json(
             { error: 'Durable settlement identity is required on MainNet' },
             500,
@@ -1177,6 +1238,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       // microtask gap, so consume CURRENT readiness synchronously afterward.
       // No await separates validateCurrent from prepareWatch's durable commit.
       // A 503 skips x402 settlement.
+      const finishReadinessTiming = startAcceptanceTiming('pre_prepare');
       try {
          const storageReady = store.readinessCheck();
          let snapshot = paidAdmissionReadinessCheck
@@ -1191,6 +1253,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          }
 
          if (!snapshot.ready) {
+            observeReadinessFailure('pre_prepare', false, snapshot.checks);
             return c.json(
                {
                   error:
@@ -1202,6 +1265,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             );
          }
       } catch {
+         observeReadinessFailure('pre_prepare', true, { readinessCheck: false });
          return c.json(
             {
                error:
@@ -1211,12 +1275,16 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             },
             503,
          );
+      } finally {
+         finishReadinessTiming();
       }
 
+      observeAcceptanceStage('preparation');
       try {
          prepared = store.prepareWatch(spec, settlementIntent);
       } catch (error) {
          if (error instanceof LegacyIdempotencyReservationError) {
+            observeAcceptance('idempotency_conflicted', 'legacy_reservation');
             return c.json(
                {
                   error:
@@ -1228,6 +1296,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          }
 
          if (error instanceof IdempotencyConflictError) {
+            observeAcceptance('idempotency_conflicted', 'different_spec');
             return c.json(
                {
                   error:
@@ -1239,6 +1308,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          }
 
          if (error instanceof WatchCapacityError) {
+            observeAcceptance('capacity_rejected', error.scope);
             console.warn(`RoundWatch admission rejected scope=${error.scope}`);
             return c.json(
                {
@@ -1252,10 +1322,12 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
             );
          }
 
+         observeAcceptance('internal_admission_failed', 'prepare_failed');
          throw error;
       }
 
       if (!prepared.created) {
+         observeAcceptance('idempotency_replayed', 'same_spec');
          return c.json(
             {
                error: 'Idempotency replay: this payer already has a watch for the same key and specification',
@@ -1266,6 +1338,7 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
          );
       }
 
+      observeAcceptance('durable_prepared', 'prepared');
       c.header(ROUNDWATCH_ID_HEADER, prepared.watch.id);
 
       return c.json({
@@ -1519,9 +1592,9 @@ function validateNewWatchAdmission(
 function parseWatchSpec(
    body: unknown,
    usdcAssetId: number,
-): { spec: WatchSpec } | { error: string } {
+): { spec: WatchSpec } | { error: string; reason: AcceptanceReason<'body_validation_rejected'> } {
    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return { error: 'Request body must be an object' };
+      return { error: 'Request body must be an object', reason: 'body_not_object' };
    }
 
    const input = body as Record<string, unknown>;
@@ -1536,21 +1609,21 @@ function parseWatchSpec(
       idempotencyKey.length < 8 ||
       idempotencyKey.length > 128
    ) {
-      return { error: 'idempotencyKey must be 8-128 characters' };
+      return { error: 'idempotencyKey must be 8-128 characters', reason: 'idempotency_invalid' };
    }
 
    if (
       typeof expectedSender !== 'string' ||
       !isValidAlgorandAddress(expectedSender)
    ) {
-      return { error: 'expectedSender must be a valid Algorand address' };
+      return { error: 'expectedSender must be a valid Algorand address', reason: 'sender_invalid' };
    }
 
    if (
       typeof expectedReceiver !== 'string' ||
       !isValidAlgorandAddress(expectedReceiver)
    ) {
-      return { error: 'expectedReceiver must be a valid Algorand address' };
+      return { error: 'expectedReceiver must be a valid Algorand address', reason: 'receiver_invalid' };
    }
 
    if (
@@ -1558,11 +1631,11 @@ function parseWatchSpec(
       atomicAmount.length > MAX_SAFE_ATOMIC_AMOUNT_DIGITS ||
       !/^[1-9]\d*$/.test(atomicAmount)
    ) {
-      return { error: 'atomicAmount must be a positive safe-integer string' };
+      return { error: 'atomicAmount must be a positive safe-integer string', reason: 'amount_invalid' };
    }
 
    if (BigInt(atomicAmount) > MAX_SAFE_ATOMIC_AMOUNT) {
-      return { error: `atomicAmount must not exceed ${MAX_SAFE_ATOMIC_AMOUNT}` };
+      return { error: `atomicAmount must not exceed ${MAX_SAFE_ATOMIC_AMOUNT}`, reason: 'amount_invalid' };
    }
 
    if (
@@ -1571,7 +1644,7 @@ function parseWatchSpec(
          invoiceNote.length === 0 ||
          Buffer.byteLength(invoiceNote, 'utf8') > 128)
    ) {
-      return { error: 'invoiceNote must be 1-128 UTF-8 bytes when supplied' };
+      return { error: 'invoiceNote must be 1-128 UTF-8 bytes when supplied', reason: 'note_invalid' };
    }
 
    return {

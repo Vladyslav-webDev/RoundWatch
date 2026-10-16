@@ -8,6 +8,8 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { FacilitatorClient } from '@x402/core/server';
+import { FacilitatorResponseError, FacilitatorTimeoutError, VerifyError } from '@x402/core/types';
+import type { RequestTelemetryEvent } from './request-telemetry.js';
 import type {
    PaymentPayload,
    PaymentRequirements,
@@ -3566,6 +3568,7 @@ function syntheticServiceTransferResponse(): Response {
 
 test('settled payment survives activation lookup failure and reconciles without a second settlement', async () => {
    const store = new RoundWatchStore(':memory:');
+   const telemetry: string[] = [];
    const indexer = new MiddlewareIndexer();
    indexer.activationFailuresRemaining = 1;
    const facilitator = new MiddlewareFacilitator(store, 'middleware-recovery');
@@ -3575,6 +3578,7 @@ test('settled payment survives activation lookup failure and reconciles without 
       store,
       indexer,
       requireSettlementIntent: true,
+      requestTelemetry: { log: line => telemetry.push(line) },
    });
 
    try {
@@ -3595,6 +3599,12 @@ test('settled payment survives activation lookup failure and reconciles without 
 
       assert.equal(paid.status, 500);
       assert.equal(facilitator.settleCalls, 1);
+      const final = JSON.parse(telemetry.at(-1)!) as RequestTelemetryEvent;
+      assert.equal(final.funnelEvent, 'activation_pending');
+      assert.equal(final.reason, 'indexer_unavailable');
+      assert.equal(final.settlementConfirmed, true);
+      assert.equal(final.paymentOutcome, 'settled');
+      const telemetryBeforeRecovery = telemetry.length;
 
       const pending = store.getByIdempotencyKey(spec.idempotencyKey);
       assert.equal(pending?.state, 'settlement_pending');
@@ -3606,6 +3616,7 @@ test('settled payment survives activation lookup failure and reconciles without 
          intervalMilliseconds: 5_000,
       });
       await reconciler.reconcileOnce();
+      assert.equal(telemetry.length, telemetryBeforeRecovery, 'background recovery cannot mutate a completed request funnel');
 
       const recovered = store.getByIdempotencyKey(spec.idempotencyKey);
       assert.equal(recovered?.state, 'active');
@@ -7818,6 +7829,314 @@ test('legacy migration is idempotent and does not fabricate proof or alter match
          indexes.some(index => index.name === 'roundwatch_idempotency_scope_unique'),
       );
    } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('acceptance funnel: local rejection reasons precede all verification and settlement', async t => {
+   const valid = { ...SPEC, expectedSender: WATCH_SENDER };
+   const cases: Array<{ reason: string; body: unknown; header?: string; status?: number }> = [
+      { reason: 'json_invalid', body: '{' },
+      { reason: 'body_not_object', body: [] },
+      { reason: 'idempotency_invalid', body: { ...valid, idempotencyKey: 'short' } },
+      { reason: 'sender_invalid', body: { ...valid, expectedSender: 'invalid' } },
+      { reason: 'receiver_invalid', body: { ...valid, expectedReceiver: 'invalid' } },
+      { reason: 'amount_invalid', body: { ...valid, atomicAmount: '0' } },
+      { reason: 'amount_invalid', body: { ...valid, atomicAmount: '9007199254740992' } },
+      { reason: 'note_invalid', body: { ...valid, invoiceNote: '' } },
+      { reason: 'zero_sender', body: { ...valid, expectedSender: PAYER } },
+      { reason: 'example_key', body: { ...valid, idempotencyKey: 'replace-with-unique-idempotency-key' } },
+      { reason: 'example_note', body: { ...valid, invoiceNote: 'replace-with-unique-invoice-note' } },
+      { reason: 'body_too_large', body: 'x'.repeat(MAX_WATCH_REQUEST_BODY_BYTES + 1), status: 413 },
+      { reason: 'header_encoding_invalid', body: valid },
+      { reason: 'header_too_large', body: valid, header: 'x'.repeat(16 * 1024 + 1) },
+   ];
+   for (const scenario of cases) await t.test(scenario.reason, async () => {
+      const store = new RoundWatchStore(':memory:');
+      const lines: string[] = [];
+      let verifyCalls = 0;
+      let settleCalls = 0;
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, store, indexer: new MiddlewareIndexer(),
+         facilitatorClient: {
+            verify: async () => { verifyCalls++; return { isValid: false }; },
+            settle: async () => { settleCalls++; throw new Error('must not settle'); },
+            getSupported: async () => ({ kinds: [], extensions: [], signers: {} }),
+         },
+         syncFacilitatorOnStart: false,
+         requestTelemetry: { log: line => lines.push(line) },
+      });
+      try {
+         const response = await app.request('/spike/watch', {
+            method: 'POST', headers: { 'payment-signature': scenario.header ?? 'malformed' },
+            body: typeof scenario.body === 'string' ? scenario.body : JSON.stringify(scenario.body),
+         });
+         assert.equal(response.status, scenario.status ?? 400);
+         assert.equal(verifyCalls, 0);
+         assert.equal(settleCalls, 0);
+         assert.equal(lines.length, 2);
+         const event = JSON.parse(lines.at(-1)!) as RequestTelemetryEvent;
+         assert.equal(event.funnelEvent, scenario.reason.startsWith('header_') ? 'payment_header_rejected' : 'body_validation_rejected');
+         assert.equal(event.reason, scenario.reason);
+         assert.equal(event.paymentOutcome, 'presented');
+         assert.equal(event.verificationClientInvoked, false);
+         assert.equal(event.durablePrepared, false);
+         assert.equal(event.settlementClientInvoked, false);
+      } finally { store.close(); }
+   });
+});
+
+test('acceptance funnel: gates, body deadlines and empty headers retain their exact admission semantics', async t => {
+   for (const gate of ['body', 'verification'] as const) {
+      for (const limit of ['rate', 'concurrency'] as const) await t.test(`${gate}_${limit}`, async () => {
+         const store = new RoundWatchStore(':memory:');
+         const lines: string[] = [];
+         const spec = { ...SPEC, idempotencyKey: `gate-${gate}-${limit}`, expectedSender: WATCH_SENDER };
+         let release!: () => void;
+         let entered!: () => void;
+         const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
+         let calls = 0;
+         const facilitator: FacilitatorClient = {
+            getSupported: () => new MiddlewareFacilitator(store, spec.idempotencyKey).getSupported(),
+            verify: async () => {
+               calls++;
+               if (limit === 'concurrency' && gate === 'verification' && calls === 1) {
+                  entered();
+                  await new Promise<void>(resolve => { release = resolve; });
+               }
+               return { isValid: false, invalidReason: 'synthetic rejection' };
+            },
+            settle: async () => { throw new Error('must not settle'); },
+         };
+         const gateOptions = { requestsPerSecond: 1, burst: limit === 'rate' ? 1 : 10, concurrency: 1, nowMilliseconds: () => 0 };
+         const app = createApp({
+            avmAddress: SERVICE_RECEIVER, store, indexer: new MiddlewareIndexer(), facilitatorClient: facilitator,
+            ...(gate === 'body' ? { signedWatchBodyGateOptions: gateOptions } : { signedPaymentGateOptions: gateOptions }),
+            requestTelemetry: { log: line => lines.push(line) },
+         });
+         try {
+            const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+            const headers = { 'payment-signature': paymentHeader };
+            let controller!: ReadableStreamDefaultController<Uint8Array>;
+            const first = limit === 'concurrency' && gate === 'body'
+               ? app.request(new Request('http://localhost/spike/watch', {
+                  method: 'POST', headers,
+                  body: new ReadableStream<Uint8Array>({ start(value) { controller = value; }, pull() { entered(); } }),
+                  duplex: 'half',
+               } as RequestInit))
+               : app.request('/spike/watch', { method: 'POST', headers, body });
+            if (limit === 'rate') await first;
+            else if (gate === 'verification') await enteredPromise;
+            else {
+               // Wait until the first request owns its body slot, then the same
+               // next-turn request deterministically encounters concurrency.
+               await new Promise(resolve => setImmediate(resolve));
+            }
+            const response = await app.request('/spike/watch', { method: 'POST', headers, body });
+            assert.equal(response.status, 429);
+            assert.equal(response.headers.get('retry-after'), '1');
+            const final = JSON.parse(lines.at(-1)!) as RequestTelemetryEvent;
+            assert.equal(final.funnelEvent, 'signed_request_rate_limited');
+            assert.equal(final.reason, `${gate}_${limit}`);
+            assert.equal(final.verificationClientInvoked, false);
+            assert.equal(final.settlementClientInvoked, false);
+            if (limit === 'concurrency') {
+               if (gate === 'body') { controller.enqueue(new TextEncoder().encode(body)); controller.close(); }
+               else release();
+               await first;
+               // A failed request still releases its gate slot.
+               const after = await app.request('/spike/watch', { method: 'POST', headers, body });
+               assert.equal(after.status, 402);
+            }
+            assert.equal(calls, limit === 'concurrency' ? 2 : 1);
+         } finally { store.close(); }
+      });
+   }
+   await t.test('body_timeout and empty presented header', async () => {
+      const store = new RoundWatchStore(':memory:');
+      const lines: string[] = [];
+      const facilitator = new DelayedRejectingFacilitator();
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, store, indexer: new MiddlewareIndexer(), facilitatorClient: facilitator,
+         signedWatchBodyReadTimeoutMilliseconds: 20, requestTelemetry: { log: line => lines.push(line) },
+      });
+      try {
+         const response = await app.request(new Request('http://localhost/spike/watch', {
+            method: 'POST', headers: { 'payment-signature': 'malformed' },
+            body: new ReadableStream<Uint8Array>(), duplex: 'half',
+         } as RequestInit));
+         assert.equal(response.status, 408);
+         assert.equal(JSON.parse(lines.at(-1)!).reason, 'body_timeout');
+         assert.equal(facilitator.verifyCalls, 0);
+         const empty = await app.request('/spike/watch', {
+            method: 'POST', headers: { 'payment-signature': '' },
+            body: JSON.stringify({ ...SPEC, expectedSender: WATCH_SENDER }),
+         });
+         assert.equal(empty.status, 402);
+         const event = JSON.parse(lines.at(-1)!) as RequestTelemetryEvent;
+         assert.equal(event.paymentPresented, true);
+         assert.equal(event.paymentOutcome, 'presented');
+         assert.equal(event.funnelEvent, 'payment_protocol_rejected');
+         assert.equal(event.verificationClientInvoked, false);
+      } finally { store.close(); }
+   });
+});
+
+test('acceptance funnel: composed purchase outcomes preserve HTTP, calls, storage work and economics', async t => {
+   const scenarios = [
+      ['success', 200, 'purchase_completed', 'completed', 1, 1, true, true],
+      ['no_match', 402, 'payment_protocol_rejected', 'sdk_preverification_unknown', 0, 0, false, false],
+      ['verify_invalid', 402, 'payment_verification_rejected', 'verification_invalid', 1, 0, false, false],
+      ['verify_typed_invalid', 402, 'payment_verification_rejected', 'verification_invalid', 1, 0, false, false],
+      ['verify_timeout', 502, 'payment_verification_unavailable', 'provider_timeout', 1, 0, false, false],
+      ['verify_response_invalid', 502, 'payment_verification_unavailable', 'provider_response_invalid', 1, 0, false, false],
+      ['verify_provider_error', 402, 'payment_verification_unavailable', 'provider_error', 1, 0, false, false],
+      ['pre_challenge', 503, 'admission_unavailable', 'readiness_blocked', 0, 0, false, false],
+      ['pre_challenge_exception', 503, 'admission_unavailable', 'readiness_exception', 0, 0, false, false],
+      ['pre_prepare', 503, 'admission_unavailable', 'readiness_blocked', 1, 0, false, false],
+      ['pre_prepare_exception', 503, 'admission_unavailable', 'readiness_exception', 1, 0, false, false],
+      ['identity', 500, 'internal_admission_failed', 'settlement_identity', 1, 0, false, false],
+      ['prepare_failed', 500, 'internal_admission_failed', 'prepare_failed', 1, 0, false, false],
+      ['global', 429, 'capacity_rejected', 'global', 1, 0, false, false],
+      ['payer', 429, 'capacity_rejected', 'payer', 1, 0, false, false],
+      ['replay', 409, 'idempotency_replayed', 'same_spec', 1, 0, false, false],
+      ['conflict', 409, 'idempotency_conflicted', 'different_spec', 1, 0, false, false],
+      ['legacy', 409, 'idempotency_conflicted', 'legacy_reservation', 1, 0, false, false],
+      ['settle_false', 402, 'settlement_ambiguous', 'unconfirmed', 1, 1, true, false],
+      ['settle_error', 402, 'settlement_ambiguous', 'provider_error', 1, 1, true, false],
+      ['settle_timeout', 502, 'settlement_ambiguous', 'timeout', 1, 1, true, false],
+      ['activation_lookup_error', 500, 'activation_pending', 'indexer_unavailable', 1, 1, true, true],
+      ['activation_absent', 500, 'activation_pending', 'lookup_absent', 1, 1, true, true],
+      ['activation_mismatch', 500, 'activation_rejected', 'evidence_mismatch', 1, 1, true, true],
+      ['activation_write', 500, 'activation_pending', 'activation_write_failed', 1, 1, true, true],
+   ] as const;
+   for (const [scenario, status, eventName, reason, verifies, settles, prepared, confirmed] of scenarios) {
+      await t.test(scenario, async () => {
+         async function exercise(mode: 'off' | 'on' | 'throwing') {
+            const spec = { ...SPEC, idempotencyKey: `acceptance-${scenario}`, expectedSender: WATCH_SENDER };
+            const store = new RoundWatchStore(':memory:', {
+               now: () => new Date('2026-10-16T10:00:00.000Z'),
+               maxOpenWatches: scenario === 'global' ? 1 : 50,
+               maxOpenWatchesPerPayer: scenario === 'payer' ? 1 : 5,
+            });
+            const indexer = new MiddlewareIndexer();
+            const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+            const lines: string[] = [];
+            let verifyCalls = 0;
+            const verify = facilitator.verify.bind(facilitator);
+            facilitator.verify = async (...args) => {
+               verifyCalls++;
+               if (scenario === 'verify_invalid') return { isValid: false, invalidReason: 'private provider verdict' };
+               if (scenario === 'verify_typed_invalid') throw new VerifyError(400, { isValid: false, invalidReason: 'private verdict' });
+               if (scenario === 'verify_timeout') throw new FacilitatorTimeoutError('verify', 100);
+               if (scenario === 'verify_response_invalid') throw new FacilitatorResponseError('private malformed response');
+               if (scenario === 'verify_provider_error') throw new TypeError('private provider error');
+               return verify(...args);
+            };
+            const settle = facilitator.settle.bind(facilitator);
+            facilitator.settle = async (...args) => {
+               const result = await settle(...args);
+               if (scenario === 'settle_false') return { ...result, success: false, errorReason: 'private settlement verdict' };
+               if (scenario === 'settle_error') throw new Error('private settle error');
+               if (scenario === 'settle_timeout') throw new FacilitatorTimeoutError('settle', 100);
+               return result;
+            };
+            const operationalIndexer: RoundWatchIndexer = indexer;
+            const lookup = indexer.lookupAssetTransfer.bind(indexer);
+            operationalIndexer.lookupAssetTransfer = async (...args) => {
+               const transfer = await lookup(args[0], args[1]);
+               if (scenario === 'activation_absent') return undefined;
+               if (scenario === 'activation_mismatch') return { ...transfer, atomicAmount: '1' };
+               return transfer;
+            };
+            if (scenario === 'activation_lookup_error') indexer.activationFailuresRemaining = 1;
+            if (scenario === 'activation_write') store.activateWatch = () => { throw new Error('private activation storage error'); };
+            if (scenario === 'global' || scenario === 'payer') store.prepareWatch({ ...spec, idempotencyKey: 'existing-capacity' }, intent('EXISTING_CAPACITY_TX'));
+            if (scenario === 'replay' || scenario === 'conflict' || scenario === 'legacy') {
+               store.prepareWatch(scenario === 'conflict' ? { ...spec, atomicAmount: '2' } : spec, scenario === 'legacy' ? undefined : intent('EXISTING_INTENT'));
+            }
+            if (scenario === 'prepare_failed') store.prepareWatch = () => { throw new Error('private prepare failure'); };
+            let signed = false;
+            let readinessCalls = 0;
+            const economics = new RoundWatchEconomicsMetrics();
+            const app = createApp({
+               avmAddress: SERVICE_RECEIVER, store, indexer, facilitatorClient: facilitator,
+               requireSettlementIntent: true, economicsMetrics: economics,
+               readinessCheck: () => {
+                  if (signed) readinessCalls++;
+                  const phase = readinessCalls === 1 ? 'pre_challenge' : 'pre_prepare';
+                  if (signed && scenario === `${phase}_exception`) throw new Error('private readiness detail');
+                  return { ready: !signed || scenario !== phase, checks: { storage: true, poller: false, private_check: false } };
+               },
+               requestTelemetry: mode === 'off' ? undefined : {
+                  log: line => { if (mode === 'throwing') throw new Error('sink failure'); lines.push(line); },
+               },
+            });
+            try {
+               const request = await createSyntheticPaidRequest(app, spec);
+               if (scenario === 'no_match' || scenario === 'identity') {
+                  const payload = JSON.parse(Buffer.from(request.paymentHeader, 'base64').toString()) as PaymentPayload;
+                  if (scenario === 'no_match') payload.accepted = { ...payload.accepted, amount: '1' };
+                  else payload.payload = { paymentGroup: ['invalid'], paymentIndex: 0 };
+                  request.paymentHeader = encodePaymentSignatureHeader(payload);
+               }
+               lines.length = 0;
+               signed = true;
+               const operations: Record<string, number> = {};
+               for (const method of ['readinessCheck', 'prepareWatch', 'getWatch', 'recordSettlementCandidate', 'activateWatch', 'markSettlementUnknown', 'markSettlementInvalid'] as const) {
+                  const original = store[method].bind(store) as (...args: unknown[]) => unknown;
+                  Object.assign(store, { [method]: (...args: unknown[]) => {
+                     operations[method] = (operations[method] ?? 0) + 1;
+                     return original(...args);
+                  } });
+               }
+               const response = await app.request('/spike/watch', {
+                  method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': request.paymentHeader }, body: request.body,
+               });
+               const responseText = await response.text();
+               const normalize = (value: string) => value.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '<watch-id>');
+               const observation = {
+                  status: response.status, body: normalize(responseText),
+                  headers: normalize(JSON.stringify([...response.headers])),
+                  verifyCalls, settleCalls: facilitator.settleCalls,
+                  pendingAtSettle: facilitator.statesObservedAtSettle,
+                  operations: { ...operations }, readinessCalls, lookups: [...indexer.lookupPurposes],
+                  economics: Object.fromEntries(Object.entries(economics.snapshotAllFreeWork()).map(([category, { wallTime: _timing, ...value }]) => [category, value])),
+               };
+               assert.equal(response.status, status);
+               assert.equal(verifyCalls, verifies);
+               assert.equal(facilitator.settleCalls, settles);
+               if (settles) assert.deepEqual(facilitator.statesObservedAtSettle, ['settlement_pending']);
+               if (mode === 'on') {
+                  const final = JSON.parse(lines.at(-1)!) as RequestTelemetryEvent;
+                  assert.equal(final.event, 'roundwatch_http_request');
+                  assert.equal(final.funnelEvent, eventName);
+                  assert.equal(final.reason, reason);
+                  assert.equal(final.verificationClientInvoked, verifies === 1);
+                  assert.equal(final.durablePrepared, prepared);
+                  assert.equal(final.settlementClientInvoked, settles === 1);
+                  assert.equal(final.settlementConfirmed, confirmed);
+                  assert.equal(final.activationConfirmed, scenario === 'success');
+                  if (confirmed) assert.equal(final.paymentOutcome, 'settled');
+                  if (scenario.startsWith('pre_')) assert.equal(final.readinessPhase, scenario.startsWith('pre_challenge') ? 'pre_challenge' : 'pre_prepare');
+                  assert.equal(final.readinessChecks?.['private_check' as never], undefined);
+                  const milestones = lines.slice(0, -1).map(line => JSON.parse(line));
+                  assert.deepEqual(milestones.map(event => event.funnelEvent), [
+                     'signed_request_received', ...(prepared ? ['durable_prepared'] : []),
+                     ...(confirmed ? ['settlement_confirmed'] : []), ...(scenario === 'success' ? ['activation_confirmed'] : []),
+                  ]);
+                  if (confirmed) assert.equal(milestones.find(event => event.funnelEvent === 'settlement_confirmed').activationConfirmed, false);
+                  for (const forbidden of [request.paymentHeader, SIGNED_SERVICE_PAYMENT, SIGNED_SERVICE_TX_ID, spec.idempotencyKey, spec.invoiceNote!, PAYER, WATCH_SENDER, RECEIVER, 'private provider', 'private_check']) {
+                     assert.equal(lines.join('').includes(forbidden), false, 'sensitive value entered telemetry');
+                  }
+               }
+               const state = store.getByIdempotencyKey(spec.idempotencyKey);
+               return { ...observation, state: state?.state, terminal: state?.settlementReconciliationTerminal };
+            } finally { store.close(); }
+         }
+         const baseline = await exercise('off');
+         assert.deepEqual(await exercise('on'), baseline, 'enabled telemetry changed an operational result');
+         assert.deepEqual(await exercise('throwing'), baseline, 'sink failure changed an operational result');
+      });
+   }
 });
 
 async function createSyntheticPaidRequest(

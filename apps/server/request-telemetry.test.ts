@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Hono } from 'hono';
 
 import type { FacilitatorClient } from '@x402/core/server';
 
@@ -11,6 +12,7 @@ import {
 import { RoundWatchStore } from './roundwatch-store.js';
 import {
    buildRequestTelemetryEvent,
+   createRequestTelemetryMiddleware,
    classifyUserAgent,
    normalizedRoute,
    type RequestTelemetryEvent,
@@ -130,7 +132,10 @@ test('request telemetry classifies watch, status, and MCP traffic while suppress
       const events = parse(lines);
       assert.equal(events.length, 3);
 
-      assert.equal(events[0]?.classification, 'watch_create_challenge');
+      assert.equal(events[0]?.classification, 'watch_create_acceptance');
+      assert.equal(events[0]?.classificationVersion, 2);
+      assert.equal(events[0]?.funnelVersion, 1);
+      assert.equal(events[0]?.funnelEvent, 'challenge_issued');
       assert.equal(events[0]?.route, '/v1/watch');
       assert.equal(events[0]?.statusCode, 402);
       assert.equal(events[0]?.paymentPresented, false);
@@ -200,7 +205,7 @@ test('request telemetry never serializes sensitive headers, bodies, or payment m
             },
             body: JSON.stringify({
                idempotencyKey: 'telemetry-secret-001',
-               expectedSender: PAYER,
+               expectedSender: RECEIVER,
                expectedReceiver: RECEIVER,
                atomicAmount: '1',
                invoiceNote: secretNote,
@@ -209,15 +214,19 @@ test('request telemetry never serializes sensitive headers, bodies, or payment m
       );
 
       assert.equal(response.status, 400);
-      assert.equal(lines.length, 1);
+      assert.equal(lines.length, 2);
 
-      const [event] = parse(lines);
-      assert.equal(event?.classification, 'watch_create_payment_rejected');
+      const [event] = parse(lines.filter(line => JSON.parse(line).event === 'roundwatch_http_request'));
+      assert.equal(event?.classification, 'watch_create_acceptance');
+      assert.equal(event?.funnelEvent, 'payment_header_rejected');
+      assert.equal(event?.reason, 'header_encoding_invalid');
+      assert.equal(event?.verificationClientInvoked, false);
+      assert.equal(event?.settlementConfirmed, false);
       assert.equal(event?.paymentPresented, true);
-      assert.equal(event?.paymentOutcome, 'rejected');
+      assert.equal(event?.paymentOutcome, 'presented');
       assert.equal(event?.uaClass, 'curl');
 
-      const serialized = lines[0] ?? '';
+      const serialized = lines.join('\n');
       for (const forbidden of [
          secretNote,
          secretAuthorization,
@@ -229,6 +238,9 @@ test('request telemetry never serializes sensitive headers, bodies, or payment m
          'payment-signature',
          'idempotencyKey',
          'invoiceNote',
+         PAYER,
+         RECEIVER,
+         'telemetry-secret-001',
       ]) {
          assert.equal(
             serialized.includes(forbidden),
@@ -332,8 +344,10 @@ test('telemetry helpers normalize dynamic routes and compact common user agents'
       },
       'test-key',
    );
-   assert.equal(successfulCreate?.classification, 'watch_create_success');
-   assert.equal(successfulCreate?.paymentOutcome, 'settled');
+   assert.equal(successfulCreate?.classification, 'watch_create_acceptance');
+   assert.equal(successfulCreate?.paymentOutcome, 'presented');
+   assert.equal(successfulCreate?.funnelEvent, 'purchase_failed_unknown');
+   assert.equal(successfulCreate?.settlementConfirmed, null);
 
    const malformedCreate = buildRequestTelemetryEvent(
       {
@@ -350,6 +364,44 @@ test('telemetry helpers normalize dynamic routes and compact common user agents'
       },
       'test-key',
    );
-   assert.equal(malformedCreate?.classification, 'watch_create_malformed');
+   assert.equal(malformedCreate?.classification, 'watch_create_acceptance');
    assert.equal(malformedCreate?.paymentOutcome, 'not_present');
+});
+
+test('HTTP status and header presence without source instrumentation never manufacture payment facts', async () => {
+   for (const status of [200, 400, 402, 409, 500, 502]) {
+      const lines: string[] = [];
+      const app = new Hono();
+      app.use(createRequestTelemetryMiddleware('/watch', telemetryCollector(lines)));
+      app.post('/watch', () => new Response('{}', { status, headers: { 'payment-required': 'arbitrary' } }));
+      const response = await app.request('/watch', { method: 'POST', headers: { 'payment-signature': 'opaque' } });
+      assert.equal(response.status, status);
+      const [event] = parse(lines);
+      assert.equal(event?.paymentOutcome, 'presented');
+      assert.equal(event?.funnelEvent, 'purchase_failed_unknown');
+      assert.equal(event?.verificationClientInvoked, null);
+      assert.equal(event?.settlementConfirmed, null);
+   }
+});
+
+test('throwing telemetry sinks, IDs, clocks and formatting do not change responses or mask request errors', async () => {
+   const fail = () => { throw new Error('telemetry failure'); };
+   for (const options of [{ log: fail }, { requestId: fail }, { now: fail }, { monotonicNow: fail }, { hmacKey: {} as never }]) {
+      const app = new Hono();
+      app.use(createRequestTelemetryMiddleware('/watch', { ...options, log: options.log ?? (() => {}) }));
+      const original = new Error('operational error');
+      app.onError(error => {
+         assert.equal(error, original);
+         return new Response('original error', { status: 501 });
+      });
+      app.post('/watch', () => new Response('unchanged', { status: 201, headers: { 'x-baseline': 'same' } }));
+      app.get('/error', () => { throw original; });
+      const response = await app.request('/watch', { method: 'POST', headers: { 'x-real-ip': '192.0.2.1' } });
+      assert.equal(response.status, 201);
+      assert.equal(await response.text(), 'unchanged');
+      assert.equal(response.headers.get('x-baseline'), 'same');
+      const error = await app.request('/error');
+      assert.equal(error.status, 501);
+      assert.equal(await error.text(), 'original error');
+   }
 });
