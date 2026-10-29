@@ -846,10 +846,10 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       await next();
    });
 
-   // Do not even advertise or verify a paid watch purchase while the durable
-   // service cannot safely accept a new obligation. This runs before body
-   // parsing and x402 middleware. The injected production readiness check is
-   // cached/bounded by its storage and worker components.
+   // Unsigned discovery advertises the offer without reserving capacity or
+   // guaranteeing admission. Every presented signature (even empty) must pass
+   // paid readiness before body parsing and x402 verification. The injected
+   // production check is cached/bounded by its storage and worker components.
    app.use(watchPath, async (c, next) => {
       if (c.req.method !== 'POST') {
          await next();
@@ -857,6 +857,11 @@ function buildAppRuntime(dependencies: AppDependencies): AppRuntime {
       }
 
       beginAcceptance();
+      if (c.req.header('payment-signature') === undefined) {
+         await next();
+         return;
+      }
+
       observeAcceptanceStage('readiness');
       const finishReadinessTiming = startAcceptanceTiming('pre_challenge');
       try {
