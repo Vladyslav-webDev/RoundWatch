@@ -748,7 +748,9 @@ test('Observatory cannot refresh strict paid evidence or consume tokens; normal 
    assert.equal(disk.mock.callCount(), 0);
    assert.equal(acquisition.mock.callCount(), 0);
    assert.equal(tokens.mock.callCount(), 0);
-   const response = await fetch(new Request('http://offline.example.test/spike/watch', { method: 'POST' }));
+   const response = await fetch(new Request('http://offline.example.test/spike/watch', {
+      method: 'POST', headers: { 'payment-signature': 'malformed' },
+   }));
    assert.equal(response.status, 503);
    assert.equal((await response.json() as { code: string }).code, 'service_not_ready');
    assert.equal(storage.mock.callCount(), 1);
