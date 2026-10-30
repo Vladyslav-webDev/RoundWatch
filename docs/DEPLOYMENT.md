@@ -29,6 +29,10 @@ The hosting platform terminates HTTPS and supplies `PORT`. One application proce
 
 ## Required MainNet environment
 
+This source emits canonical x402 network IDs: MainNet `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k` and TestNet `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe`. The GoPlausible metadata snapshot observed on 2026-10-30 advertised these IDs alongside legacy full-hash aliases. Metadata and offline challenge tests do not prove hosted verification or settlement. The earlier live proof used legacy IDs.
+
+Do not rewrite historical SQLite network fields or MainNet checkpoint networks as part of this transition. Reconciliation recognizes the two explicit canonical/legacy pairs and retains persisted network spellings; all other immutable settlement checks remain in force. Existing checkpoints must use the free recovery path, with no new watch purchase. Ship the shared `apps/algorand-networks.ts` module with the server (the Dockerfile includes it). Existing dependency-security gates still apply.
+
 ```env
 ROUNDWATCH_NETWORK=mainnet
 AVM_ADDRESS=EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY

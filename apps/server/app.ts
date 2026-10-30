@@ -26,7 +26,7 @@ import {
 import {
    bazaarResourceServerExtension,
    declareDiscoveryExtension,
-} from '@x402-avm/extensions';
+} from '@x402/extensions/bazaar';
 
 import {
    DEFAULT_SIGNED_PAYMENT_BURST,

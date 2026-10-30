@@ -12,6 +12,7 @@ import {
 } from '@x402/avm';
 
 import algosdk from 'algosdk';
+import { ALGORAND_TESTNET_CAIP2 as ALGORAND_TESTNET } from '../algorand-networks.js';
 
 config();
 
@@ -25,11 +26,6 @@ const payerMnemonic: string = avmMnemonic;
 
 
 const url = 'http://localhost:4021/demo';
-
-// Do NOT use ALGORAND_TESTNET_CAIP2 from @x402/avm@2.25.0 here.
-// That installed version currently exposes a truncated TestNet identifier.
-const ALGORAND_TESTNET =
-   'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=' as const;
 
 async function main(): Promise<void> {
    console.log('1. Plain request');

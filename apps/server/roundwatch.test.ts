@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { LEGACY_ALGORAND_MAINNET, LEGACY_ALGORAND_TESTNET } from '../algorand-networks.js';
 import type { FacilitatorClient } from '@x402/core/server';
 import { FacilitatorResponseError, FacilitatorTimeoutError, VerifyError } from '@x402/core/types';
 import type { RequestTelemetryEvent } from './request-telemetry.js';
@@ -27,6 +28,7 @@ import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { ALGORAND_TESTNET, createApp, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, TESTNET_USDC_ASSET_ID } from './app.js';
 import {
    MAINNET_NETWORK_CONFIG,
+   TESTNET_NETWORK_CONFIG,
    resolveRoundWatchNetwork,
    resolveRoundWatchPublicBaseUrl,
 } from './network-config.js';
@@ -2710,6 +2712,68 @@ test('x402 payment headers are exposed to browser clients and preflight allows p
    }
 });
 
+for (const [config, canonical, legacy] of [
+   [MAINNET_NETWORK_CONFIG, 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k', LEGACY_ALGORAND_MAINNET],
+   [TESTNET_NETWORK_CONFIG, 'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe', LEGACY_ALGORAND_TESTNET],
+] as const) {
+   test(`canonical ${config.name} offer, OpenAPI, llms.txt and MCP agree with dual-ID facilitator metadata`, async () => {
+      const store = new RoundWatchStore(':memory:');
+      let verifyCalls = 0, settleCalls = 0;
+      try {
+         const app = createApp({
+            avmAddress: RECEIVER, store, indexer: new FakeIndexer(100),
+            networkConfig: config, publicBaseUrl: 'https://roundwatch-api.onrender.com',
+            facilitatorClient: {
+               getSupported: async () => ({
+                  kinds: [canonical, legacy].map(network => ({
+                     x402Version: 2, scheme: 'exact', network, extra: { feePayer: PAYER },
+                  })),
+                  extensions: [], signers: { 'algorand:*': [PAYER] },
+               }),
+               verify: async () => { verifyCalls++; throw new Error('Unexpected verify'); },
+               settle: async () => { settleCalls++; throw new Error('Unexpected settle'); },
+            } as unknown as FacilitatorClient,
+         });
+         const path = config.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
+         const response = await app.request(path, { method: 'POST' });
+         assert.equal(response.status, 402);
+         const header = response.headers.get('payment-required'); assert.ok(header);
+         const offer = decodePaymentRequiredHeader(header);
+         assert.equal(offer.accepts.length, 1);
+         assert.equal(offer.accepts[0]!.network, canonical);
+         assert.equal(offer.accepts[0]!.asset, config.usdcAssetId);
+         assert.equal(offer.accepts[0]!.amount, '100000');
+         assert.equal(offer.accepts[0]!.payTo, RECEIVER);
+         assert.equal(offer.accepts[0]!.extra?.feePayer, PAYER);
+         const openapi = await (await app.request('/openapi.json')).json() as any;
+         assert.equal(openapi.paths[path].post['x-x402'].network, canonical);
+         assert.ok((await (await app.request('/llms.txt')).text()).includes('CAIP-2: ' + canonical));
+         const mcp = await app.request('/mcp', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'mcp-protocol-version': '2025-11-25' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'roundwatch.service_info', arguments: {} } }),
+         });
+         assert.equal(mcp.status, 200);
+         const info = await mcp.json() as any;
+         assert.equal(info.result.structuredContent.caip2, canonical);
+         assert.equal(verifyCalls, 0); assert.equal(settleCalls, 0);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+      } finally { store.close(); }
+   });
+}
+
+test('legacy refund audit identifiers remain valid and unchanged', () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      for (const [i, network] of [LEGACY_ALGORAND_MAINNET, LEGACY_ALGORAND_TESTNET].entries()) {
+         const evidence = { transaction: i === 0 ? INDEXER_TX_ID : OTHER_INDEXER_TX_ID, network, atomicAmount: '1' };
+         const recorded = store.recordRefundEvidence(watch.id, evidence);
+         assert.equal(recorded.network, network);
+         assert.deepEqual(store.recordRefundEvidence(watch.id, evidence), recorded);
+      }
+   } finally { store.close(); }
+});
+
 test('TestNet remains the default and the x402 requirement preserves network, asset, amount, and receiver', async () => {
    assert.equal(resolveRoundWatchNetwork(undefined).name, 'testnet');
    assert.equal(resolveRoundWatchNetwork('mainnet'), MAINNET_NETWORK_CONFIG);
@@ -3097,6 +3161,37 @@ test('verified payer cannot obtain a legacy NULL-payer watch through replay', as
       store.close();
    }
 });
+
+for (const state of ['settlement_pending', 'settlement_unknown'] as const) {
+   test(`canonical retry cannot repurchase a legacy ${state} watch`, async () => {
+      const store = new RoundWatchStore(':memory:');
+      const spec = { ...SPEC, idempotencyKey: 'legacy-replay-' + state, expectedSender: WATCH_SENDER };
+      const original = store.prepareWatch(spec, {
+         expectedTransaction: 'ALREADY_BOUND_SERVICE', network: LEGACY_ALGORAND_TESTNET,
+         payer: PAYER, receiver: SERVICE_RECEIVER, assetId: TESTNET_USDC_ASSET_ID,
+         atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, firstValid: 100, lastValid: 200,
+      }).watch;
+      if (state === 'settlement_unknown') store.markSettlementUnknown(original.id);
+      const before = store.getWatch(original.id);
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer: new MiddlewareIndexer(), requireSettlementIntent: true,
+      });
+      try {
+         // Uses the existing static synthetic fixture, never generates a signature.
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         const response = await app.request('/spike/watch', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+         });
+         assert.equal(response.status, 409);
+         assert.equal((await response.json() as any).code, 'idempotency_replay');
+         assert.equal(facilitator.settleCalls, 0);
+         assert.deepEqual(store.getWatch(original.id), before);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 1);
+      } finally { store.close(); }
+   });
+}
 
 test('paid x402 middleware persists signed purchase terms and activates from the exact service round', async () => {
    const store = new RoundWatchStore(':memory:');

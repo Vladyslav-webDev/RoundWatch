@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {
+   ALGORAND_TESTNET_CAIP2, LEGACY_ALGORAND_MAINNET, LEGACY_ALGORAND_TESTNET,
+} from '../algorand-networks.js';
 
 import algosdk from 'algosdk';
 import { x402Client } from '@x402/fetch';
@@ -87,6 +90,31 @@ test('MainNet runtime accepts only the approved production server and HTTPS Algo
 
 test('MainNet service safety amount is the repriced 0.10 USDC contract', () => {
    assert.equal(SERVICE_ATOMIC_AMOUNT, '100000');
+   assert.equal(ALGORAND_MAINNET, 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k');
+});
+
+test('historical MainNet checkpoints preserve their network and recover without a purchase', async () => {
+   const checkpoint = { ...CHECKPOINT, network: LEGACY_ALGORAND_MAINNET, watchId: undefined };
+   assert.equal(validateMainnetCheckpoint(checkpoint, { runtimeServerUrl: DEFAULT_SERVER_URL }), checkpoint);
+   for (const state of ['active', 'matched', 'expired', 'indeterminate']) {
+      let requests = 0;
+      const recovered = await recoverExistingMainnetWatch(async (input, init) => {
+         requests++;
+         assert.equal(String(input), DEFAULT_SERVER_URL + '/v1/watch/recover');
+         assert.equal(init?.method, 'POST');
+         assert.equal(new Headers(init?.headers).has('payment-signature'), false);
+         return Response.json({ watch: { ...WATCH, state } });
+      }, checkpoint, DEFAULT_SERVER_URL);
+      assert.equal(requests, 1);
+      assert.equal(recovered.network, LEGACY_ALGORAND_MAINNET);
+      assert.equal(recovered.watchId, WATCH_ID);
+      assert.equal(checkpoint.watchId, undefined);
+   }
+   for (const network of [ALGORAND_TESTNET_CAIP2, LEGACY_ALGORAND_TESTNET, 'eip155:8453', ALGORAND_MAINNET + 'x']) {
+      assert.throws(() => validateMainnetCheckpoint({ ...checkpoint, network }, {
+         runtimeServerUrl: DEFAULT_SERVER_URL,
+      }), /network does not match/);
+   }
 });
 
 test('valid MainNet checkpoint and matching watch pass hard safety validation', () => {
@@ -224,6 +252,10 @@ test('fresh x402 challenge policy fails before payload creation on changed spend
    assert.equal(payloadCreations, 1);
 
    const changedCases: PaymentRequired[] = [
+      ...[LEGACY_ALGORAND_MAINNET, ALGORAND_TESTNET_CAIP2, LEGACY_ALGORAND_TESTNET, 'eip155:8453'].map(network => ({
+         ...approvedRequired,
+         accepts: [{ ...approvedRequirement, network: network as PaymentRequirements['network'] }],
+      })),
       {
          ...approvedRequired,
          accepts: [{ ...approvedRequirement, amount: '1000000' }],
@@ -266,9 +298,12 @@ test('fresh x402 challenge policy fails before payload creation on changed spend
    ];
 
    for (const changed of changedCases) {
+      assert.throws(() => assertApprovedRoundWatchPayment(
+         changed, `${DEFAULT_SERVER_URL}/v1/watch`,
+      ), /SAFETY STOP/);
       await assert.rejects(
          client.createPaymentPayload(changed),
-         /SAFETY STOP|filtered out|spendControls/,
+         /SAFETY STOP|filtered out|spendControls|No network\/scheme registered/,
       );
       assert.equal(
          payloadCreations,

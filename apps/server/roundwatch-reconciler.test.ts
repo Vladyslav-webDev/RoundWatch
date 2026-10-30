@@ -3,6 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import {
+   ALGORAND_MAINNET_CAIP2, ALGORAND_TESTNET_CAIP2,
+   LEGACY_ALGORAND_MAINNET, LEGACY_ALGORAND_TESTNET, sameAlgorandNetwork,
+} from '../algorand-networks.js';
 
 import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { ALGORAND_TESTNET, TESTNET_USDC_ASSET_ID } from './app.js';
@@ -28,6 +32,145 @@ const terms = (tx: string): SettlementIntent => ({ expectedTransaction: tx, netw
 const transfer = (tx: string, overrides: Partial<IndexedAssetTransfer> = {}): IndexedAssetTransfer => ({
    transaction: tx, sender: PAYER, receiver: RECEIVER, assetId: TESTNET_USDC_ASSET_ID,
    atomicAmount: '1000', round: 850, ...overrides,
+});
+
+test('network equivalence accepts only the two explicit Algorand alias pairs', () => {
+   const pairs = [
+      [ALGORAND_MAINNET_CAIP2, LEGACY_ALGORAND_MAINNET],
+      [ALGORAND_TESTNET_CAIP2, LEGACY_ALGORAND_TESTNET],
+   ];
+   for (const aliases of pairs) {
+      for (const left of aliases) for (const right of aliases) {
+         assert.equal(sameAlgorandNetwork(left, right), true);
+      }
+   }
+   const invalid: unknown[] = [
+      undefined, null, '', 'eip155:8453', 'algorand:testnet', 'algorand:unknown',
+      ALGORAND_MAINNET_CAIP2 + 'x', LEGACY_ALGORAND_MAINNET + 'x',
+      ALGORAND_MAINNET_CAIP2.toUpperCase(), ' ' + ALGORAND_MAINNET_CAIP2,
+   ];
+   for (const value of invalid) {
+      assert.equal(sameAlgorandNetwork(value, value), false);
+      assert.equal(sameAlgorandNetwork(value, ALGORAND_MAINNET_CAIP2), false);
+      assert.equal(sameAlgorandNetwork(ALGORAND_MAINNET_CAIP2, value), false);
+   }
+   for (const mainnet of pairs[0]!) for (const testnet of pairs[1]!) {
+      assert.equal(sameAlgorandNetwork(mainnet, testnet), false);
+      assert.equal(sameAlgorandNetwork(testnet, mainnet), false);
+   }
+});
+
+for (const [canonical, legacy, assetId] of [
+   [ALGORAND_MAINNET_CAIP2, LEGACY_ALGORAND_MAINNET, 31_566_704],
+   [ALGORAND_TESTNET_CAIP2, LEGACY_ALGORAND_TESTNET, 10_458_941],
+] as const) {
+   for (const state of ['settlement_pending', 'settlement_unknown'] as const) {
+      test(`legacy ${canonical} ${state} survives restart and reconciles exactly once`, async () => {
+         const directory = mkdtempSync(join(tmpdir(), 'roundwatch-caip2-'));
+         const path = join(directory, 'watch.sqlite');
+         let store = new RoundWatchStore(path);
+         try {
+            const spec = { ...SPEC, assetId };
+            const intent = { ...terms('LEGACY_SETTLED'), network: legacy, assetId };
+            const watch = store.prepareWatch(spec, intent).watch;
+            if (state === 'settlement_unknown') store.markSettlementUnknown(watch.id);
+            const historical = store.getWatch(watch.id)!;
+            store.close();
+            store = new RoundWatchStore(path);
+            assert.deepEqual(store.getWatch(watch.id), historical, 'opening must not rewrite historical fields');
+            const indexer = new FakeLookup();
+            indexer.lookups.set(intent.expectedTransaction, transfer(intent.expectedTransaction, { assetId }));
+            const worker = new SettlementReconciler(store, indexer, {
+               network: canonical, intervalMilliseconds: 5_000,
+            });
+            await worker.reconcileOnce();
+            const active = store.getWatch(watch.id)!;
+            assert.equal(active.state, 'active');
+            assert.equal(active.expectedServiceNetwork, legacy);
+            assert.equal(active.serviceNetwork, legacy);
+            assert.equal(active.serviceTransaction, intent.expectedTransaction);
+            assert.equal(active.activationRound, 850);
+            assert.equal(active.workUnitsUsed, historical.workUnitsUsed + 1);
+            // A fresh canonical purchase intent for the same payer/key is a replay.
+            const replay = store.prepareWatch(spec, {
+               ...intent, expectedTransaction: 'NEW_PAYMENT_MUST_NOT_BIND', network: canonical,
+            });
+            assert.equal(replay.created, false);
+            assert.deepEqual(replay.watch, active);
+            assert.throws(() => store.prepareWatch(
+               { ...spec, idempotencyKey: 'another-watch' }, { ...intent, network: canonical },
+            ), /UNIQUE constraint failed/);
+            await worker.reconcileOnce();
+            assert.equal(indexer.lookupCalls, 1, 'already activated settlement must not be revisited');
+            assert.deepEqual(store.getWatch(watch.id), active);
+            store.close();
+            store = new RoundWatchStore(path);
+            assert.deepEqual(store.getWatch(watch.id), active, 'restart must preserve settled audit strings');
+         } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+      });
+   }
+
+   test(`settlement evidence accepts ${canonical} aliases without rewriting immutable intent`, () => {
+      const store = new RoundWatchStore(':memory:');
+      try {
+         for (const [expected, observed] of [[canonical, legacy], [legacy, canonical]]) {
+            const tx = 'EVIDENCE_' + expected;
+            const watch = store.prepareWatch(
+               { ...SPEC, assetId, idempotencyKey: tx },
+               { ...terms(tx), network: expected!, assetId },
+            ).watch;
+            const evidence = { transaction: tx, network: observed!, payer: PAYER };
+            store.recordSettlementCandidate(watch.id, evidence);
+            assert.equal(store.getWatch(watch.id)?.expectedServiceNetwork, expected);
+            const active = store.activateWatch(watch.id, evidence, 850);
+            assert.equal(active.expectedServiceNetwork, expected);
+            assert.equal(active.serviceNetwork, observed);
+            assert.deepEqual(store.activateWatch(watch.id, { ...evidence, network: expected! }, 850), active);
+            for (const invalid of [
+               { ...evidence, transaction: 'DIFFERENT' },
+               { ...evidence, payer: RECEIVER },
+               { ...evidence, network: canonical === ALGORAND_MAINNET_CAIP2 ? LEGACY_ALGORAND_TESTNET : LEGACY_ALGORAND_MAINNET },
+               { ...evidence, network: 'eip155:8453' },
+               { ...evidence, network: canonical + 'x' },
+            ]) {
+               assert.throws(() => store.recordSettlementCandidate(watch.id, invalid), /does not match/);
+               assert.throws(() => store.activateWatch(watch.id, invalid, 850), /does not match/);
+            }
+            assert.deepEqual(store.getWatch(watch.id), active);
+         }
+      } finally { store.close(); }
+   });
+}
+
+test('legacy reconciliation still rejects every immutable transfer mismatch and another network', async () => {
+   const cases: Array<{ network?: string; transfer?: Partial<IndexedAssetTransfer> }> = [
+      { network: ALGORAND_MAINNET_CAIP2 },
+      { network: LEGACY_ALGORAND_MAINNET },
+      { network: 'eip155:8453' },
+      { transfer: { transaction: 'OTHER' } },
+      { transfer: { sender: RECEIVER } },
+      { transfer: { receiver: PAYER } },
+      { transfer: { assetId: 31_566_704 } },
+      { transfer: { atomicAmount: '1001' } },
+      { transfer: { round: 799 } },
+      { transfer: { round: 901 } },
+   ];
+   for (const invalid of cases) {
+      const store = new RoundWatchStore(':memory:');
+      try {
+         const watch = store.prepareWatch(SPEC, { ...terms('MISMATCH'), network: LEGACY_ALGORAND_TESTNET }).watch;
+         const indexer = new FakeLookup();
+         indexer.lookups.set('MISMATCH', transfer('MISMATCH', invalid.transfer));
+         await new SettlementReconciler(store, indexer, {
+            network: invalid.network ?? ALGORAND_TESTNET_CAIP2, intervalMilliseconds: 5_000,
+         }).reconcileOnce();
+         const rejected = store.getWatch(watch.id)!;
+         assert.equal(rejected.state, 'settlement_unknown');
+         assert.equal(rejected.settlementReconciliationTerminal, true);
+         assert.equal(rejected.expectedServiceNetwork, LEGACY_ALGORAND_TESTNET);
+         assert.equal(rejected.serviceTransaction, undefined);
+      } finally { store.close(); }
+   }
 });
 
 test('confirmed exact service transaction establishes the activation baseline from its round', async () => {

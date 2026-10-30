@@ -67,7 +67,7 @@ See [Roadmap](ROADMAP.md) for the current product direction and prioritization.
 | Liveness | `GET /health` |
 | Readiness | `GET /ready` |
 | Network | Algorand MainNet |
-| CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
+| CAIP-2 | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k` |
 | Asset | Circle USDC, ASA `31566704` |
 | Service price | `0.10 USDC` (`100000` atomic units) |
 | Service receiver | `EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY` |
@@ -220,6 +220,8 @@ Only confirmed **top-level direct** asset transfers strictly after the confirmed
 
 The Hono resource server uses x402 v2 and the hosted GoPlausible facilitator. Before settlement, RoundWatch persists the deterministic Algorand service-payment transaction ID and immutable receiver, ASA, atomic amount, payer, `FirstValid`, and `LastValid` terms derived from the verified signed payload. After settlement, an exact Indexer lookup supplies the confirmed service-payment round, which becomes both the activation baseline and initial cursor.
 
+New offers use canonical Algorand CAIP-2 IDs (the first 32 base64url characters of the genesis hash). Full genesis hashes remain in on-chain transactions. Historical SQLite evidence and MainNet checkpoints retain their original full-hash IDs; settlement matching recognizes only the explicit MainNet and TestNet alias pairs, without treating those networks as equivalent. Legacy checkpoint recovery remains free and never falls back to purchasing another watch. The pinned x402 SDK versions are unchanged. This source migration is not a deployment: canonical offers have offline compatibility coverage; hosted canonical verification/settlement is not yet proven, and the earlier live proof used legacy IDs.
+
 If the process stops after on-chain settlement but before activation is committed, the reconciliation worker looks up that exact transaction under persisted exponential backoff. It activates only when the original immutable terms agree. A bare 404 is retryable; only a sufficiently covered post-`LastValid` historical absence search can establish terminal nonpayment. A definitive confirmed mismatch fails closed. The free recovery-without-ID lookup preserves the watch-ID disclosure boundary while returning explicit `retryable`/`terminal`, stable reason, and next-action metadata for an exact unresolved checkpoint.
 
 All Indexer calls share one token-bucket/concurrency dispatcher. Scans use finite round windows and page-level validation; each page and retry consumes capacity. Each durable work turn is additionally guarded to at most four logical Indexer request opportunities for active polling or three for settlement reconciliation, so the default 500-turn contract has a conservative 2,000-background-request ceiling. Indexer response bodies are capped at 8 MiB before JSON parsing and continuation tokens are capped at 4 KiB, so a malformed or hostile upstream cannot allocate unbounded parser/token memory. Any response body that is not consumed because of a declared-size rejection, allowed 404, or other non-OK status is explicitly cancelled before the dispatcher slot is released. Validated historical scan pages may be reused across sweeps, but the process-local LRU is bounded by both entry count and serialized payload bytes. Pagination tokens stay in memory, so restart replays the unfinished window from its durable cursor. When the deadline has passed, RoundWatch fixes an indexed block whose timestamp is at or after the deadline as `closingRound`; only complete validated coverage through that round can produce `expired`. Status reads never manufacture expiry from wall time.
@@ -289,7 +291,7 @@ Paid TestNet utilities use `apps/client/.env` and keep signing in the client pro
 | Selection | Default when omitted, or `ROUNDWATCH_NETWORK=testnet` | Must set `ROUNDWATCH_NETWORK=mainnet` |
 | Watch route | `/spike/watch` | `/v1/watch` |
 | USDC ASA | `10458941` | `31566704` |
-| CAIP-2 | `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=` | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=` |
+| CAIP-2 | `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe` | `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k` |
 | Discovery tag | `roundwatch-spike-0` | `x402-global-challenge` |
 | Public base URL | Optional | Required, HTTPS, and non-loopback |
 | Database path | Local default allowed | Explicit absolute persistent path required |

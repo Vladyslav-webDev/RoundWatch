@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { LEGACY_ALGORAND_MAINNET } from '../algorand-networks.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
@@ -210,6 +211,29 @@ test('production active pay CLI preserves the complete stubbed invoice payment f
       sender: PAYER, receiver: EXPECTED_RECEIVER, amount: 1, assetIndex: USDC_MAINNET_ASA_ID,
       note: Array.from(new TextEncoder().encode(CHECKPOINT.invoiceNote)),
    });
+});
+
+test('legacy checkpoint recovery and status never initialize payment machinery or change its network', () => {
+   for (const hasWatchId of [false, true]) {
+      const result = runCli({
+         mode: 'recover',
+         checkpoint: { ...CHECKPOINT, network: LEGACY_ALGORAND_MAINNET, watchId: hasWatchId ? WATCH_ID : undefined },
+      });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.checkpoint.network, LEGACY_ALGORAND_MAINNET);
+      assert.equal(result.checkpoint.watchId, WATCH_ID);
+      assert.equal(result.trace.requests.length, 1);
+      assertNoPayment(result.trace);
+   }
+   const status = runCli({ mode: 'status', checkpoint: { ...CHECKPOINT, network: LEGACY_ALGORAND_MAINNET } });
+   assert.equal(status.code, 0, status.stderr);
+   assert.equal(status.unchanged, true);
+   assertNoPayment(status.trace);
+   const start = runCli({ mode: 'start', checkpoint: { ...CHECKPOINT, network: LEGACY_ALGORAND_MAINNET } });
+   assert.equal(start.code, 1);
+   assert.match(start.stderr, /Refusing to create a second paid watch/);
+   assert.equal(start.unchanged, true);
+   assertNoPayment(start.trace, 1);
 });
 
 test('CLI import performs no environment loading, checkpoint I/O, request, or signing', () => {

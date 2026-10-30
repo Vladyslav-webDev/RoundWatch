@@ -11,6 +11,7 @@ import {
 } from '@x402/fetch';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { ExactAvmScheme, toClientAvmSigner } from '@x402/avm';
+import { sameAlgorandNetwork } from '../algorand-networks.js';
 import {
    ALGORAND_MAINNET,
    assertApprovedRoundWatchPayment,
@@ -281,7 +282,7 @@ async function startWatch(
       );
    }
 
-   if (settlement.network !== ALGORAND_MAINNET) {
+   if (!sameAlgorandNetwork(settlement.network, ALGORAND_MAINNET)) {
       throw new Error(
          `Settlement returned unexpected network ${settlement.network}`,
       );
