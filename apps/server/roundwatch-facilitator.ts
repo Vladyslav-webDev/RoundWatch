@@ -29,8 +29,8 @@ export interface RoundWatchFacilitatorOptions extends FacilitatorConfig {
 }
 
 /**
- * @x402/core 2.25.0 has no transport hook. Implement its public FacilitatorClient
- * boundary locally so every HTTP attempt (including redirects/retries) is fenced.
+ * Keep the public FacilitatorClient transport boundary local so every HTTP
+ * attempt (including redirects/retries) is fenced.
  * Already-dispatched response/body work stays owned and is never aborted by stop.
  */
 export class RoundWatchFacilitatorClient implements FacilitatorClient {
