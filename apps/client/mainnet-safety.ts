@@ -1,12 +1,16 @@
 import { isValidAlgorandAddress } from '@x402/avm';
+import {
+   ALGORAND_MAINNET_CAIP2,
+   LEGACY_ALGORAND_MAINNET,
+   sameAlgorandNetwork,
+} from '../algorand-networks.js';
 import type { x402Client } from '@x402/fetch';
 import type {
    PaymentRequired,
    PaymentRequirements,
 } from '@x402/core/types';
 
-export const ALGORAND_MAINNET =
-   'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=' as const;
+export const ALGORAND_MAINNET = ALGORAND_MAINNET_CAIP2;
 export const USDC_MAINNET_ASA_ID = 31_566_704;
 export const SERVICE_ATOMIC_AMOUNT = '100000';
 export const INVOICE_ATOMIC_AMOUNT = '1';
@@ -18,7 +22,7 @@ export const DEFAULT_SERVER_URL = 'https://roundwatch-api.onrender.com';
 export const DEFAULT_ALGOD_URL = 'https://mainnet-api.algonode.cloud';
 
 export interface MainnetCheckpoint {
-   network: typeof ALGORAND_MAINNET;
+   network: typeof ALGORAND_MAINNET | typeof LEGACY_ALGORAND_MAINNET;
    assetId: typeof USDC_MAINNET_ASA_ID;
    serverUrl: typeof DEFAULT_SERVER_URL;
    idempotencyKey: string;
@@ -266,7 +270,7 @@ export function validateMainnetCheckpoint(
       'MainNet server URL',
    );
 
-   if (checkpoint.network !== ALGORAND_MAINNET) {
+   if (!sameAlgorandNetwork(checkpoint.network, ALGORAND_MAINNET)) {
       throw new Error('MainNet checkpoint network does not match Algorand MainNet');
    }
 

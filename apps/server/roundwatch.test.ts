@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { LEGACY_ALGORAND_MAINNET, LEGACY_ALGORAND_TESTNET } from '../algorand-networks.js';
 import type { FacilitatorClient } from '@x402/core/server';
 import { FacilitatorResponseError, FacilitatorTimeoutError, VerifyError } from '@x402/core/types';
 import type { RequestTelemetryEvent } from './request-telemetry.js';
@@ -27,6 +28,7 @@ import { currentWorkClaim } from './roundwatch-test-claims.js';
 import { ALGORAND_TESTNET, createApp, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, TESTNET_USDC_ASSET_ID } from './app.js';
 import {
    MAINNET_NETWORK_CONFIG,
+   TESTNET_NETWORK_CONFIG,
    resolveRoundWatchNetwork,
    resolveRoundWatchPublicBaseUrl,
 } from './network-config.js';
@@ -1221,9 +1223,9 @@ test('liveness and readiness are separate service signals', async () => {
    }
 });
 
-test('paid watch admission refreshes readiness before both discovery 402 and signed retry', async () => {
+test('unpaid discovery skips paid readiness while the signed retry refreshes it', async () => {
    const store = new RoundWatchStore(':memory:');
-   let paidReady = true;
+   const paidReady = false;
    let paidChecks = 0;
    let verifyCalls = 0;
    let settleCalls = 0;
@@ -1283,7 +1285,7 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
          body,
       });
       assert.equal(unpaid.status, 402);
-      assert.equal(paidChecks, 1);
+      assert.equal(paidChecks, 0);
 
       const encoded = unpaid.headers.get('payment-required');
       assert.ok(encoded);
@@ -1297,7 +1299,6 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
          },
       } as PaymentPayload);
 
-      paidReady = false;
       const signed = await app.request('/spike/watch', {
          method: 'POST',
          headers: {
@@ -1308,7 +1309,7 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
       });
 
       assert.equal(signed.status, 503);
-      assert.equal(paidChecks, 2);
+      assert.equal(paidChecks, 1);
       const rejected = await signed.json() as {
          code?: string;
          checks?: Record<string, boolean>;
@@ -1319,6 +1320,157 @@ test('paid watch admission refreshes readiness before both discovery 402 and sig
       assert.equal(settleCalls, 0);
    } finally {
       store.close();
+   }
+});
+
+test('discovery gate: unsigned offers survive readiness failures while every presented header fails closed', async t => {
+   for (const networkConfig of [MAINNET_NETWORK_CONFIG, TESTNET_NETWORK_CONFIG]) {
+      for (const source of ['paid', 'fallback', 'storage'] as const) {
+         for (const failure of ['unavailable', 'exception'] as const) {
+            await t.test(`${networkConfig.name}_${source}_${failure}`, async t => {
+               const store = new RoundWatchStore(':memory:');
+               const indexer = new MiddlewareIndexer();
+               const facilitator = new MiddlewareFacilitator(store, SPEC.idempotencyKey);
+               t.mock.method(facilitator, 'getSupported', async () => ({
+                  kinds: [{ x402Version: 2, scheme: 'exact', network: networkConfig.network }],
+                  extensions: [], signers: {},
+               }));
+               const verify = t.mock.method(facilitator, 'verify');
+               const settle = t.mock.method(facilitator, 'settle');
+               const unavailable = {
+                  ready: false,
+                  checks: { storage: true, poller: true, reconciler: false, backgroundWorkers: false },
+               };
+               const check = () => {
+                  if (failure === 'exception') throw new Error('private readiness diagnostic');
+                  return unavailable;
+               };
+               const fallback = t.mock.fn(check);
+               const paid = Object.assign(t.mock.fn(async () => check()), {
+                  validateCurrent: t.mock.fn((snapshot: PaidReadinessSnapshot) => snapshot),
+               });
+               const lines: string[] = [];
+               const watchPath = networkConfig.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
+               const app = createApp({
+                  avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator, store, indexer,
+                  networkConfig, publicBaseUrl: 'https://roundwatch.invalid',
+                  ...(source === 'paid' ? { paidAdmissionReadinessCheck: paid } : {}),
+                  ...(source !== 'storage' ? { readinessCheck: fallback } : {}),
+                  requestTelemetry: { log: line => lines.push(line) },
+               });
+               // Observe request-time work after construction has read the offer configuration.
+               const storageReadiness = t.mock.method(store, 'readinessCheck', () =>
+                  source === 'storage' ? check().ready : true);
+               const storageWork = [
+                  t.mock.method(store, 'prepareWatch'), t.mock.method(store, 'getWatch'),
+                  t.mock.method(store, 'getByIdempotencyKey'),
+                  t.mock.method(store, 'recordSettlementCandidate'), t.mock.method(store, 'activateWatch'),
+               ];
+               const providerWork = [
+                  t.mock.method(indexer, 'getCurrentRound'), t.mock.method(indexer, 'lookupAssetTransfer'),
+                  t.mock.method(indexer, 'getBlock'), t.mock.method(indexer, 'searchWatchPage'),
+                  t.mock.method(indexer, 'searchTransactionPage'),
+               ];
+               try {
+                  let paymentHeader = '';
+                  for (const body of [undefined, '{private unpaid body', '{}']) {
+                     lines.length = 0;
+                     const request = new Request(`https://roundwatch.invalid${watchPath}`, {
+                        method: 'POST', headers: { 'content-type': 'application/json' }, body,
+                     });
+                     const response = await app.request(request);
+                     assert.equal(response.status, 402);
+                     assert.equal(request.bodyUsed, false, 'discovery must not consume the watch body');
+                     assert.equal(response.headers.get('cache-control'), 'no-store');
+                     assert.equal(response.headers.get('payment-response'), null);
+                     assert.equal(response.headers.get('x-roundwatch-id'), null);
+                     const encoded = response.headers.get('payment-required');
+                     assert.ok(encoded);
+                     const challenge = decodePaymentRequiredHeader(encoded);
+                     assert.equal(challenge.x402Version, 2);
+                     assert.equal(challenge.resource?.url, `https://roundwatch.invalid${watchPath}`);
+                     assert.ok(challenge.extensions?.bazaar);
+                     assert.equal(challenge.accepts.length, 1);
+                     const required = challenge.accepts[0]!;
+                     assert.equal(required.scheme, 'exact');
+                     assert.equal(required.network, networkConfig.network);
+                     assert.equal(required.asset, networkConfig.usdcAssetId);
+                     assert.equal(required.amount, ROUNDWATCH_SERVICE_ATOMIC_AMOUNT);
+                     assert.equal(required.payTo, SERVICE_RECEIVER);
+                     assert.ok(required.maxTimeoutSeconds > 0);
+                     paymentHeader = encodePaymentSignatureHeader({
+                        x402Version: 2, accepted: required,
+                        payload: { paymentGroup: [SIGNED_SERVICE_PAYMENT], paymentIndex: 0 },
+                     });
+                     assert.equal(lines.length, 1, 'unsigned discovery has no acceptance milestones');
+                     const event = JSON.parse(lines[0]!) as RequestTelemetryEvent;
+                     assert.equal(event.classificationVersion, 2);
+                     assert.equal(event.funnelVersion, 1);
+                     assert.equal(event.funnelEvent, 'challenge_issued');
+                     assert.equal(event.reason, 'payment_required');
+                     assert.equal(event.paymentPresented, false);
+                     assert.equal(event.paymentOutcome, 'challenge');
+                     assert.equal(event.readinessPhase, undefined);
+                     assert.equal(event.readinessChecks, undefined);
+                     assert.deepEqual(event.phaseDurationMs, {});
+                     assert.equal(event.verificationClientInvoked, false);
+                     assert.equal(event.durablePrepared, false);
+                     assert.equal(event.settlementClientInvoked, false);
+                     assert.equal(event.activationConfirmed, false);
+                  }
+                  assert.equal(storageReadiness.mock.callCount(), 0);
+                  assert.equal(paid.mock.callCount(), 0);
+                  assert.equal(fallback.mock.callCount(), 0);
+
+                  // Presence, including an empty value, always enters paid admission.
+                  for (const header of [paymentHeader, '', 'malformed']) {
+                     lines.length = 0;
+                     const request = new Request(`https://roundwatch.invalid${watchPath}`, {
+                        method: 'POST', headers: { 'payment-signature': header }, body: '{private signed body',
+                     });
+                     const response = await app.request(request);
+                     assert.equal(response.status, 503);
+                     assert.equal(request.bodyUsed, false, 'readiness must precede signed body parsing');
+                     assert.equal(response.headers.get('cache-control'), 'no-store');
+                     assert.equal(response.headers.get('payment-required'), null);
+                     assert.equal(response.headers.get('payment-response'), null);
+                     const checks = failure === 'exception' ? { readinessCheck: false }
+                        : source === 'storage' ? { storage: false } : unavailable.checks;
+                     assert.deepEqual(await response.json(), {
+                        error: 'RoundWatch is not ready to accept paid watch obligations',
+                        code: 'service_not_ready', checks,
+                     });
+                     assert.equal(lines.length, 2);
+                     assert.equal(JSON.parse(lines[0]!).funnelEvent, 'signed_request_received');
+                     const event = JSON.parse(lines[1]!) as RequestTelemetryEvent;
+                     assert.equal(event.classificationVersion, 2);
+                     assert.equal(event.funnelVersion, 1);
+                     assert.equal(event.funnelEvent, 'admission_unavailable');
+                     assert.equal(event.reason, failure === 'exception' ? 'readiness_exception' : 'readiness_blocked');
+                     assert.equal(event.paymentPresented, true);
+                     assert.equal(event.paymentOutcome, 'presented');
+                     assert.equal(event.readinessPhase, 'pre_challenge');
+                     assert.deepEqual(event.readinessChecks, checks);
+                     assert.equal(event.verificationClientInvoked, false);
+                     assert.equal(event.durablePrepared, false);
+                     assert.equal(event.settlementClientInvoked, false);
+                     for (const secret of [paymentHeader, SIGNED_SERVICE_PAYMENT, 'private readiness diagnostic', 'private signed body']) {
+                        assert.equal(lines.join('').includes(secret), false);
+                     }
+                  }
+                  assert.equal(storageReadiness.mock.callCount(), 3);
+                  assert.equal(paid.mock.callCount(), source === 'paid' ? 3 : 0);
+                  assert.equal(fallback.mock.callCount(), source === 'fallback' ? 3 : 0);
+                  assert.equal(paid.validateCurrent.mock.callCount(), 0);
+                  assert.equal(verify.mock.callCount(), 0);
+                  assert.equal(settle.mock.callCount(), 0);
+                  for (const work of [...storageWork, ...providerWork]) assert.equal(work.mock.callCount(), 0);
+                  assert.equal(store.listActiveWatches().length, 0);
+                  assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+               } finally { store.close(); }
+            });
+         }
+      }
    }
 });
 
@@ -1896,7 +2048,7 @@ test('non-ready durable service refuses paid watch admission before x402 verific
 
       const response = await app.request('/spike/watch', {
          method: 'POST',
-         headers: { 'content-type': 'application/json' },
+         headers: { 'content-type': 'application/json', 'payment-signature': 'malformed' },
          body: JSON.stringify({
             idempotencyKey: 'not-ready-watch',
             expectedSender: PAYER,
@@ -2351,11 +2503,13 @@ test('noncanonical paid-route aliases are rejected before x402 verification', as
       {
          canonical: '/demo',
          method: 'GET',
+         networkConfig: TESTNET_NETWORK_CONFIG,
          aliases: ['/DEMO', '/demo/', '/demo//', '//demo'],
       },
       {
          canonical: '/spike/watch',
          method: 'POST',
+         networkConfig: TESTNET_NETWORK_CONFIG,
          aliases: [
             '/SPIKE/WATCH',
             '/spike/watch/',
@@ -2363,11 +2517,21 @@ test('noncanonical paid-route aliases are rejected before x402 verification', as
             '//spike///watch//',
          ],
       },
+      {
+         canonical: '/v1/watch',
+         method: 'POST',
+         networkConfig: MAINNET_NETWORK_CONFIG,
+         aliases: ['/V1/WATCH', '/v1/watch/', '/v1/watch//', '//v1///watch//'],
+      },
    ] as const;
 
    for (const route of cases) {
       const store = new RoundWatchStore(':memory:');
       const facilitator = new DelayedRejectingFacilitator();
+      facilitator.getSupported = async () => ({
+         kinds: [{ x402Version: 2, scheme: 'exact', network: route.networkConfig.network }],
+         extensions: [], signers: {},
+      });
 
       try {
          const app = createApp({
@@ -2375,6 +2539,7 @@ test('noncanonical paid-route aliases are rejected before x402 verification', as
             facilitatorClient: facilitator,
             store,
             indexer: new FakeIndexer(100),
+            networkConfig: route.networkConfig,
             signedPaymentGateOptions: {
                requestsPerSecond: 1_000,
                burst: 8,
@@ -2412,11 +2577,11 @@ test('noncanonical paid-route aliases are rejected before x402 verification', as
          });
 
          for (const alias of route.aliases) {
-            const requests = Array.from({ length: 6 }, () =>
+            const requests = Array.from({ length: 6 }, (_, i) =>
                app.request(alias, {
                   method: route.method,
                   headers: {
-                     'payment-signature': paymentHeader,
+                     ...(i % 2 === 0 ? { 'payment-signature': paymentHeader } : {}),
                      ...(route.method === 'POST'
                         ? { 'content-type': 'application/json' }
                         : {}),
@@ -2708,6 +2873,68 @@ test('x402 payment headers are exposed to browser clients and preflight allows p
    } finally {
       store.close();
    }
+});
+
+for (const [config, canonical, legacy] of [
+   [MAINNET_NETWORK_CONFIG, 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k', LEGACY_ALGORAND_MAINNET],
+   [TESTNET_NETWORK_CONFIG, 'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe', LEGACY_ALGORAND_TESTNET],
+] as const) {
+   test(`canonical ${config.name} offer, OpenAPI, llms.txt and MCP agree with dual-ID facilitator metadata`, async () => {
+      const store = new RoundWatchStore(':memory:');
+      let verifyCalls = 0, settleCalls = 0;
+      try {
+         const app = createApp({
+            avmAddress: RECEIVER, store, indexer: new FakeIndexer(100),
+            networkConfig: config, publicBaseUrl: 'https://roundwatch-api.onrender.com',
+            facilitatorClient: {
+               getSupported: async () => ({
+                  kinds: [canonical, legacy].map(network => ({
+                     x402Version: 2, scheme: 'exact', network, extra: { feePayer: PAYER },
+                  })),
+                  extensions: [], signers: { 'algorand:*': [PAYER] },
+               }),
+               verify: async () => { verifyCalls++; throw new Error('Unexpected verify'); },
+               settle: async () => { settleCalls++; throw new Error('Unexpected settle'); },
+            } as unknown as FacilitatorClient,
+         });
+         const path = config.name === 'mainnet' ? '/v1/watch' : '/spike/watch';
+         const response = await app.request(path, { method: 'POST' });
+         assert.equal(response.status, 402);
+         const header = response.headers.get('payment-required'); assert.ok(header);
+         const offer = decodePaymentRequiredHeader(header);
+         assert.equal(offer.accepts.length, 1);
+         assert.equal(offer.accepts[0]!.network, canonical);
+         assert.equal(offer.accepts[0]!.asset, config.usdcAssetId);
+         assert.equal(offer.accepts[0]!.amount, '100000');
+         assert.equal(offer.accepts[0]!.payTo, RECEIVER);
+         assert.equal(offer.accepts[0]!.extra?.feePayer, PAYER);
+         const openapi = await (await app.request('/openapi.json')).json() as any;
+         assert.equal(openapi.paths[path].post['x-x402'].network, canonical);
+         assert.ok((await (await app.request('/llms.txt')).text()).includes('CAIP-2: ' + canonical));
+         const mcp = await app.request('/mcp', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'mcp-protocol-version': '2025-11-25' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'roundwatch.service_info', arguments: {} } }),
+         });
+         assert.equal(mcp.status, 200);
+         const info = await mcp.json() as any;
+         assert.equal(info.result.structuredContent.caip2, canonical);
+         assert.equal(verifyCalls, 0); assert.equal(settleCalls, 0);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 0);
+      } finally { store.close(); }
+   });
+}
+
+test('legacy refund audit identifiers remain valid and unchanged', () => {
+   const store = new RoundWatchStore(':memory:');
+   try {
+      const watch = store.prepareWatch(SPEC, intent()).watch;
+      for (const [i, network] of [LEGACY_ALGORAND_MAINNET, LEGACY_ALGORAND_TESTNET].entries()) {
+         const evidence = { transaction: i === 0 ? INDEXER_TX_ID : OTHER_INDEXER_TX_ID, network, atomicAmount: '1' };
+         const recorded = store.recordRefundEvidence(watch.id, evidence);
+         assert.equal(recorded.network, network);
+         assert.deepEqual(store.recordRefundEvidence(watch.id, evidence), recorded);
+      }
+   } finally { store.close(); }
 });
 
 test('TestNet remains the default and the x402 requirement preserves network, asset, amount, and receiver', async () => {
@@ -3097,6 +3324,37 @@ test('verified payer cannot obtain a legacy NULL-payer watch through replay', as
       store.close();
    }
 });
+
+for (const state of ['settlement_pending', 'settlement_unknown'] as const) {
+   test(`canonical retry cannot repurchase a legacy ${state} watch`, async () => {
+      const store = new RoundWatchStore(':memory:');
+      const spec = { ...SPEC, idempotencyKey: 'legacy-replay-' + state, expectedSender: WATCH_SENDER };
+      const original = store.prepareWatch(spec, {
+         expectedTransaction: 'ALREADY_BOUND_SERVICE', network: LEGACY_ALGORAND_TESTNET,
+         payer: PAYER, receiver: SERVICE_RECEIVER, assetId: TESTNET_USDC_ASSET_ID,
+         atomicAmount: ROUNDWATCH_SERVICE_ATOMIC_AMOUNT, firstValid: 100, lastValid: 200,
+      }).watch;
+      if (state === 'settlement_unknown') store.markSettlementUnknown(original.id);
+      const before = store.getWatch(original.id);
+      const facilitator = new MiddlewareFacilitator(store, spec.idempotencyKey);
+      const app = createApp({
+         avmAddress: SERVICE_RECEIVER, facilitatorClient: facilitator,
+         store, indexer: new MiddlewareIndexer(), requireSettlementIntent: true,
+      });
+      try {
+         // Uses the existing static synthetic fixture, never generates a signature.
+         const { paymentHeader, body } = await createSyntheticPaidRequest(app, spec);
+         const response = await app.request('/spike/watch', {
+            method: 'POST', headers: { 'content-type': 'application/json', 'payment-signature': paymentHeader }, body,
+         });
+         assert.equal(response.status, 409);
+         assert.equal((await response.json() as any).code, 'idempotency_replay');
+         assert.equal(facilitator.settleCalls, 0);
+         assert.deepEqual(store.getWatch(original.id), before);
+         assert.equal(store.listSettlementReconciliationCandidates().length, 1);
+      } finally { store.close(); }
+   });
+}
 
 test('paid x402 middleware persists signed purchase terms and activates from the exact service round', async () => {
    const store = new RoundWatchStore(':memory:');

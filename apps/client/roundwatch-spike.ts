@@ -9,12 +9,11 @@ import {
    x402HTTPClient,
 } from '@x402/fetch';
 import { ExactAvmScheme, toClientAvmSigner } from '@x402/avm';
+import { ALGORAND_TESTNET_CAIP2 as ALGORAND_TESTNET } from '../algorand-networks.js';
 
 process.loadEnvFile(resolve('../server/.env'));
 process.loadEnvFile(resolve('.env'));
 
-const ALGORAND_TESTNET =
-   'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=' as const;
 const USDC_TESTNET_ASA_ID = 10_458_941;
 const serverUrl = process.env.ROUNDWATCH_SERVER_URL ?? 'http://localhost:4021';
 const algodUrl =

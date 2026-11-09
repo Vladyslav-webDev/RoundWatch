@@ -6,7 +6,10 @@ import { DatabaseSync } from 'node:sqlite';
 import {
    ALGORAND_MAINNET_CAIP2,
    ALGORAND_TESTNET_CAIP2,
-} from './network-config.js';
+   LEGACY_ALGORAND_MAINNET,
+   LEGACY_ALGORAND_TESTNET,
+   sameAlgorandNetwork,
+} from '../algorand-networks.js';
 
 export type WatchState =
    | 'settlement_pending'
@@ -1609,7 +1612,8 @@ function assertSettlementEvidenceMatches(
 
    if (
       watch.expectedServiceNetwork &&
-      watch.expectedServiceNetwork !== evidence.network
+      watch.expectedServiceNetwork !== evidence.network &&
+      !sameAlgorandNetwork(watch.expectedServiceNetwork, evidence.network)
    ) {
       throw new Error(
          `Watch ${watch.id} settlement network does not match the prepared payment`,
@@ -1801,6 +1805,8 @@ const ALGORAND_TRANSACTION_ID_PATTERN = /^[A-Z2-7]{52}$/;
 const SUPPORTED_REFUND_NETWORKS = new Set<string>([
    ALGORAND_TESTNET_CAIP2,
    ALGORAND_MAINNET_CAIP2,
+   LEGACY_ALGORAND_TESTNET,
+   LEGACY_ALGORAND_MAINNET,
 ]);
 
 function assertRefundEvidence(evidence: RefundEvidence): void {

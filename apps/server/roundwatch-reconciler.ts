@@ -1,4 +1,5 @@
 import type { TransactionIdPage } from './roundwatch-indexer.js';
+import { sameAlgorandNetwork } from '../algorand-networks.js';
 import {
    captureWatchEconomicsTurn,
    finishWatchEconomicsTurn,
@@ -444,7 +445,8 @@ export class SettlementReconciler {
       this.absenceProofSessions.delete(watch.id);
       const matches =
          transfer.transaction === watch.expectedServiceTransaction &&
-         watch.expectedServiceNetwork === this.config.network &&
+         (watch.expectedServiceNetwork === this.config.network ||
+            sameAlgorandNetwork(watch.expectedServiceNetwork, this.config.network)) &&
          transfer.sender === watch.expectedServicePayer &&
          transfer.receiver === watch.serviceReceiver &&
          transfer.assetId === watch.serviceAssetId &&
@@ -459,7 +461,8 @@ export class SettlementReconciler {
       }
       this.store.activateWatch(watch.id, {
          transaction: transfer.transaction,
-         network: this.config.network,
+         // Keep the persisted spelling; aliases affect matching, not audit history.
+         network: watch.expectedServiceNetwork!,
          payer: transfer.sender,
       }, transfer.round);
       this.recordMetric(() => console.log(`RoundWatch reconciled watch ${watch.id} at service round ${transfer.round}`));

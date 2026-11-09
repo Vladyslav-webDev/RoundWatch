@@ -11,6 +11,7 @@ COPY apps/client/package.json apps/client/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY apps/server apps/server
+COPY apps/algorand-networks.ts apps/algorand-networks.ts
 
 ENV NODE_ENV=production
 EXPOSE 4021
