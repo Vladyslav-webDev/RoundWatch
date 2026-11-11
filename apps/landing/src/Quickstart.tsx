@@ -2,6 +2,7 @@ import { BrandMark, Icon } from "./graphics";
 
 const API_BASE = "https://roundwatch-api.onrender.com";
 const REPOSITORY = "https://github.com/Vladyslav-webDev/RoundWatch";
+const MAINNET_PROOF = `${REPOSITORY}/blob/8384c6ff4b1cc8f8412d5e4ad59f6c8d8b1992a5/docs/POST_REPRICE_CANARY_2026-09-29.md`;
 const EXAMPLE_SENDER = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAKQ4C4";
 const EXAMPLE_RECEIVER = "AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEA5RCDXMI";
 
@@ -24,20 +25,21 @@ function CodeBlock({ children }: { children: string }) {
 
 export default function QuickstartPage() {
   const requestBody = `{
-  "idempotencyKey": "invoice-2026-09-17-001",
+  "idempotencyKey": "replace-with-unique-idempotency-key",
   "expectedSender": "${EXAMPLE_SENDER}",
   "expectedReceiver": "${EXAMPLE_RECEIVER}",
   "atomicAmount": "1",
-  "invoiceNote": "roundwatch:invoice-2026-09-17-001"
+  "invoiceNote": "replace-with-unique-invoice-note"
 }`;
 
   const unpaidRequest = `curl -i -X POST ${API_BASE}/v1/watch \\
   -H "content-type: application/json" \\
-  --data '{"idempotencyKey":"invoice-2026-09-17-001","expectedSender":"${EXAMPLE_SENDER}","expectedReceiver":"${EXAMPLE_RECEIVER}","atomicAmount":"1","invoiceNote":"roundwatch:invoice-2026-09-17-001"}'`;
+  --data '{}'`;
 
   const expectedServiceContract = `x402Version: 2
+resource.url: ${API_BASE}/v1/watch
 scheme: exact
-network: algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=
+network: algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k
 asset: 31566704
 amount: 100000
 payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
@@ -51,9 +53,7 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
         <nav aria-label="Quickstart navigation">
           <a href="/">Product</a>
           <a href={`${REPOSITORY}#readme`}>Docs</a>
-          <a href={`${REPOSITORY}/blob/main/docs/MAINNET_READINESS.md`}>
-            MainNet proof
-          </a>
+          <a href={MAINNET_PROOF}>Historical MainNet proof</a>
         </nav>
       </header>
 
@@ -61,21 +61,20 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
         <section className="quickstart-hero">
           <p className="eyebrow">Quickstart / MainNet</p>
           <h1>
-            Integrate in 5 minutes.
+            Create a watch.
             <br />
-            <span>Create the watch. Let RoundWatch own the wait.</span>
+            <span>Retrieve the proof later.</span>
           </h1>
           <p className="quickstart-lede">
-            RoundWatch watches one exact future Algorand USDC payment. Your caller
-            can create the obligation, complete the x402 service payment, save the
-            returned watch ID, and exit. RoundWatch persists the state and returns
-            the matching transaction later.
+            RoundWatch watches one exact future Algorand USDC payment. Inspect the
+            offer for free, validate the watch and payment terms, then purchase
+            the watch with x402. Save the watch ID to retrieve the result later.
           </p>
           <div className="quickstart-facts mono">
             <span>Algorand MainNet</span>
-            <span>USDC ASA 31566704</span>
+            <span>Circle USDC ASA 31566704</span>
             <span>0.10 USDC service fee</span>
-            <span>30 minute eligibility deadline</span>
+            <span>30-minute eligibility window</span>
           </div>
         </section>
 
@@ -85,39 +84,46 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
             <div>
               <h2>Define the exact payment</h2>
               <p>
-                Send the expected sender, receiver, atomic amount, and optional
-                invoice note. The watched asset is server-selected MainNet USDC,
-                not a caller-controlled field. The addresses below are checksum-valid
-                public examples. <code>expectedReceiver</code> is the receiver of the
-                future payment being watched; it is separate from the RoundWatch
-                service receiver advertised by the x402 challenge.
+                Use checksum-valid addresses for the watched transfer and a nonzero
+                sender. RoundWatch selects Circle USDC. Set <code>atomicAmount</code>
+                {" "}to a positive integer string in millionths of one USDC. The
+                example watches for one atomic unit, or 0.000001 USDC.
               </p>
               <CodeBlock>{requestBody}</CodeBlock>
+              <p className="quickstart-note">
+                Generate a fresh <code>idempotencyKey</code> of 8–128 characters
+                for each new watch under the service payer. Keep the exact body for
+                recovery. Use the actual transfer note or omit <code>invoiceNote</code>.
+                The two placeholder literals are rejected on paid creation.
+                The service payer signs the fee to <code>payTo</code>.
+                The <code>expectedSender</code> and <code>expectedReceiver</code>
+                {" "}describe the separate transfer to be watched.
+              </p>
             </div>
           </article>
 
           <article className="quickstart-step">
             <span className="quickstart-step-number mono">02</span>
             <div>
-              <h2>Inspect the 402 before paying</h2>
+              <h2>Discover the offer for free</h2>
               <p>
-                A semantically valid unpaid request returns
-                <code> 402 Payment Required</code>. This is a free preflight.
-                Malformed watch input returns <code>400</code> before x402 handling,
-                so a <code>402</code> means RoundWatch accepted the watch
-                specification and is now asking only for the service payment.
+                Send an unsigned <code>POST</code> to receive <code>402 Payment Required</code>
+                {" "}with the <code>PAYMENT-REQUIRED</code> header and Bazaar input
+                metadata. Discovery skips semantic body validation and paid
+                readiness checks. Admission and capacity are checked on the
+                signed request.
               </p>
               <CodeBlock>{unpaidRequest}</CodeBlock>
               <p className="quickstart-note">
-                The first request is unpaid. For the current production contract,
-                the approved payment requirement is:
+                Decode <code>PAYMENT-REQUIRED</code> and compare the offer with
+                the approved MainNet terms below.
               </p>
               <CodeBlock>{expectedServiceContract}</CodeBlock>
               <p className="quickstart-note">
-                Before a paid MainNet retry, verify the advertised network, asset,
-                amount, receiver, and resource URL. The current service payment is
-                exactly 0.10 USDC. The guarded reference client in this repository
-                performs these checks before it can spend.
+                Before signing, validate your watch body against the API schema,
+                check that <code>GET /ready</code> returns <code>200</code> for
+                MainNet, and confirm the resource URL, x402 version, scheme,
+                network, asset, amount, and service receiver.
               </p>
             </div>
           </article>
@@ -125,25 +131,33 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
           <article className="quickstart-step">
             <span className="quickstart-step-number mono">03</span>
             <div>
-              <h2>Settle with an x402-capable client</h2>
+              <h2>Sign locally and submit</h2>
               <p>
-                Wallet signing stays in the client process. RoundWatch does not need
-                your mnemonic or private key. The repository includes a guarded
-                MainNet reference flow using <code>@x402/fetch</code> and
-                <code>@x402/avm</code>.
+                Sign the service payment locally and keep wallet credentials in
+                your client. The reference client uses the official SDK 2.29.0.
+                Send the validated watch body with <code>PAYMENT-SIGNATURE</code>.
+                RoundWatch checks readiness and validates the body before the
+                facilitator verifies the payment. It rechecks readiness and
+                durably prepares the watch before settlement.
               </p>
               <div className="quickstart-links">
                 <a href={`${REPOSITORY}/blob/main/apps/client/mainnet-e2e.ts`}>
                   View guarded MainNet client <Icon name="arrow" />
                 </a>
-                <a href={`${REPOSITORY}/blob/main/README.md#x402-payment-and-recovery`}>
-                  Read payment & recovery docs <Icon name="arrow" />
+                <a href={`${API_BASE}/llms.txt`}>
+                  Read payment & recovery guidance <Icon name="arrow" />
                 </a>
               </div>
               <p className="quickstart-warning mono">
-                The hosted RoundWatch API is MainNet only and spends real USDC.
+                A successful production purchase spends real MainNet USDC.
                 For TestNet integration, run RoundWatch locally with
                 ROUNDWATCH_NETWORK=testnet or use your own TestNet deployment.
+              </p>
+              <p className="quickstart-note">
+                The November 2026 release completed a paid TestNet watch and a
+                matched transfer. Its MainNet checks covered health, readiness,
+                and unsigned discovery. The paid MainNet proof linked here
+                predates this release.
               </p>
             </div>
           </article>
@@ -153,18 +167,21 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
             <div>
               <h2>Save the watch ID and leave</h2>
               <p>
-                A successful paid request returns a durable <code>watchId</code>.
-                RoundWatch confirms the exact service-payment transaction, uses its
-                confirmed round as the activation baseline, persists the scan cursor,
-                and owns the waiting obligation after your process exits.
+                After settlement, RoundWatch confirms the exact service-payment
+                transaction and uses its confirmed round as the activation baseline
+                and initial scan cursor. A successful response returns a durable
+                {" "}<code>watchId</code>. Save it before your process exits.
               </p>
               <CodeBlock>{`{
   "watchId": "YOUR_WATCH_ID",
   "message": "The watch is returned only if x402 settlement and durable activation succeed"
 }`}</CodeBlock>
               <p className="quickstart-note">
-                The watch ID is created by a successful paid request. Documentation
-                uses a placeholder instead of a supposedly live example record.
+                If the purchase response is lost or settlement is uncertain, recover
+                the original purchase without paying again. Send the exact original
+                watch body and <code>servicePayer</code> to the free
+                {" "}<code>POST /v1/watch/recover</code> endpoint. It can return
+                <code> watch.id</code> after settlement and activation are confirmed.
               </p>
             </div>
           </article>
@@ -174,14 +191,12 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
             <div>
               <h2>Read the result later</h2>
               <p>
-                Poll the public status endpoint whenever your workflow returns. A
-                matched watch exposes the exact Algorand transaction ID and confirmed
-                round that satisfied the watch. Passing the 30-minute deadline does not
-                itself produce <code>expired</code>; terminal expiry requires complete
-                indexed coverage through a fixed closing checkpoint. If the
-                durable 500-turn work budget is exhausted before a match or complete
-                expiry proof, the terminal state is <code>indeterminate</code>, not
-                <code>expired</code>.
+                Read the public status endpoint for free. A match includes the exact
+                Algorand transaction ID and confirmed round. The transfer must confirm
+                after the service-payment round and have a block timestamp before
+                {" "}<code>expiresAt</code>. Expiry requires complete indexed coverage
+                through a fixed closing checkpoint. If the budget of 500 work units
+                runs out first, the result is <code>indeterminate</code>.
               </p>
               <CodeBlock>{statusRequest}</CodeBlock>
               <div className="quickstart-states mono" aria-label="Watch states">
@@ -217,17 +232,17 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
             <div>
               <dt>Eligibility deadline</dt>
               <dd>
-                30 minutes from durable watch preparation; settlement time consumes
-                part of the window; expiry is proof-based
+                30 minutes from durable watch preparation. Settlement time consumes
+                part of the window.
               </dd>
             </div>
             <div>
               <dt>Work budget</dt>
-              <dd>500 durable background turns; exhaustion → indeterminate</dd>
+              <dd>500 durable work units per watch</dd>
             </div>
             <div>
               <dt>Open capacity</dt>
-              <dd>50 global / 5 per verified service payer</dd>
+              <dd>50 globally and 5 per verified service payer</dd>
             </div>
             <div>
               <dt>Status privacy</dt>
@@ -242,7 +257,7 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
           <div className="quickstart-doc-grid">
             <a href={`${REPOSITORY}/blob/main/README.md`}>
               <span>README</span>
-              <small>API contract and local development</small>
+              <small>Local development and reference tooling</small>
             </a>
             <a href={`${REPOSITORY}/blob/main/docs/ARCHITECTURE.md`}>
               <span>Architecture</span>
@@ -252,9 +267,9 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
               <span>Security</span>
               <small>Signer boundary and operational assumptions</small>
             </a>
-            <a href={`${REPOSITORY}/blob/main/docs/MAINNET_READINESS.md`}>
-              <span>MainNet evidence</span>
-              <small>Verified settlement and matched payment proof</small>
+            <a href={MAINNET_PROOF}>
+              <span>Historical MainNet proof</span>
+              <small>Earlier paid settlement and matched transfer</small>
             </a>
             <a href={`${API_BASE}/openapi.json`}>
               <span>OpenAPI</span>
@@ -270,11 +285,11 @@ payTo: EQPLN32HPLPGBCNPOZUL6BL34CTNQGT3VAAMNAJWSIZGQ5CUNXOHB634XY`;
         <section className="quickstart-final">
           <div>
             <p className="eyebrow">Ready to inspect the product?</p>
-            <h2>See the lifecycle before you integrate it.</h2>
+            <h2>See a watch from purchase to match.</h2>
           </div>
           <div className="button-row">
             <a className="button button-primary" href="/#video-demo">
-              <span>See the demo</span>
+              <span>Watch the legacy demo</span>
               <Icon name="arrow" />
             </a>
             <a className="button button-secondary" href={REPOSITORY}>

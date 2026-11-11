@@ -120,7 +120,7 @@ export default function Resilience() {
           <Icon name="check" />
           Restart recovery covered by automated fault tests
           <br />
-          persistence confirmed across MainNet redeploys
+          persistence confirmed in earlier MainNet redeploys
         </span>
       </div>
       <div

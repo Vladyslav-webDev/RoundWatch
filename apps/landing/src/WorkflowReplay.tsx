@@ -7,19 +7,19 @@ const events = [
   {
     time: "10:24:01",
     source: "watch",
-    message: "Exact future payment defined",
-    state: "Watch specified",
-    signal: "Defined",
-    heading: ["Watch defined.", "Waiting for", "service settlement."],
+    message: "Unsigned offer discovered and terms checked",
+    state: "Offer reviewed",
+    signal: "Offer",
+    heading: ["Offer reviewed.", "Ready for", "local signing."],
     icon: "eye",
   },
   {
     time: "10:24:02",
     source: "x402",
-    message: "Service payment requirements accepted",
+    message: "Signed request verified and watch prepared",
     state: "Settlement pending",
     signal: "x402",
-    heading: ["Service fee accepted.", "Settlement", "to establish."],
+    heading: ["Watch prepared.", "Waiting for", "service settlement."],
     icon: "code",
   },
   {
@@ -182,7 +182,7 @@ export default function WorkflowReplay() {
             <i className="signal-dot" />
             Workflow replay
           </span>
-          <span className="mono terminal-network">Algorand MainNet</span>
+          <span className="mono terminal-network">Algorand TestNet</span>
         </div>
         <div className="terminal-content">
           <ol className="event-list" aria-label="Illustrative workflow events">
@@ -270,8 +270,8 @@ export default function WorkflowReplay() {
         </div>
       </div>
       <p className="replay-note">
-        Illustrative sequence based on the verified MainNet flow. No live
-        connection or payment is made.
+        Simulated timestamps and events illustrate the recorded TestNet flow.
+        The replay runs locally.
       </p>
       <p className="narrative-announcement" role="status">
         {announcement}
