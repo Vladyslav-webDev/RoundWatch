@@ -10,7 +10,7 @@ export default function VideoShowcase() {
         <div>
           <p className="eyebrow">
             <span>02</span>
-            <span className="eyebrow-slash">/</span>Video demo
+            <span className="eyebrow-slash">/</span>Legacy demo
           </p>
           <h2 id="video-demo-title">
             Watch RoundWatch
@@ -19,8 +19,8 @@ export default function VideoShowcase() {
           </h2>
         </div>
         <p>
-          Create the watch, settle once, let the caller exit, and come back to
-          verified MainNet evidence.
+          This MainNet recording shows the watch lifecycle on an earlier
+          release, before the November 2026 x402 SDK update.
         </p>
       </div>
 
@@ -31,7 +31,7 @@ export default function VideoShowcase() {
           playsInline
           preload="metadata"
           poster="/demo/roundwatch-demo-poster.jpg"
-          aria-label="RoundWatch production demo on Algorand MainNet"
+          aria-label="Legacy RoundWatch demo on Algorand MainNet"
         >
           <source src="/demo/roundwatch-demo.mp4" type="video/mp4" />
           Your browser does not support the video element.

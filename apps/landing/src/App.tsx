@@ -17,41 +17,41 @@ const navigation = [
 
 const flow = [
   {
-    title: "Define the exact payment",
-    text: "The caller specifies the sender, receiver, atomic amount, and optional invoice note.",
+    title: "Discover and check the offer",
+    text: "Request the free x402 offer. Check its terms and your watch specification before signing.",
     icon: "work",
     detail:
-      "RoundWatch persists the exact watch specification before the paid retry, so the obligation has a durable identity from the start.",
-    status: "Watch specified",
-    boundary: "No service settlement yet",
-    next: "Settle x402 fee",
+      "The unsigned HTTP 402 advertises terms only. The client checks the sender, receiver, atomic amount, and optional invoice note. RoundWatch validates the body and checks admission on the signed request.",
+    status: "Offer discovered",
+    boundary: "Paid admission still pending",
+    next: "Sign locally",
   },
   {
     title: "Settle the x402 service fee",
-    text: "The client signs locally and retries the same request through the x402 payment flow.",
+    text: "Sign locally and submit the watch request with the x402 payment signature.",
     icon: "code",
     detail:
-      "GoPlausible verifies and settles the service payment. RoundWatch never needs the caller’s mnemonic or private key.",
+      "After readiness and body checks, GoPlausible verifies the payment. RoundWatch rechecks readiness and durably prepares the watch before GoPlausible settles the fee.",
     status: "Settlement established",
     boundary: "Activation requires the confirmed service-payment round",
     next: "Activate watch",
   },
   {
     title: "RoundWatch owns the wait",
-    text: "The confirmed service-payment round and scan progress are persisted so the caller can exit.",
+    text: "After settlement is confirmed on-chain, RoundWatch activates the watch and saves its scan progress.",
     icon: "database",
     detail:
-      "The durable watch keeps polling from a saved cursor. Restart recovery preserves the waiting obligation instead of tying it to one process lifetime.",
+      "The caller can exit after activation. RoundWatch can resume from the saved cursor after a restart and reconcile settlement when activation is interrupted.",
     status: "Watch active",
     boundary: "Future payment not matched",
     next: "Observe MainNet",
   },
   {
     title: "Match & retrieve evidence",
-    text: "The first exact future USDC transfer is stored with its transaction ID and confirmed round.",
+    text: "Retrieve the watch result, including the transaction ID and confirmed round when a transfer matches.",
     icon: "check",
     detail:
-      "Sender, receiver, MainNet USDC asset, atomic amount, and optional note must all agree before the watch becomes matched.",
+      "Sender, receiver, MainNet USDC asset, atomic amount, and any specified note must match. The transfer must confirm after the activation round, with a block time before the deadline.",
     status: "Durable evidence ready",
     boundary: "Exact match established",
     next: "Workflow continuation",
@@ -183,7 +183,7 @@ function Header() {
           ))}
         </nav>
         <a className="header-cta button button-secondary" href="#video-demo">
-          <span>View demo</span>
+          <span>View legacy demo</span>
           <Icon name="arrow" />
         </a>
       </div>
@@ -238,7 +238,7 @@ function Product() {
           {[
             [
               "Observe",
-              "Watches one exact future Algorand USDC payment after the caller exits.",
+              "Watches one exact future MainNet USDC payment within a bounded window.",
               "01",
               "eye",
             ],
@@ -532,7 +532,7 @@ function Technology() {
           </ul>
           <p className="prototype-note">
             <span className="signal-dot" />
-            Live and verified on Algorand MainNet.
+            MainNet API live. Canonical payment flow tested end to end on TestNet.
           </p>
           <a
             className="technology-guide-link"
@@ -672,18 +672,18 @@ function Landing() {
               </h1>
               <p className="hero-description">
                 RoundWatch lets agents create a durable watch for one exact future
-                Algorand payment, exit, and retrieve verified on-chain evidence
-                later.
+                Algorand MainNet USDC payment, exit, and retrieve verified
+                on-chain evidence later.
               </p>
               <div className="button-row">
-                <ButtonLink href="#video-demo">See the demo</ButtonLink>
-                <ButtonLink href="/start" secondary>
-                  Start in 60 seconds
+                <ButtonLink href="/start">Read the Quickstart</ButtonLink>
+                <ButtonLink href="#video-demo" secondary>
+                  View legacy demo
                 </ButtonLink>
               </div>
               <p className="hero-proof mono">
                 <i className="signal-dot" />
-                Built on x402. Proven on Algorand MainNet.
+                Live on Algorand MainNet · x402 v2
               </p>
             </div>
             <div className="hero-art">
@@ -708,7 +708,7 @@ function Landing() {
           </section>
           <ul className="proof-strip">
             {[
-              ["link", "MainNet verification", "Real settlements"],
+              ["link", "MainNet watch", "0.10 USDC"],
               ["database", "Durable watch state", "Survives restarts"],
               ["shield", "Exact matching", "Evidence, not inference"],
               ["bolt", "Built for agents", "Caller can exit"],
@@ -742,7 +742,7 @@ function Landing() {
                 </h2>
               </div>
               <p>
-                An illustrative replay of the verified MainNet lifecycle, one
+                An illustrative replay of the canonical TestNet lifecycle, one
                 durable state transition at a time.
               </p>
             </div>
@@ -818,17 +818,19 @@ function Landing() {
               <p className="challenge-marker mono">
                 Algorand MainNet
                 <br />
-                <span>x402 · Circle USDC · persistent SQLite</span>
+                <span>x402 v2 · SDK 2.29.0 · Circle USDC</span>
               </p>
               <p>
-                RoundWatch has completed a real MainNet service settlement,
-                preserved the watch across redeploys, and matched the exact future
-                USDC transfer it was created to observe.
+                The November 9, 2026 MainNet release passed health, readiness,
+                and unsigned canonical HTTP 402 checks. The same SDK version
+                settled a real TestNet service payment and matched a separate
+                USDC transfer. A paid MainNet run on this release is still pending.
               </p>
               <p className="challenge-footnote">
-                The service contract is public: exact matching, a 30-minute
-                eligibility deadline, proof-based terminal expiry, and bounded open
-                capacity.
+                An earlier MainNet canary settled the service fee and matched
+                a separate USDC transfer. The current watch costs 0.10 USDC
+                and has a 30-minute eligibility window from durable preparation
+                and a 500-work-unit budget.
               </p>
             </div>
           </section>
@@ -844,9 +846,9 @@ function Landing() {
               <span>Let the workflow move on.</span>
             </h2>
             <div className="button-row">
-              <ButtonLink href="#video-demo">View demo</ButtonLink>
-              <ButtonLink href="/start" secondary>
-                Start in 60 seconds
+              <ButtonLink href="/start">Read the Quickstart</ButtonLink>
+              <ButtonLink href="#video-demo" secondary>
+                View legacy demo
               </ButtonLink>
             </div>
             <div className="cta-orbit" aria-hidden="true">

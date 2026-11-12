@@ -19,11 +19,12 @@ const exactMatchPseudo = [
   "// Pseudocode: the Indexer narrows the search; your app still owns exact matching.",
   "for (const tx of response.transactions) {",
   "  if (",
+  "    isDirectAssetTransfer(tx) &&",
   "    senderMatches(tx, expectedSender) &&",
   "    receiverMatches(tx, expectedReceiver) &&",
   "    assetMatches(tx, 31566704) &&",
   "    amountMatches(tx, atomicAmount) &&",
-  "    noteMatches(tx, invoiceNote)",
+  "    (invoiceNote === undefined || noteMatches(tx, invoiceNote))",
   "  ) {",
   "    persistEvidence(tx);",
   "  }",
@@ -35,11 +36,11 @@ const roundWatchRequest = [
   "content-type: application/json",
   "",
   "{",
-  '  "idempotencyKey": "invoice-2026-09-22-001",',
+  '  "idempotencyKey": "replace-with-unique-idempotency-key",',
   '  "expectedSender": "EXPECTED_SENDER",',
   '  "expectedReceiver": "EXPECTED_RECEIVER",',
   '  "atomicAmount": "1000000",',
-  '  "invoiceNote": "roundwatch:invoice-2026-09-22-001"',
+  '  "invoiceNote": "replace-with-unique-invoice-note"',
   "}",
 ].join("\n");
 
@@ -289,35 +290,46 @@ export default function AlgorandPaymentMonitoringPage() {
                 <div className="guide-compare-accent">
                   <p className="mono">Delegate to RoundWatch</p>
                   <ol>
-                    <li>Define the exact expected payment.</li>
-                    <li>Create one durable watch.</li>
+                    <li>Discover the x402 offer with an unsigned POST.</li>
+                    <li>Check the network, asset, fee, service recipient and watch body.</li>
+                    <li>Sign locally and send the body with <code>PAYMENT-SIGNATURE</code>.</li>
+                    <li>RoundWatch verifies payment and durably prepares the watch.</li>
+                    <li>RoundWatch settles the fee and confirms activation.</li>
                     <li>Save the returned watch ID.</li>
-                    <li>Let the caller exit.</li>
-                    <li>Read the durable result later.</li>
+                    <li>Retrieve the result later.</li>
                   </ol>
                 </div>
               </div>
 
               <p>
-                RoundWatch does not replace Algorand Indexer. It packages the
-                long-lived observation, cursor persistence, restart recovery,
-                exact-match predicate, and stored result into a bounded API
-                obligation.
+                The x402 service payer pays RoundWatch 0.10 USDC on Algorand MainNet
+                (Circle USDC ASA 31566704). The fee buys a durable watch with a
+                500 work-unit budget. Its 30-minute eligibility window starts at
+                preparation, so settlement uses part of that window. The body
+                describes the separate future transfer, with its own sender,
+                receiver and amount. This example watches for 1 USDC in a top-level
+                direct transfer.
               </p>
 
               <CodeBlock>{roundWatchRequest}</CodeBlock>
               <p className="guide-note">
-                The hosted RoundWatch API is MainNet. It validates the watch
-                specification before x402 handling: malformed input returns HTTP 400,
-                while a valid unpaid request returns HTTP 402. The live machine-readable
-                contract is published at
-                <code> https://roundwatch-api.onrender.com/openapi.json</code> and
-                <code> /llms.txt</code>.
+                Replace the placeholders and generate a fresh idempotency key for
+                each watch. Keep the key stable for retries of the same watch
+                specification from the same service payer. Omit <code>invoiceNote</code>{" "}
+                if the watch has no note requirement. Unsigned HTTP 402 returns
+                <code> PAYMENT-REQUIRED</code> and Bazaar metadata before semantic
+                validation and without reserving capacity. Signed retries must pass
+                paid readiness and body validation before payment verification.
+                See the API’s <a href="https://roundwatch-api.onrender.com/openapi.json">
+                  <code>openapi.json</code>
+                </a> and <a href="https://roundwatch-api.onrender.com/llms.txt">
+                  <code>llms.txt</code>
+                </a>.
               </p>
 
               <div className="guide-actions">
                 <a className="button button-primary" href="/start">
-                  <span>Open the 60-second quickstart</span>
+                  <span>Open the quickstart</span>
                   <Icon name="arrow" />
                 </a>
                 <a
@@ -334,16 +346,18 @@ export default function AlgorandPaymentMonitoringPage() {
               <p className="guide-section-number mono">06 / Retrieve evidence</p>
               <h2>Your workflow can return after the waiting period.</h2>
               <p>
-                After durable watch creation succeeds, keep the
+                After settlement and durable activation succeed, keep the
                 <code> watchId</code>. The caller can terminate and later query the
                 public watch status endpoint. A matched watch preserves the exact
                 Algorand transaction ID and confirmed round that satisfied the watch.
               </p>
               <CodeBlock>{statusRequest}</CodeBlock>
               <p className="guide-note">
-                The current operating contract, states, capacity limits, and MainNet
-                integration steps are documented on the quickstart page rather than
-                duplicated here.
+                If the paid response was lost, use the free
+                <code> POST /v1/watch/recover</code> with the exact original watch
+                specification plus <code>servicePayer</code>, the public address
+                of the wallet that signed the x402 payment. Resolve the payment
+                outcome before trying another purchase.
               </p>
             </section>
 
@@ -420,7 +434,7 @@ export default function AlgorandPaymentMonitoringPage() {
                 limits, states, and reference implementation.
               </p>
               <a className="button button-primary" href="/start">
-                <span>Start in 60 seconds</span>
+                <span>Open the quickstart</span>
                 <Icon name="arrow" />
               </a>
             </section>
