@@ -71,6 +71,14 @@ export interface FixtureEvidence {
   oracle: ReceiptOracle;
 }
 
+export interface RangeLogView extends LogView {
+  logsRange(fromHeight: number, toHeight: number, filter: Filter): readonly Log[] | undefined;
+}
+
+export interface RangeFixtureEvidence extends FixtureEvidence {
+  views: readonly [RangeLogView, RangeLogView];
+}
+
 export type EvidenceIds = readonly [string, string, string];
 
 export class Unresolved extends Error {}
@@ -178,6 +186,22 @@ function normalizeResponse(raw: readonly Log[] | undefined, block: Header, filte
     byPosition.set(log.logIndex, log);
   }
   return [...byPosition.values()].sort((a, b) => a.logIndex - b.logIndex);
+}
+
+// Check the range envelope before verifying each block against both views and the receipt oracle.
+export function logsByHeight(raw: readonly Log[] | undefined, from: number, to: number) {
+  requireEvidence(raw !== undefined, 'logs_unavailable');
+  requireEvidence(Array.isArray(raw) && raw.length <= (to - from + 1) * MAX_LOGS, 'log_response_limit');
+  const byHeight = new Map<number, Log[]>();
+  for (const log of raw) {
+    requireEvidence(log && natural(log.blockNumber) && log.blockNumber >= from && log.blockNumber <= to,
+      'log_outside_range');
+    const logs = byHeight.get(log.blockNumber) ?? [];
+    requireEvidence(logs.length < MAX_LOGS, 'log_response_limit');
+    logs.push(log);
+    byHeight.set(log.blockNumber, logs);
+  }
+  return byHeight;
 }
 
 export function verifyLogs(

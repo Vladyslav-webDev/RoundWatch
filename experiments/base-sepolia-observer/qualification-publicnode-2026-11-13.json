@@ -1,0 +1,603 @@
+{
+  "status": "unresolved",
+  "chainId": 84532,
+  "transferFilter": {
+    "address": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+    "topics": [
+      "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    ]
+  },
+  "startedAt": "2026-11-13T14:36:00.993Z",
+  "elapsedMs": 1824.27,
+  "limitsPerProvider": {
+    "maxRequests": 24,
+    "maxElapsedMs": 30000,
+    "requestTimeoutMs": 4000,
+    "maxResponseBytes": 262144,
+    "maxTotalResponseBytes": 1048576,
+    "maxRangeBlocks": 4
+  },
+  "plannedHistoricalRange": {
+    "label": "historical",
+    "fromHeight": 42123681,
+    "toHeight": 42123684
+  },
+  "historicalCanary": {
+    "blockNumber": 42123682,
+    "transactionHash": "0xc4b59822afe0905e528e665631f024e798575853f6f1b7d11aff69f04d25237a"
+  },
+  "sampledCommonFinalizedHeight": 58287675,
+  "finalizedTagSkewBlocks": 0,
+  "plannedRecentRange": {
+    "label": "recent_finalized",
+    "fromHeight": 58287672,
+    "toHeight": 58287675
+  },
+  "ranges": [
+    {
+      "label": "historical",
+      "status": "unresolved",
+      "reason": "insufficient_provider_coverage"
+    },
+    {
+      "label": "recent_finalized",
+      "status": "operational_agreement"
+    }
+  ],
+  "providers": [
+    {
+      "id": "base",
+      "endpoint": "https://sepolia.base.org",
+      "tag": {
+        "chainId": 84532,
+        "finalized": {
+          "height": 58287675,
+          "hash": "0x914f8bfc3eafbfd5929b4d9d8ca7c630ac8540d2a5d61b8713ac666ad205733c",
+          "parentHash": "0x152c48f946f5779bd664cdde6bb6d0a2f1b42c6323058521c09467e039e9ef56",
+          "timestamp": 1794579403,
+          "transactionCount": 7
+        },
+        "latest": {
+          "height": 58293472,
+          "hash": "0x68fdfbfd89e0d6a78803ad15947f36eb62eff387d895b00f2211406a42143fd7",
+          "parentHash": "0xd5d29bfe382a68c172036fa6ee9352e9d65159c24b3f0f173847e65172334ee1",
+          "timestamp": 1794580563,
+          "transactionCount": 5
+        },
+        "finalizedLag": {
+          "blocks": 5797,
+          "seconds": 1160
+        }
+      },
+      "ranges": [
+        {
+          "label": "historical",
+          "fromHeight": 42123681,
+          "toHeight": 42123684,
+          "blocks": 4,
+          "headers": [],
+          "cost": {
+            "headers": {
+              "requests": 1,
+              "requestBytes": 85,
+              "responseBytes": 134,
+              "summedLatencyMs": 113.45,
+              "maxLatencyMs": 113.45
+            },
+            "rangeLogs": {
+              "requests": 0,
+              "requestBytes": 0,
+              "responseBytes": 0,
+              "summedLatencyMs": 0,
+              "maxLatencyMs": null
+            },
+            "singleHeightLogs": {
+              "requests": 0,
+              "requestBytes": 0,
+              "responseBytes": 0,
+              "summedLatencyMs": 0,
+              "maxLatencyMs": null
+            }
+          },
+          "issue": {
+            "at": "numbered_header_42123680",
+            "reason": "rpc_remote_error"
+          }
+        },
+        {
+          "label": "recent_finalized",
+          "fromHeight": 58287672,
+          "toHeight": 58287675,
+          "blocks": 4,
+          "headers": [
+            {
+              "height": 58287671,
+              "hash": "0x4fbb609169f699f4d320624388eb136179339d2fb160de75ac4fb1e97b39beb3",
+              "parentHash": "0xf0d6a3fc3afdf2ee8a2016f9e9f24d056a6f3665dc5ba9d856bda076bcab0451",
+              "timestamp": 1794579403,
+              "transactionCount": 2
+            },
+            {
+              "height": 58287672,
+              "hash": "0x1db1dc1a3dbb23131f832b4a79e22cb590af317e53f51c4862e3b9e2e386494c",
+              "parentHash": "0x4fbb609169f699f4d320624388eb136179339d2fb160de75ac4fb1e97b39beb3",
+              "timestamp": 1794579403,
+              "transactionCount": 6
+            },
+            {
+              "height": 58287673,
+              "hash": "0x4824a5216ebd0ff3c719f567f4e62eb1bde0c426331c76ca67bd51bb2bf1f573",
+              "parentHash": "0x1db1dc1a3dbb23131f832b4a79e22cb590af317e53f51c4862e3b9e2e386494c",
+              "timestamp": 1794579403,
+              "transactionCount": 5
+            },
+            {
+              "height": 58287674,
+              "hash": "0x152c48f946f5779bd664cdde6bb6d0a2f1b42c6323058521c09467e039e9ef56",
+              "parentHash": "0x4824a5216ebd0ff3c719f567f4e62eb1bde0c426331c76ca67bd51bb2bf1f573",
+              "timestamp": 1794579403,
+              "transactionCount": 4
+            },
+            {
+              "height": 58287675,
+              "hash": "0x914f8bfc3eafbfd5929b4d9d8ca7c630ac8540d2a5d61b8713ac666ad205733c",
+              "parentHash": "0x152c48f946f5779bd664cdde6bb6d0a2f1b42c6323058521c09467e039e9ef56",
+              "timestamp": 1794579403,
+              "transactionCount": 7
+            }
+          ],
+          "headerDigest": "911041c74101b09015044ac6c4a8b9461663c54d561a6f1e856870b6c7d52a51",
+          "rangedLogCount": 1,
+          "singleHeightLogCount": 1,
+          "logsDigest": "007ab2afb22d05690f697d31585935a505dac2da53b17df73b716a260ad247ce",
+          "cost": {
+            "headers": {
+              "requests": 4,
+              "requestBytes": 340,
+              "responseBytes": 8394,
+              "summedLatencyMs": 468.26,
+              "maxLatencyMs": 130.17
+            },
+            "rangeLogs": {
+              "requests": 1,
+              "requestBytes": 242,
+              "responseBytes": 705,
+              "summedLatencyMs": 116.1,
+              "maxLatencyMs": 116.1
+            },
+            "singleHeightLogs": {
+              "requests": 4,
+              "requestBytes": 968,
+              "responseBytes": 820,
+              "summedLatencyMs": 550.14,
+              "maxLatencyMs": 194.04
+            }
+          },
+          "logRequestsSaved": 3
+        }
+      ],
+      "totals": {
+        "requests": 14,
+        "requestBytes": 1946,
+        "responseBytes": 16822,
+        "summedLatencyMs": 1822.22,
+        "maxLatencyMs": 194.04
+      },
+      "byMethod": {
+        "eth_chainId": {
+          "requests": 1,
+          "requestBytes": 59,
+          "responseBytes": 43,
+          "summedLatencyMs": 189.38,
+          "maxLatencyMs": 189.38
+        },
+        "eth_getBlockByNumber": {
+          "requests": 8,
+          "requestBytes": 677,
+          "responseBytes": 15254,
+          "summedLatencyMs": 966.6,
+          "maxLatencyMs": 150.84
+        },
+        "eth_getLogs": {
+          "requests": 5,
+          "requestBytes": 1210,
+          "responseBytes": 1525,
+          "summedLatencyMs": 666.24,
+          "maxLatencyMs": 194.04
+        }
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 43,
+          "durationMs": 189.378,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2288,
+          "durationMs": 150.83950000000004,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 82,
+          "responseBytes": 2150,
+          "durationMs": 110.35310000000004,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2288,
+          "durationMs": 123.70629999999994,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 134,
+          "durationMs": 113.44680000000005,
+          "outcome": "rpc_remote_error",
+          "httpStatus": 200,
+          "rpcCode": 4444
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 1939,
+          "durationMs": 110.80779999999993,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2222,
+          "durationMs": 118.55500000000006,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2152,
+          "durationMs": 130.16819999999996,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2081,
+          "durationMs": 108.72589999999991,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 705,
+          "durationMs": 116.09930000000008,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 38,
+          "durationMs": 118.63170000000014,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 706,
+          "durationMs": 194.0351999999998,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 38,
+          "durationMs": 116.17190000000005,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 38,
+          "durationMs": 121.2976000000001,
+          "outcome": "ok",
+          "httpStatus": 200
+        }
+      ]
+    },
+    {
+      "id": "publicnode",
+      "endpoint": "https://base-sepolia-rpc.publicnode.com",
+      "tag": {
+        "chainId": 84532,
+        "finalized": {
+          "height": 58287675,
+          "hash": "0x914f8bfc3eafbfd5929b4d9d8ca7c630ac8540d2a5d61b8713ac666ad205733c",
+          "parentHash": "0x152c48f946f5779bd664cdde6bb6d0a2f1b42c6323058521c09467e039e9ef56",
+          "timestamp": 1794579403,
+          "transactionCount": 7
+        },
+        "latest": {
+          "height": 58293471,
+          "hash": "0xd5d29bfe382a68c172036fa6ee9352e9d65159c24b3f0f173847e65172334ee1",
+          "parentHash": "0x5818277ff3118b880e0f2f80e6c67910da5ed465b26be3322c3d13204b4d4891",
+          "timestamp": 1794580563,
+          "transactionCount": 5
+        },
+        "finalizedLag": {
+          "blocks": 5796,
+          "seconds": 1160
+        }
+      },
+      "ranges": [
+        {
+          "label": "historical",
+          "fromHeight": 42123681,
+          "toHeight": 42123684,
+          "blocks": 4,
+          "headers": [],
+          "cost": {
+            "headers": {
+              "requests": 1,
+              "requestBytes": 85,
+              "responseBytes": 135,
+              "summedLatencyMs": 41.87,
+              "maxLatencyMs": 41.87
+            },
+            "rangeLogs": {
+              "requests": 0,
+              "requestBytes": 0,
+              "responseBytes": 0,
+              "summedLatencyMs": 0,
+              "maxLatencyMs": null
+            },
+            "singleHeightLogs": {
+              "requests": 0,
+              "requestBytes": 0,
+              "responseBytes": 0,
+              "summedLatencyMs": 0,
+              "maxLatencyMs": null
+            }
+          },
+          "issue": {
+            "at": "numbered_header_42123680",
+            "reason": "rpc_remote_error"
+          }
+        },
+        {
+          "label": "recent_finalized",
+          "fromHeight": 58287672,
+          "toHeight": 58287675,
+          "blocks": 4,
+          "headers": [
+            {
+              "height": 58287671,
+              "hash": "0x4fbb609169f699f4d320624388eb136179339d2fb160de75ac4fb1e97b39beb3",
+              "parentHash": "0xf0d6a3fc3afdf2ee8a2016f9e9f24d056a6f3665dc5ba9d856bda076bcab0451",
+              "timestamp": 1794579403,
+              "transactionCount": 2
+            },
+            {
+              "height": 58287672,
+              "hash": "0x1db1dc1a3dbb23131f832b4a79e22cb590af317e53f51c4862e3b9e2e386494c",
+              "parentHash": "0x4fbb609169f699f4d320624388eb136179339d2fb160de75ac4fb1e97b39beb3",
+              "timestamp": 1794579403,
+              "transactionCount": 6
+            },
+            {
+              "height": 58287673,
+              "hash": "0x4824a5216ebd0ff3c719f567f4e62eb1bde0c426331c76ca67bd51bb2bf1f573",
+              "parentHash": "0x1db1dc1a3dbb23131f832b4a79e22cb590af317e53f51c4862e3b9e2e386494c",
+              "timestamp": 1794579403,
+              "transactionCount": 5
+            },
+            {
+              "height": 58287674,
+              "hash": "0x152c48f946f5779bd664cdde6bb6d0a2f1b42c6323058521c09467e039e9ef56",
+              "parentHash": "0x4824a5216ebd0ff3c719f567f4e62eb1bde0c426331c76ca67bd51bb2bf1f573",
+              "timestamp": 1794579403,
+              "transactionCount": 4
+            },
+            {
+              "height": 58287675,
+              "hash": "0x914f8bfc3eafbfd5929b4d9d8ca7c630ac8540d2a5d61b8713ac666ad205733c",
+              "parentHash": "0x152c48f946f5779bd664cdde6bb6d0a2f1b42c6323058521c09467e039e9ef56",
+              "timestamp": 1794579403,
+              "transactionCount": 7
+            }
+          ],
+          "headerDigest": "911041c74101b09015044ac6c4a8b9461663c54d561a6f1e856870b6c7d52a51",
+          "rangedLogCount": 1,
+          "singleHeightLogCount": 1,
+          "logsDigest": "007ab2afb22d05690f697d31585935a505dac2da53b17df73b716a260ad247ce",
+          "cost": {
+            "headers": {
+              "requests": 4,
+              "requestBytes": 340,
+              "responseBytes": 8398,
+              "summedLatencyMs": 166.1,
+              "maxLatencyMs": 49.74
+            },
+            "rangeLogs": {
+              "requests": 1,
+              "requestBytes": 242,
+              "responseBytes": 705,
+              "summedLatencyMs": 35.41,
+              "maxLatencyMs": 35.41
+            },
+            "singleHeightLogs": {
+              "requests": 4,
+              "requestBytes": 968,
+              "responseBytes": 816,
+              "summedLatencyMs": 171.86,
+              "maxLatencyMs": 57.76
+            }
+          },
+          "logRequestsSaved": 3
+        }
+      ],
+      "totals": {
+        "requests": 14,
+        "requestBytes": 1946,
+        "responseBytes": 16828,
+        "summedLatencyMs": 680.08,
+        "maxLatencyMs": 111.67
+      },
+      "byMethod": {
+        "eth_chainId": {
+          "requests": 1,
+          "requestBytes": 59,
+          "responseBytes": 44,
+          "summedLatencyMs": 111.67,
+          "maxLatencyMs": 111.67
+        },
+        "eth_getBlockByNumber": {
+          "requests": 8,
+          "requestBytes": 677,
+          "responseBytes": 15263,
+          "summedLatencyMs": 361.15,
+          "maxLatencyMs": 72.44
+        },
+        "eth_getLogs": {
+          "requests": 5,
+          "requestBytes": 1210,
+          "responseBytes": 1521,
+          "summedLatencyMs": 207.27,
+          "maxLatencyMs": 57.76
+        }
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 44,
+          "durationMs": 111.66850000000001,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2289,
+          "durationMs": 72.4442,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 82,
+          "responseBytes": 2152,
+          "durationMs": 48.050099999999986,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2289,
+          "durationMs": 32.67579999999998,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 135,
+          "durationMs": 41.87110000000007,
+          "outcome": "rpc_remote_error",
+          "httpStatus": 200,
+          "rpcCode": 4444
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 1940,
+          "durationMs": 38.881500000000074,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2223,
+          "durationMs": 49.74350000000004,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2153,
+          "durationMs": 36.48760000000004,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2082,
+          "durationMs": 40.99170000000004,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 705,
+          "durationMs": 35.40859999999998,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 37,
+          "durationMs": 57.756200000000035,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 705,
+          "durationMs": 40.07209999999998,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 37,
+          "durationMs": 34.175500000000056,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 37,
+          "durationMs": 39.85649999999998,
+          "outcome": "ok",
+          "httpStatus": 200
+        }
+      ]
+    }
+  ]
+}

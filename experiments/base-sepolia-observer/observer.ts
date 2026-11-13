@@ -1,14 +1,23 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  CHAIN_ID, filterFor, normalizeHeader, normalizeWatch, requireEvidence, sameHeader, Unresolved, verifyLogs,
+  CHAIN_ID, filterFor, logsByHeight, normalizeHeader, normalizeWatch, requireEvidence, sameHeader, Unresolved,
+  verifyLogs,
 } from './evidence.ts';
-import type { EvidenceIds, FixtureEvidence, Header, WatchInput } from './evidence.ts';
+import type { EvidenceIds, FixtureEvidence, Header, RangeFixtureEvidence, WatchInput } from './evidence.ts';
 
+export const MAX_RANGE_BLOCKS = 16;
 type Outcome = 'unresolved' | 'matched' | 'ambiguous' | 'expired';
-type ReadKind = 'chain_id' | 'finalized' | 'header' | 'logs' | 'receipts';
+type ReadKind = 'chain_id' | 'finalized' | 'header' | 'logs' | 'range_logs' | 'receipts';
 type FaultPoint = 'before_arm_commit' | 'before_coverage_commit' | 'after_coverage_commit';
 type VerifiedLogs = ReturnType<typeof verifyLogs>;
+type Scan = { fixtures: FixtureEvidence } | { fixtures: RangeFixtureEvidence; maxBlocks: number };
+
+interface BlockCoverage {
+  block: Header;
+  basis: 'deadline' | 'verified_logs' | 'excluded_by_boundary';
+  verified?: VerifiedLogs;
+}
 
 interface WatchRow {
   spec: string;
@@ -156,14 +165,25 @@ export class Observer {
     return this.status(id);
   }
 
-  // One step accepts at most one next height. Calling it again after a stall retries from SQLite.
+  // CP1 keeps its single-height entry point and evidence contract.
   step(id: string, fixtures: FixtureEvidence): ReturnType<Observer['status']> {
+    return this.scan(id, { fixtures });
+  }
+
+  stepRange(id: string, fixtures: RangeFixtureEvidence, maxBlocks = MAX_RANGE_BLOCKS): ReturnType<Observer['status']> {
+    requireEvidence(Number.isInteger(maxBlocks) && maxBlocks >= 1 && maxBlocks <= MAX_RANGE_BLOCKS,
+      'invalid_range_limit');
+    return this.scan(id, { fixtures, maxBlocks });
+  }
+
+  // A retry starts at the durable cursor. Every block in the proposed range commits together.
+  private scan(id: string, scan: Scan): ReturnType<Observer['status']> {
     const row = this.row(id);
     if (row.status !== 'unresolved') return this.status(id);
     const watch = normalizeWatch(JSON.parse(row.spec));
     const cursor = JSON.parse(row.cursor) as Header;
     const priorHeads = row.finalized_heads ? JSON.parse(row.finalized_heads) as [Header, Header] : null;
-    const { views, oracle } = fixtures;
+    const { views, oracle } = scan.fixtures;
     const ids: EvidenceIds = [views[0].id, views[1].id, oracle.id];
 
     try {
@@ -220,35 +240,58 @@ export class Observer {
       requireEvidence(accepted.changes === 1, 'stale_step');
       requireEvidence(commonHeight > cursor.height, 'awaiting_finality');
 
-      const block = checkAt(cursor.height + 1);
-      requireEvidence(block.parentHash === cursor.hash && block.timestamp >= cursor.timestamp &&
-        block.timestamp <= commonHead.timestamp, 'non_contiguous_chain');
       const filter = filterFor(watch);
-      const isCutoff = block.timestamp >= watch.deadlineSec;
-      const eligible = block.height > watch.latestAtArm.height && block.timestamp >= watch.opensAtSec && !isCutoff;
-      let verified: VerifiedLogs | undefined;
-      if (eligible) {
-        const responses = views.map((view) => this.read(id, view.id, 'logs', String(block.height),
-          () => view.logs(block.height, filter)));
-        const receipts = this.read(id, oracle.id, 'receipts', block.hash, () => oracle.receipts(block.hash));
-        verified = verifyLogs(block, filter, watch.amountAtomic, [responses[0], responses[1]], receipts);
+      const count = Math.min(commonHeight - cursor.height, 'maxBlocks' in scan ? scan.maxBlocks : 1);
+      const coverage: BlockCoverage[] = [];
+      let last = cursor;
+      for (let offset = 1; offset <= count; offset++) {
+        const block = checkAt(cursor.height + offset);
+        requireEvidence(block.parentHash === last.hash && block.timestamp >= last.timestamp &&
+          block.timestamp <= commonHead.timestamp, 'non_contiguous_chain');
+        const isCutoff = block.timestamp >= watch.deadlineSec;
+        const eligible = block.height > watch.latestAtArm.height && block.timestamp >= watch.opensAtSec && !isCutoff;
+        coverage.push({ block, basis: isCutoff ? 'deadline' : eligible ? 'verified_logs' : 'excluded_by_boundary' });
+        last = block;
+        if (isCutoff) break;
       }
 
-      const basis = isCutoff ? 'deadline' : eligible ? 'verified_logs' : 'excluded_by_boundary';
-      const header = JSON.stringify(block);
-      const digest = verified ? createHash('sha256').update(JSON.stringify(verified.logs)).digest('hex') : null;
+      const eligible = coverage.filter(({ basis }) => basis === 'verified_logs');
+      const verify = (entry: BlockCoverage, responses: Parameters<typeof verifyLogs>[3]) => {
+        const receipts = this.read(id, oracle.id, 'receipts', entry.block.hash, () => oracle.receipts(entry.block.hash));
+        entry.verified = verifyLogs(entry.block, filter, watch.amountAtomic, responses, receipts);
+      };
+      if (eligible.length > 0 && 'maxBlocks' in scan) {
+        const from = eligible[0].block.height;
+        const to = eligible[eligible.length - 1].block.height;
+        const responses = scan.fixtures.views.map((view) => this.read(id, view.id, 'range_logs', `${from}:${to}`,
+          () => view.logsRange(from, to, filter)));
+        const left = logsByHeight(responses[0], from, to);
+        const right = logsByHeight(responses[1], from, to);
+        for (const entry of eligible) verify(entry, [left.get(entry.block.height) ?? [], right.get(entry.block.height) ?? []]);
+      } else if (eligible.length > 0) {
+        const entry = eligible[0];
+        const responses = views.map((view) => this.read(id, view.id, 'logs', String(entry.block.height),
+          () => view.logs(entry.block.height, filter)));
+        verify(entry, [responses[0], responses[1]]);
+      }
+
+      const isCutoff = coverage[coverage.length - 1].basis === 'deadline';
+      const nextCursor = JSON.stringify(last);
       this.transaction(() => {
         const current = this.row(id);
         requireEvidence(current.status === 'unresolved' && current.cursor === row.cursor &&
           current.finalized_heads === finality, 'stale_step');
-        this.db.prepare('INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-          id, block.height, header, finality, row.evidence_ids, JSON.stringify(filter), basis,
-          verified?.logs.length ?? null, digest, verified?.receiptCount ?? null,
-        );
-        for (const candidate of verified?.candidates ?? []) {
-          this.db.prepare('INSERT INTO occurrences VALUES (?, ?, ?, ?, ?, ?)').run(
-            CHAIN_ID, block.hash, candidate.log.logIndex, id, block.height, JSON.stringify(candidate),
+        const insertCoverage = this.db.prepare('INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        const insertOccurrence = this.db.prepare('INSERT INTO occurrences VALUES (?, ?, ?, ?, ?, ?)');
+        for (const { block, basis, verified } of coverage) {
+          const digest = verified ? createHash('sha256').update(JSON.stringify(verified.logs)).digest('hex') : null;
+          insertCoverage.run(
+            id, block.height, JSON.stringify(block), finality, row.evidence_ids, JSON.stringify(filter), basis,
+            verified?.logs.length ?? null, digest, verified?.receiptCount ?? null,
           );
+          for (const candidate of verified?.candidates ?? []) {
+            insertOccurrence.run(CHAIN_ID, block.hash, candidate.log.logIndex, id, block.height, JSON.stringify(candidate));
+          }
         }
         let status: Outcome = 'unresolved';
         if (isCutoff) {
@@ -258,7 +301,7 @@ export class Observer {
         this.db.prepare(`
           UPDATE watches SET cursor = ?, status = ?, reason = ?, cutoff = ?
           WHERE id = ?
-        `).run(header, status, isCutoff ? null : 'awaiting_coverage', isCutoff ? header : null, id);
+        `).run(nextCursor, status, isCutoff ? null : 'awaiting_coverage', isCutoff ? nextCursor : null, id);
         this.fault?.('before_coverage_commit');
       });
       this.fault?.('after_coverage_commit');

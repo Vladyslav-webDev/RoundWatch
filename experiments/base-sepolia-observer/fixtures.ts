@@ -1,5 +1,5 @@
 import { addressTopic, CHAIN_ID, inFilter, TRANSFER, USDC } from './evidence.ts';
-import type { EvidenceIds, FixtureEvidence, Header, Log, Receipt, WatchInput } from './evidence.ts';
+import type { EvidenceIds, Header, Log, RangeFixtureEvidence, Receipt, WatchInput } from './evidence.ts';
 
 export const SOURCES: EvidenceIds = ['view-a', 'view-b', 'receipt-oracle'];
 const address = (n: number) => `0x${n.toString(16).padStart(40, '0')}`;
@@ -57,17 +57,26 @@ export function scenario(
   return { blocks, watch };
 }
 
-export function evidence(blocks: readonly BlockFixture[], finalizedHeight = blocks.at(-1)!.header.height): FixtureEvidence {
+export function evidence(blocks: readonly BlockFixture[], finalizedHeight = blocks.at(-1)!.header.height): RangeFixtureEvidence {
   const byHeight = new Map(blocks.map((entry) => [entry.header.height, entry]));
   const byHash = new Map(blocks.map((entry) => [entry.header.hash, entry]));
   // The fixture range responses are materialized independently of receipt reads so either can be faulted.
   const rangeLogs = new Map(blocks.map((entry) => [entry.header.height, entry.receipts.flatMap(({ logs }) => logs)]));
-  const view = (id: string): FixtureEvidence['views'][number] => ({
+  const view = (id: string): RangeFixtureEvidence['views'][number] => ({
     id,
     chainId: () => CHAIN_ID,
     finalized: () => byHeight.get(finalizedHeight)?.header,
     header: (height) => byHeight.get(height)?.header,
     logs: (height, filter) => rangeLogs.get(height)?.filter((log) => inFilter(log, filter)),
+    logsRange: (from, to, filter) => {
+      const result: Log[] = [];
+      for (let height = from; height <= to; height++) {
+        const logs = rangeLogs.get(height);
+        if (!logs) return undefined;
+        for (const log of logs) if (inFilter(log, filter)) result.push(log);
+      }
+      return result;
+    },
   });
   return {
     views: [view(SOURCES[0]), view(SOURCES[1])],

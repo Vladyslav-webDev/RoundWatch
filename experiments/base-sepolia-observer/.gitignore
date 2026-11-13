@@ -1,2 +1,5 @@
 /.cp1-test-*/
+/.cp2-test-*/
 /cp1-demo.sqlite*
+/cp2-demo.sqlite*
+/cp2a-complete.diff
