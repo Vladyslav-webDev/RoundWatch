@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node demo.ts",
+    "test": "node --test observer.test.ts"
+  }
+}
