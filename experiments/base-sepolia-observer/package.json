@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node demo.ts",
+    "demo:cp2": "node demo.ts --cp2",
+    "qualify": "node qualification.ts",
+    "test": "node --test"
+  }
+}
