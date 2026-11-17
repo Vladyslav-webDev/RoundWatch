@@ -1,0 +1,225 @@
+{
+  "startedAt": "2026-11-17T14:09:41.486Z",
+  "elapsedMs": 635.89,
+  "chainId": 84532,
+  "sampleMode": "predecessor",
+  "status": "CAPABILITY_SAMPLE",
+  "evidence": {
+    "headerAgreement": "PROVIDER_CORROBORATED",
+    "authenticatedFinality": false,
+    "receiptsRootRecomputed": true,
+    "providerReportedRootMatched": true,
+    "verifiedCoverage": "BLOCKED"
+  },
+  "sample": {
+    "height": 60006031,
+    "hash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+    "parentHash": "0x7025584e21f5d45c1ba07556929f6dc769788c945fa13b34f4624c70316bed2f",
+    "timestamp": 1794923075,
+    "transactionCount": 3,
+    "receiptsRoot": "0xd4bae5d465e13dc7d72703800f5a72aa8a47607f14c764d90d8df951467fe2cc"
+  },
+  "limits": {
+    "sampledNumberedHeights": 1,
+    "fallbackTransactionsPerProvider": 8,
+    "finalizedTagMaxAgeSeconds": 3600,
+    "clockSkewSeconds": 30,
+    "perProvider": {
+      "maxRequests": 12,
+      "maxElapsedMs": 20000,
+      "requestTimeoutMs": 3000,
+      "maxResponseBytes": 262144,
+      "maxTotalResponseBytes": 1048576,
+      "maxRangeBlocks": 1,
+      "maxRequestBytes": 512
+    },
+    "maxAggregateRequests": 24,
+    "maxAggregateRequestBytes": 12288,
+    "maxAggregateDecodedResponseBytes": 2097152
+  },
+  "totals": {
+    "requests": 8,
+    "requestBytes": 616,
+    "decodedResponseBytes": 30294
+  },
+  "providers": [
+    {
+      "id": "base",
+      "endpoint": "https://sepolia.base.org",
+      "finalizedTag": {
+        "height": 60006032,
+        "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+        "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "timestamp": 1794923075,
+        "transactionCount": 9,
+        "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+      },
+      "numberedBlock": {
+        "height": 60006031,
+        "hash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "parentHash": "0x7025584e21f5d45c1ba07556929f6dc769788c945fa13b34f4624c70316bed2f",
+        "timestamp": 1794923075,
+        "transactionCount": 3,
+        "receiptsRoot": "0xd4bae5d465e13dc7d72703800f5a72aa8a47607f14c764d90d8df951467fe2cc"
+      },
+      "receiptCapabilities": {
+        "batch": {
+          "receiptCount": 3,
+          "types": {
+            "0x7e": 2,
+            "0x2": 1
+          },
+          "withDepositNonce": 2,
+          "withDepositReceiptVersion": 2,
+          "reportedRoot": {
+            "matched": true,
+            "recomputed": true
+          }
+        },
+        "fallback": {
+          "reason": "batch_returned_ordered_set"
+        }
+      },
+      "totals": {
+        "requests": 4,
+        "requestBytes": 308,
+        "decodedResponseBytes": 15146
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 43,
+          "durationMs": 214.32,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": []
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2427,
+          "durationMs": 178.04,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "finalized",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2011,
+          "durationMs": 118.62,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e8f",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockReceipts",
+          "requestBytes": 79,
+          "responseBytes": 10665,
+          "durationMs": 121.89,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e8f"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "publicnode",
+      "endpoint": "https://base-sepolia-rpc.publicnode.com",
+      "finalizedTag": {
+        "height": 60006032,
+        "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+        "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "timestamp": 1794923075,
+        "transactionCount": 9,
+        "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+      },
+      "numberedBlock": {
+        "height": 60006031,
+        "hash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "parentHash": "0x7025584e21f5d45c1ba07556929f6dc769788c945fa13b34f4624c70316bed2f",
+        "timestamp": 1794923075,
+        "transactionCount": 3,
+        "receiptsRoot": "0xd4bae5d465e13dc7d72703800f5a72aa8a47607f14c764d90d8df951467fe2cc"
+      },
+      "receiptCapabilities": {
+        "batch": {
+          "receiptCount": 3,
+          "types": {
+            "0x7e": 2,
+            "0x2": 1
+          },
+          "withDepositNonce": 2,
+          "withDepositReceiptVersion": 2,
+          "reportedRoot": {
+            "matched": true,
+            "recomputed": true
+          }
+        },
+        "fallback": {
+          "reason": "batch_returned_ordered_set"
+        }
+      },
+      "totals": {
+        "requests": 4,
+        "requestBytes": 308,
+        "decodedResponseBytes": 15148
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 44,
+          "durationMs": 116.26,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": []
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2428,
+          "durationMs": 96.93,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "finalized",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2012,
+          "durationMs": 38.97,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e8f",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockReceipts",
+          "requestBytes": 79,
+          "responseBytes": 10664,
+          "durationMs": 51.5,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e8f"
+          ]
+        }
+      ]
+    }
+  ]
+}

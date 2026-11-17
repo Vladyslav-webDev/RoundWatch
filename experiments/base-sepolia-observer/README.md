@@ -4,11 +4,14 @@ The experiment observes Circle USDC on Base Sepolia (`eip155:84532`, contract `0
 
 CP2B connects bounded public RPC reads to durable nonterminal observations. The finite command `node experiments/base-sepolia-observer/live.ts publicnode` samples recent finalized history, uses a disposable SQLite database and reports redacted measurements after reopening it. A receipt-backed candidate remains `unresolved` with zero verified coverage. See [CP2B.md](CP2B.md) for the live results, reproducible request sequence, evidence limits and review handoff.
 
+CP2C exercises Bloom exclusion, receipt-root reconstruction and contiguous coverage against trusted offline fixtures. The bounded public RPC probe measures receipt availability. See [CP2C.md](CP2C.md) for the independent finality requirements, results and review patch.
+
 ## CP1 and CP2A regression
 
 From the repository root, run:
 
 ```powershell
+npm --prefix experiments/base-sepolia-observer ci
 node --test experiments/base-sepolia-observer/*.test.ts
 pnpm -C apps/server exec tsc -p ../../experiments/base-sepolia-observer/tsconfig.json
 node experiments/base-sepolia-observer/demo.ts --cp2

@@ -1,6 +1,10 @@
 {
+  "name": "base-sepolia-observer",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@noble/hashes": "2.4.0"
+  },
   "scripts": {
     "demo": "node demo.ts",
     "demo:cp2": "node demo.ts --cp2",

@@ -1,0 +1,200 @@
+{
+  "startedAt": "2026-11-17T14:07:15.976Z",
+  "elapsedMs": 750.13,
+  "chainId": 84532,
+  "status": "BLOCKED",
+  "failure": "ordered_receipt_set_unavailable",
+  "evidence": {
+    "headerAgreement": "PROVIDER_CORROBORATED",
+    "authenticatedFinality": false,
+    "receiptsRootRecomputed": false,
+    "verifiedCoverage": "BLOCKED"
+  },
+  "sample": {
+    "height": 60006032,
+    "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+    "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+    "timestamp": 1794923075,
+    "transactionCount": 9,
+    "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+  },
+  "limits": {
+    "sampledNumberedHeights": 1,
+    "fallbackTransactionsPerProvider": 8,
+    "finalizedTagMaxAgeSeconds": 3600,
+    "clockSkewSeconds": 30,
+    "perProvider": {
+      "maxRequests": 12,
+      "maxElapsedMs": 20000,
+      "requestTimeoutMs": 3000,
+      "maxResponseBytes": 262144,
+      "maxTotalResponseBytes": 1048576,
+      "maxRangeBlocks": 1,
+      "maxRequestBytes": 512
+    },
+    "maxAggregateRequests": 24,
+    "maxAggregateRequestBytes": 12288,
+    "maxAggregateDecodedResponseBytes": 2097152
+  },
+  "totals": {
+    "requests": 8,
+    "requestBytes": 616,
+    "decodedResponseBytes": 534085
+  },
+  "providers": [
+    {
+      "id": "base",
+      "endpoint": "https://sepolia.base.org",
+      "finalizedTag": {
+        "height": 60006032,
+        "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+        "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "timestamp": 1794923075,
+        "transactionCount": 9,
+        "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+      },
+      "numberedBlock": {
+        "height": 60006032,
+        "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+        "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "timestamp": 1794923075,
+        "transactionCount": 9,
+        "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+      },
+      "receiptCapabilities": {
+        "batchFailure": "rpc_response_byte_limit",
+        "fallback": {
+          "reason": "transaction_limit"
+        }
+      },
+      "totals": {
+        "requests": 4,
+        "requestBytes": 308,
+        "decodedResponseBytes": 267041
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 43,
+          "durationMs": 207.34,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": []
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2427,
+          "durationMs": 171.3,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "finalized",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2427,
+          "durationMs": 193.78,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e90",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockReceipts",
+          "requestBytes": 79,
+          "responseBytes": 262144,
+          "durationMs": 176.16,
+          "outcome": "rpc_response_byte_limit",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e90"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "publicnode",
+      "endpoint": "https://base-sepolia-rpc.publicnode.com",
+      "finalizedTag": {
+        "height": 60006032,
+        "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+        "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "timestamp": 1794923075,
+        "transactionCount": 9,
+        "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+      },
+      "numberedBlock": {
+        "height": 60006032,
+        "hash": "0x221d6e2e36cc5587687f2e4df30de74785466bed84fcb9ce1e347769cf1fcec3",
+        "parentHash": "0xfc30c7211361ab269c890ceecf0a1644b6e90042c880195a7d8c1ca82180a37b",
+        "timestamp": 1794923075,
+        "transactionCount": 9,
+        "receiptsRoot": "0x556a10af27ff514e9d2c7eb68b6c94430f02e09bb911e376bd8382035f1e895f"
+      },
+      "receiptCapabilities": {
+        "batchFailure": "rpc_response_byte_limit",
+        "fallback": {
+          "reason": "transaction_limit"
+        }
+      },
+      "totals": {
+        "requests": 4,
+        "requestBytes": 308,
+        "decodedResponseBytes": 267044
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 44,
+          "durationMs": 118.04,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": []
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2428,
+          "durationMs": 96.01,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "finalized",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2428,
+          "durationMs": 44.59,
+          "outcome": "ok",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e90",
+            false
+          ]
+        },
+        {
+          "method": "eth_getBlockReceipts",
+          "requestBytes": 79,
+          "responseBytes": 262144,
+          "durationMs": 141.89,
+          "outcome": "rpc_response_byte_limit",
+          "httpStatus": 200,
+          "params": [
+            "0x3939e90"
+          ]
+        }
+      ]
+    }
+  ]
+}

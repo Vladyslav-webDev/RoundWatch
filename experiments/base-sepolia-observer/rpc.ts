@@ -2,7 +2,8 @@ import { CHAIN_ID, TRANSFER, USDC } from './evidence.ts';
 import type { Filter, Header, Log, Receipt } from './evidence.ts';
 
 type BlockReference = number | 'latest' | 'finalized';
-type RpcMethod = 'eth_chainId' | 'eth_getBlockByNumber' | 'eth_getLogs' | 'eth_getTransactionReceipt';
+type RpcMethod = 'eth_chainId' | 'eth_getBlockByNumber' | 'eth_getLogs' | 'eth_getTransactionReceipt' |
+  'eth_getBlockReceipts';
 
 export const BASE_RPC_ENDPOINT = Object.freeze({ id: 'base', endpoint: 'https://sepolia.base.org' });
 export const SECONDARY_RPC_ENDPOINTS = Object.freeze({
@@ -18,6 +19,18 @@ export interface HistoricalRpcProvider {
   header(block: BlockReference): Promise<Header>;
   logs(fromHeight: number, toHeight: number, filter?: Filter): Promise<readonly Log[]>;
   receipt(transactionHash: string): Promise<Receipt>;
+}
+
+export interface ReceiptBlock extends Header {
+  readonly receiptsRoot: string;
+  readonly logsBloom: string;
+}
+
+export interface ReceiptProbeFields {
+  readonly raw: Readonly<Record<string, unknown>>;
+  readonly type: string | null;
+  readonly depositNonce: boolean;
+  readonly depositReceiptVersion: boolean;
 }
 
 export interface RpcLimits {
@@ -161,6 +174,22 @@ function parseReceipt(raw: unknown, expectedHash: string): Receipt {
   return { blockHash, blockNumber, transactionHash, transactionIndex, status, logs };
 }
 
+function parseReceiptProbeFields(raw: unknown, block: Header, index: number): ReceiptProbeFields {
+  const receipt = parseReceipt(raw, block.transactions[index]);
+  check(receipt.blockHash === block.hash && receipt.blockNumber === block.height && receipt.transactionIndex === index,
+    'receipt_block_position_disagreement');
+  const fields = object(raw, 'invalid_receipt');
+  hex(fields.logsBloom, 256, 'invalid_receipt_bloom');
+  quantity(fields.cumulativeGasUsed, 'invalid_receipt_cumulative_gas');
+  const type = fields.type === undefined ? null : `0x${quantity(fields.type, 'invalid_receipt_type').toString(16)}`;
+  return {
+    raw: fields,
+    type,
+    depositNonce: fields.depositNonce !== undefined && fields.depositNonce !== null,
+    depositReceiptVersion: fields.depositReceiptVersion !== undefined && fields.depositReceiptVersion !== null,
+  };
+}
+
 function usdcFilter(filter: Filter): Filter {
   const reason = 'invalid_usdc_filter';
   check(filter, reason);
@@ -228,6 +257,20 @@ export class BaseSepoliaRpc implements HistoricalRpcProvider {
     return this.#request('eth_getBlockByNumber', [reference, false], (result) => parseHeader(result, block));
   }
 
+  async receiptBlock(block: number | 'finalized'): Promise<ReceiptBlock> {
+    check(this.#verifiedChain, 'base_sepolia_not_verified');
+    const reference = block === 'finalized' ? block : blockNumber(block);
+    return this.#request('eth_getBlockByNumber', [reference, false], (result) => {
+      const header = parseHeader(result, block);
+      const fields = object(result, 'invalid_header');
+      return {
+        ...header,
+        receiptsRoot: hex(fields.receiptsRoot, 32, 'invalid_receipts_root'),
+        logsBloom: hex(fields.logsBloom, 256, 'invalid_header_bloom'),
+      };
+    });
+  }
+
   async logs(fromHeight: number, toHeight: number, filter: Filter = USDC_TRANSFERS): Promise<readonly Log[]> {
     check(this.#verifiedChain, 'base_sepolia_not_verified');
     const fromBlock = blockNumber(fromHeight);
@@ -248,6 +291,22 @@ export class BaseSepoliaRpc implements HistoricalRpcProvider {
     check(this.#verifiedChain, 'base_sepolia_not_verified');
     const hash = hex(transactionHash, 32, 'invalid_receipt_transaction_hash');
     return this.#request('eth_getTransactionReceipt', [hash], (result) => parseReceipt(result, hash));
+  }
+
+  async blockReceipts(block: Header): Promise<readonly ReceiptProbeFields[]> {
+    check(this.#verifiedChain, 'base_sepolia_not_verified');
+    return this.#request('eth_getBlockReceipts', [blockNumber(block.height)], (result) => {
+      check(result !== null, 'block_receipts_unavailable');
+      const receipts = array(result, 'invalid_block_receipts');
+      check(receipts.length === block.transactions.length, 'receipt_count_disagreement');
+      return receipts.map((receipt, index) => parseReceiptProbeFields(receipt, block, index));
+    });
+  }
+
+  async transactionReceiptFields(block: Header, index: number): Promise<ReceiptProbeFields> {
+    check(this.#verifiedChain, 'base_sepolia_not_verified');
+    const hash = hex(block.transactions[index], 32, 'invalid_receipt_transaction_hash');
+    return this.#request('eth_getTransactionReceipt', [hash], (result) => parseReceiptProbeFields(result, block, index));
   }
 
   async #request<T>(method: RpcMethod, params: unknown[], parse: (value: unknown) => T): Promise<T> {
