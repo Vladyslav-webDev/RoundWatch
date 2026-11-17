@@ -119,15 +119,11 @@ export function sameHeader(a: Header, b: Header): boolean {
 export function normalizeWatch(input: WatchInput): Readonly<WatchInput> {
   const reason = 'invalid_watch';
   const token = hex(input.token, 20, reason);
-  const sender = hex(input.sender, 20, reason);
-  const recipient = hex(input.recipient, 20, reason);
+  const { sender, recipient, amountAtomic } = normalizeTransferTuple(input);
   const latestAtArm = normalizeHeader(input.latestAtArm);
   const finalizedAtArm = normalizeHeader(input.finalizedAtArm);
   requireEvidence(typeof input.id === 'string' && /^[a-z0-9_-]{1,64}$/i.test(input.id) &&
-    input.chainId === CHAIN_ID && token === USDC && sender !== recipient &&
-    sender !== ZERO_ADDRESS && recipient !== ZERO_ADDRESS, reason);
-  requireEvidence(typeof input.amountAtomic === 'string' && input.amountAtomic.length <= 78 &&
-    /^[1-9][0-9]*$/.test(input.amountAtomic) && BigInt(input.amountAtomic) < 2n ** 256n, reason);
+    input.chainId === CHAIN_ID && token === USDC, reason);
   requireEvidence(natural(input.armedAtSec) && natural(input.opensAtSec) &&
     natural(input.deadlineSec) && input.armedAtSec < input.opensAtSec &&
     input.opensAtSec < input.deadlineSec && latestAtArm.timestamp < input.opensAtSec &&
@@ -135,17 +131,29 @@ export function normalizeWatch(input: WatchInput): Readonly<WatchInput> {
     (finalizedAtArm.height < latestAtArm.height || sameHeader(finalizedAtArm, latestAtArm)) &&
     natural(input.workLimit) && input.workLimit > 0 && input.workLimit <= 100_000, reason);
   return Object.freeze({
-    id: input.id, chainId: CHAIN_ID, token, sender, recipient, amountAtomic: input.amountAtomic,
+    id: input.id, chainId: CHAIN_ID, token, sender, recipient, amountAtomic,
     latestAtArm, finalizedAtArm, armedAtSec: input.armedAtSec, opensAtSec: input.opensAtSec,
     deadlineSec: input.deadlineSec, workLimit: input.workLimit,
   });
+}
+
+export function normalizeTransferTuple(
+  input: Pick<WatchInput, 'sender' | 'recipient' | 'amountAtomic'>, reason = 'invalid_watch',
+) {
+  const sender = hex(input.sender, 20, reason);
+  const recipient = hex(input.recipient, 20, reason);
+  const { amountAtomic } = input;
+  requireEvidence(sender !== recipient && sender !== ZERO_ADDRESS && recipient !== ZERO_ADDRESS &&
+    typeof amountAtomic === 'string' && amountAtomic.length <= 78 &&
+    /^[1-9][0-9]*$/.test(amountAtomic) && BigInt(amountAtomic) < 2n ** 256n, reason);
+  return { sender, recipient, amountAtomic };
 }
 
 export function addressTopic(address: string): string {
   return `0x${address.slice(2).padStart(64, '0')}`;
 }
 
-export function filterFor(watch: Readonly<WatchInput>): Filter {
+export function filterFor(watch: Readonly<Pick<WatchInput, 'token' | 'sender' | 'recipient'>>): Filter {
   return Object.freeze({
     address: watch.token,
     topics: Object.freeze([TRANSFER, addressTopic(watch.sender), addressTopic(watch.recipient)]),

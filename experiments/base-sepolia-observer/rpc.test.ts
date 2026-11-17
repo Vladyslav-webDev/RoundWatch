@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CHAIN_ID, TRANSFER, USDC } from './evidence.ts';
-import { BaseSepoliaRpc, RpcReadError } from './rpc.ts';
+import { BaseSepoliaRpc, MAX_RECEIPT_LOGS, RpcReadError } from './rpc.ts';
 import type { RpcLimits } from './rpc.ts';
 
 const endpoint = 'https://rpc.example.invalid/';
@@ -18,6 +18,9 @@ const rawLog = {
   address: USDC, topics: [TRANSFER, ...parties], data: `0x${'0'.repeat(63)}1`,
   blockNumber: '0x2', blockHash: hash, transactionHash, transactionIndex: '0x0',
   logIndex: '0x200', removed: false,
+};
+const rawReceipt = {
+  blockHash: hash, blockNumber: '0x2', transactionHash, transactionIndex: '0x0', status: '0x1', logs: [rawLog],
 };
 
 interface RequestBody { jsonrpc: string; id: number; method: string; params: unknown[] }
@@ -46,7 +49,8 @@ function reason(reason: string) {
 test('sends only the intended Base Sepolia reads and measures the encoded bodies', async () => {
   const bodies: RequestBody[] = [];
   const block = { number: '0x2', hash, parentHash, timestamp: '0x123', transactions: [transactionHash] };
-  const results = [chainQuantity, block, [rawLog]];
+  const unrelated = { ...rawLog, address: `0x${'ee'.repeat(20)}`, topics: [], data: '0x', logIndex: '0x201' };
+  const results = [chainQuantity, block, [rawLog], { ...rawReceipt, logs: [rawLog, unrelated] }];
   const rpc = new BaseSepoliaRpc('fixture', endpoint, limits, async (url, init) => {
     assert.equal(String(url), endpoint);
     assert.equal(init?.method, 'POST');
@@ -61,10 +65,15 @@ test('sends only the intended Base Sepolia reads and measures the encoded bodies
   });
   const [log] = await rpc.logs(1, 3, { address: USDC, topics: [TRANSFER, ...parties] });
   assert.equal(log.logIndex, 512);
+  assert.deepEqual(await rpc.receipt(`0x${'CC'.repeat(32)}`), {
+    blockHash: hash, blockNumber: 2, transactionHash, transactionIndex: 0, status: 1,
+    logs: [log, { ...log, address: unrelated.address, topics: [], data: '0x', logIndex: 513 }],
+  });
   assert.deepEqual(bodies.map(({ method, params }) => [method, params]), [
     ['eth_chainId', []],
     ['eth_getBlockByNumber', ['finalized', false]],
     ['eth_getLogs', [{ fromBlock: '0x1', toBlock: '0x3', address: USDC, topics: [TRANSFER, ...parties] }]],
+    ['eth_getTransactionReceipt', [transactionHash]],
   ]);
   for (const [index, measurement] of rpc.metrics().entries()) {
     assert.equal(measurement.requestBytes, Buffer.byteLength(JSON.stringify(bodies[index])));
@@ -76,8 +85,10 @@ test('sends only the intended Base Sepolia reads and measures the encoded bodies
 
 test('blocks non-Base chains, out-of-bounds ranges and non-USDC filters before sending a read', async () => {
   const wrongChain = fromResults(['0x1']);
+  await assert.rejects(wrongChain.receipt(transactionHash), reason('base_sepolia_not_verified'));
   assert.equal(await wrongChain.chainId(), 1);
   await assert.rejects(wrongChain.header('finalized'), reason('base_sepolia_not_verified'));
+  await assert.rejects(wrongChain.receipt(transactionHash), reason('base_sepolia_not_verified'));
   assert.equal(wrongChain.metrics().length, 1);
 
   const rpc = fromResults([chainQuantity]);
@@ -85,7 +96,57 @@ test('blocks non-Base chains, out-of-bounds ranges and non-USDC filters before s
   await assert.rejects(rpc.logs(1, 4), reason('log_range_limit'));
   await assert.rejects(rpc.logs(1, 1, { address: `0x${'01'.repeat(20)}`, topics: [TRANSFER] }),
     reason('invalid_usdc_filter'));
+  await assert.rejects(rpc.receipt('0x01'), reason('invalid_receipt_transaction_hash'));
   assert.equal(rpc.metrics().length, 1);
+});
+
+test('rejects missing and malformed transaction receipt evidence and charges each attempt', async () => {
+  const rpc = fromResults([
+    chainQuantity,
+    null,
+    { ...rawReceipt, status: '0x0', logs: [] },
+    { ...rawReceipt, status: '0x0' },
+    { ...rawReceipt, transactionHash: parentHash },
+    { ...rawReceipt, logs: [{ ...rawLog, blockHash: parentHash }] },
+    { ...rawReceipt, logs: [rawLog, rawLog] },
+    { ...rawReceipt, logs: [{ ...rawLog, removed: true }] },
+  ]);
+  await rpc.chainId();
+  await assert.rejects(rpc.receipt(transactionHash), reason('receipt_unavailable'));
+  assert.equal((await rpc.receipt(transactionHash)).status, 0);
+  await assert.rejects(rpc.receipt(transactionHash), reason('invalid_receipt'));
+  await assert.rejects(rpc.receipt(transactionHash), reason('receipt_transaction_disagreement'));
+  await assert.rejects(rpc.receipt(transactionHash), reason('receipt_log_position_disagreement'));
+  await assert.rejects(rpc.receipt(transactionHash), reason('receipt_log_position_disagreement'));
+  await assert.rejects(rpc.receipt(transactionHash), reason('invalid_receipt_log'));
+  await assert.rejects(rpc.receipt(transactionHash), reason('rpc_request_budget'));
+  assert.equal(rpc.metrics().length, limits.maxRequests);
+});
+
+test('makes rate limiting and pruned receipt history available as redacted diagnostics', async () => {
+  const rpc = new BaseSepoliaRpc('fixture', endpoint, limits, async (_url, init) => {
+    const { id } = requestBody(init);
+    if (id === 1) return new Response(resultBody(id, chainQuantity));
+    if (id === 2) return new Response('untrusted response', { status: 429 });
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id, error: { code: 4444, message: 'untrusted text' } }));
+  });
+  await rpc.chainId();
+  await assert.rejects(rpc.receipt(transactionHash), (error: unknown) => error instanceof RpcReadError &&
+    error.reason === 'rpc_http_status' && error.httpStatus === 429);
+  await assert.rejects(rpc.receipt(transactionHash), (error: unknown) => error instanceof RpcReadError &&
+    error.reason === 'rpc_remote_error' && error.rpcCode === 4444);
+  assert.deepEqual(rpc.metrics().slice(1).map(({ httpStatus, rpcCode }) => [httpStatus, rpcCode]),
+    [[429, undefined], [200, 4444]]);
+  assert.doesNotMatch(JSON.stringify(rpc.metrics()), /untrusted/);
+});
+
+test('bounds receipt log parsing below the body ceiling', async () => {
+  const rpc = fromResults([chainQuantity, { ...rawReceipt, logs: Array(MAX_RECEIPT_LOGS + 1).fill(rawLog) }], {
+    maxResponseBytes: 262_144, maxTotalResponseBytes: 1_048_576,
+  });
+  await rpc.chainId();
+  await assert.rejects(rpc.receipt(transactionHash), reason('receipt_log_count_limit'));
+  assert.equal(rpc.metrics().at(-1)?.outcome, 'receipt_log_count_limit');
 });
 
 test('rejects wrong numbered headers, malformed transfers and logs outside the requested range', async () => {
