@@ -1,6 +1,10 @@
-# Base Sepolia observer CP2A
+# Base Sepolia observer
 
-This experiment scans synthetic Circle USDC transfers on Base Sepolia (`eip155:84532`, contract `0x036CbD53842c5426634e7929541eC2318f3dCF7e`) and separately qualifies a small set of historical RPC reads. Node.js 24 provides SQLite and runs the TypeScript directly.
+The experiment observes Circle USDC on Base Sepolia (`eip155:84532`, contract `0x036CbD53842c5426634e7929541eC2318f3dCF7e`). Node.js 24 provides SQLite and runs the TypeScript directly.
+
+CP2B connects bounded public RPC reads to durable nonterminal observations. The finite command `node experiments/base-sepolia-observer/live.ts publicnode` samples recent finalized history, uses a disposable SQLite database and reports redacted measurements after reopening it. A receipt-backed candidate remains `unresolved` with zero verified coverage. See [CP2B.md](CP2B.md) for the live results, reproducible request sequence, evidence limits and review handoff.
+
+## CP1 and CP2A regression
 
 From the repository root, run:
 
@@ -13,7 +17,7 @@ node experiments/base-sepolia-observer/demo.ts
 
 The typecheck uses the repository's existing TypeScript and Node types. The demos print the watch, cursor, cutoff, outcome, candidate receipt evidence and per-source work counts. `--cp2` uses `cp2-demo.sqlite`; the original CP1 demo uses `cp1-demo.sqlite`. Running either again reopens its own database. On the fresh demo fixture, CP2 resolves the same six covered heights and one candidate in one step and 34 charged reads; CP1 takes six steps and 93 charged reads. The log reads fall from six single-height calls to two range calls; both versions read three fixture receipt sets. These are local logical reads, not RPC benchmarks.
 
-Local validation passed 52 tests, both demos and their reopens, the experiment typecheck, and `git diff --check`. The fresh checkout had no installed packages and pnpm's registry lookup failed in the sandbox. The typecheck used the existing CP1 checkout's pinned TypeScript 7.0.2 and `@types/node` 22.20.2 with this experiment's `tsconfig.json`.
+CP2A validation passed 52 tests, both demos and their reopens, the experiment typecheck, and `git diff --check`. The fresh checkout had no installed packages and pnpm's registry lookup failed in the sandbox. The typecheck used the existing CP1 checkout's pinned TypeScript 7.0.2 and `@types/node` 22.20.2 with this experiment's `tsconfig.json`.
 
 ## Evidence contract
 

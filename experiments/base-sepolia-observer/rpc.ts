@@ -1,14 +1,23 @@
 import { CHAIN_ID, TRANSFER, USDC } from './evidence.ts';
-import type { Filter, Header, Log } from './evidence.ts';
+import type { Filter, Header, Log, Receipt } from './evidence.ts';
 
 type BlockReference = number | 'latest' | 'finalized';
-type RpcMethod = 'eth_chainId' | 'eth_getBlockByNumber' | 'eth_getLogs';
+type RpcMethod = 'eth_chainId' | 'eth_getBlockByNumber' | 'eth_getLogs' | 'eth_getTransactionReceipt';
+
+export const BASE_RPC_ENDPOINT = Object.freeze({ id: 'base', endpoint: 'https://sepolia.base.org' });
+export const SECONDARY_RPC_ENDPOINTS = Object.freeze({
+  onfinality: Object.freeze({ id: 'onfinality', endpoint: 'https://base-sepolia.api.onfinality.io/public' }),
+  publicnode: Object.freeze({ id: 'publicnode', endpoint: 'https://base-sepolia-rpc.publicnode.com' }),
+});
+export const MAX_RPC_REQUEST_BYTES = 512;
+export const MAX_RECEIPT_LOGS = 256;
 
 export interface HistoricalRpcProvider {
   readonly id: string;
   chainId(): Promise<number>;
   header(block: BlockReference): Promise<Header>;
   logs(fromHeight: number, toHeight: number, filter?: Filter): Promise<readonly Log[]>;
+  receipt(transactionHash: string): Promise<Receipt>;
 }
 
 export interface RpcLimits {
@@ -33,16 +42,19 @@ export interface RpcMeasurement {
 
 export class RpcReadError extends Error {
   readonly reason: string;
+  readonly httpStatus?: number;
+  readonly rpcCode?: number;
 
-  constructor(reason: string) {
+  constructor(reason: string, diagnostics: { httpStatus?: number; rpcCode?: number } = {}) {
     super(reason);
     this.name = 'RpcReadError';
     this.reason = reason;
+    this.httpStatus = diagnostics.httpStatus;
+    this.rpcCode = diagnostics.rpcCode;
   }
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
-const MAX_REQUEST_BYTES = 512;
 const READ_CHUNK_BYTES = 16 * 1024;
 const ADDRESS_TOPIC_PREFIX = `0x${'0'.repeat(24)}`;
 const USDC_TRANSFERS: Filter = Object.freeze({ address: USDC, topics: Object.freeze([TRANSFER]) });
@@ -101,20 +113,52 @@ function parseHeader(raw: unknown, reference: BlockReference): Header {
   };
 }
 
-function parseLog(raw: unknown): Log {
-  const reason = 'invalid_log';
+function parseLog(raw: unknown, reason: string): Log {
   const log = object(raw, reason);
   const rawTopics = array(log.topics, reason);
-  check(log.removed === false && rawTopics.length === 3, reason);
-  const topics = rawTopics.map((topic) => hex(topic, 32, reason));
-  check(topics[0] === TRANSFER && topics.slice(1).every((topic) => topic.startsWith(ADDRESS_TOPIC_PREFIX)), reason);
+  const data = log.data;
+  check(log.removed === false && rawTopics.length <= 4 && typeof data === 'string' &&
+    data.startsWith('0x') && data.length % 2 === 0 && !/[^0-9a-f]/i.test(data.slice(2)), reason);
   return {
-    address: hex(log.address, 20, reason), topics,
-    data: hex(log.data, 32, reason), blockHash: hex(log.blockHash, 32, reason),
+    address: hex(log.address, 20, reason), topics: rawTopics.map((topic) => hex(topic, 32, reason)),
+    data: data.toLowerCase(), blockHash: hex(log.blockHash, 32, reason),
     blockNumber: quantity(log.blockNumber, reason), transactionHash: hex(log.transactionHash, 32, reason),
     transactionIndex: quantity(log.transactionIndex, reason), logIndex: quantity(log.logIndex, reason),
     removed: false,
   };
+}
+
+function parseTransferLog(raw: unknown): Log {
+  const log = parseLog(raw, 'invalid_log');
+  check(log.topics.length === 3 && log.topics[0] === TRANSFER && log.data.length === 66 &&
+    log.topics.slice(1).every((topic) => topic.startsWith(ADDRESS_TOPIC_PREFIX)), 'invalid_log');
+  return log;
+}
+
+function parseReceipt(raw: unknown, expectedHash: string): Receipt {
+  const reason = 'invalid_receipt';
+  check(raw !== null, 'receipt_unavailable');
+  const receipt = object(raw, reason);
+  const transactionHash = hex(receipt.transactionHash, 32, reason);
+  check(transactionHash === expectedHash, 'receipt_transaction_disagreement');
+  const blockHash = hex(receipt.blockHash, 32, reason);
+  const blockNumber = quantity(receipt.blockNumber, reason);
+  const transactionIndex = quantity(receipt.transactionIndex, reason);
+  const status = quantity(receipt.status, reason);
+  const rawLogs = array(receipt.logs, reason);
+  check(status === 1 || (status === 0 && rawLogs.length === 0), reason);
+  check(rawLogs.length <= MAX_RECEIPT_LOGS, 'receipt_log_count_limit');
+
+  const logs: Log[] = [];
+  for (const rawLog of rawLogs) {
+    const log = parseLog(rawLog, 'invalid_receipt_log');
+    const previous = logs.at(-1);
+    check(log.blockHash === blockHash && log.blockNumber === blockNumber && log.transactionHash === transactionHash &&
+      log.transactionIndex === transactionIndex && (!previous || log.logIndex === previous.logIndex + 1),
+      'receipt_log_position_disagreement');
+    logs.push(log);
+  }
+  return { blockHash, blockNumber, transactionHash, transactionIndex, status, logs };
 }
 
 function usdcFilter(filter: Filter): Filter {
@@ -192,12 +236,18 @@ export class BaseSepoliaRpc implements HistoricalRpcProvider {
     const { address, topics } = usdcFilter(filter);
     return this.#request('eth_getLogs', [{ fromBlock, toBlock, address, topics }], (result) => {
       return array(result, 'invalid_log_response').map((item) => {
-        const log = parseLog(item);
+        const log = parseTransferLog(item);
         check(log.blockNumber >= fromHeight && log.blockNumber <= toHeight && log.address === address &&
           topics.every((topic, index) => log.topics[index] === topic), 'unexpected_transfer_log');
         return log;
       });
     });
+  }
+
+  async receipt(transactionHash: string): Promise<Receipt> {
+    check(this.#verifiedChain, 'base_sepolia_not_verified');
+    const hash = hex(transactionHash, 32, 'invalid_receipt_transaction_hash');
+    return this.#request('eth_getTransactionReceipt', [hash], (result) => parseReceipt(result, hash));
   }
 
   async #request<T>(method: RpcMethod, params: unknown[], parse: (value: unknown) => T): Promise<T> {
@@ -212,7 +262,7 @@ export class BaseSepoliaRpc implements HistoricalRpcProvider {
     const id = this.#measurements.length + 1;
     const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
     const requestBytes = Buffer.byteLength(body);
-    check(requestBytes <= MAX_REQUEST_BYTES, 'rpc_request_byte_limit');
+    check(requestBytes <= MAX_RPC_REQUEST_BYTES, 'rpc_request_byte_limit');
 
     const allowanceMs = Math.min(remainingMs, this.#limits.requestTimeoutMs);
     const signal = AbortSignal.timeout(Math.ceil(allowanceMs));
@@ -234,7 +284,7 @@ export class BaseSepoliaRpc implements HistoricalRpcProvider {
       const declaredBytes = contentLength === null ? undefined : Number(contentLength);
       if (!response.ok || (declaredBytes !== undefined && declaredBytes > bodyLimit)) {
         void response.body?.cancel().catch(() => {});
-        throw new RpcReadError(response.ok ? 'rpc_response_byte_limit' : 'rpc_http_status');
+        throw new RpcReadError(response.ok ? 'rpc_response_byte_limit' : 'rpc_http_status', { httpStatus });
       }
 
       const reader = response.body?.getReader({ mode: 'byob' });
@@ -273,7 +323,7 @@ export class BaseSepoliaRpc implements HistoricalRpcProvider {
         check(typeof error.code === 'number' && Number.isSafeInteger(error.code) &&
           typeof error.message === 'string', 'rpc_invalid_envelope');
         rpcCode = error.code;
-        throw new RpcReadError('rpc_remote_error');
+        throw new RpcReadError('rpc_remote_error', { httpStatus, rpcCode });
       }
       check(Object.hasOwn(envelope, 'result'), 'rpc_invalid_envelope');
       const result = parse(envelope.result);

@@ -5,6 +5,7 @@ import {
   verifyLogs,
 } from './evidence.ts';
 import type { EvidenceIds, FixtureEvidence, Header, RangeFixtureEvidence, WatchInput } from './evidence.ts';
+import { configureObserverDatabase, writeObserverTransaction } from './sqlite.ts';
 
 export const MAX_RANGE_BLOCKS = 16;
 type Outcome = 'unresolved' | 'matched' | 'ambiguous' | 'expired';
@@ -37,10 +38,8 @@ export class Observer {
   constructor(filename: string, fault?: (point: FaultPoint) => void) {
     this.fault = fault;
     this.db = new DatabaseSync(filename);
+    configureObserverDatabase(this.db);
     this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = FULL;
-      PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS watches (
         id TEXT PRIMARY KEY, spec TEXT NOT NULL,
         sender TEXT NOT NULL, recipient TEXT NOT NULL, amount TEXT NOT NULL,
@@ -75,23 +74,11 @@ export class Observer {
     this.db.close();
   }
 
-  private transaction<T>(write: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = write();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      if (this.db.isTransaction) this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-
   arm(input: WatchInput, evidenceIds: EvidenceIds): Readonly<WatchInput> {
     const watch = normalizeWatch(input);
     const ids = evidenceKey(evidenceIds);
     const spec = JSON.stringify(watch);
-    return this.transaction(() => {
+    return writeObserverTransaction(this.db, () => {
       const prior = this.db.prepare('SELECT spec, evidence_ids FROM watches WHERE id = ?').get(watch.id);
       if (prior) {
         requireEvidence(prior.spec === spec && prior.evidence_ids === ids, 'immutable_watch');
@@ -145,7 +132,7 @@ export class Observer {
 
   // Charge before the fixture read. A retry or a crash after charging consumes a fresh unit on replay.
   private read<T>(id: string, source: string, kind: ReadKind, target: string | null, read: () => T): T {
-    this.transaction(() => {
+    writeObserverTransaction(this.db, () => {
       const charged = this.db.prepare(`
         UPDATE watches SET work_used = work_used + 1 WHERE id = ? AND status = 'unresolved' AND work_used < work_limit
         RETURNING work_used
@@ -277,7 +264,7 @@ export class Observer {
 
       const isCutoff = coverage[coverage.length - 1].basis === 'deadline';
       const nextCursor = JSON.stringify(last);
-      this.transaction(() => {
+      writeObserverTransaction(this.db, () => {
         const current = this.row(id);
         requireEvidence(current.status === 'unresolved' && current.cursor === row.cursor &&
           current.finalized_heads === finality, 'stale_step');

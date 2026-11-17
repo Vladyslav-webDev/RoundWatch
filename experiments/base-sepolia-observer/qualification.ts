@@ -1,14 +1,8 @@
 import { createHash } from 'node:crypto';
 import { CHAIN_ID, TRANSFER, USDC, Unresolved, requireEvidence, sameHeader } from './evidence.ts';
 import type { Header, Log } from './evidence.ts';
-import { BaseSepoliaRpc, RpcReadError } from './rpc.ts';
+import { BASE_RPC_ENDPOINT, BaseSepoliaRpc, RpcReadError, SECONDARY_RPC_ENDPOINTS } from './rpc.ts';
 import type { RpcLimits, RpcMeasurement } from './rpc.ts';
-
-const BASE = { id: 'base', endpoint: 'https://sepolia.base.org' };
-const SECONDARY = {
-  onfinality: { id: 'onfinality', endpoint: 'https://base-sepolia.api.onfinality.io/public' },
-  publicnode: { id: 'publicnode', endpoint: 'https://base-sepolia-rpc.publicnode.com' },
-} as const;
 
 const LIMITS: RpcLimits = {
   maxRequests: 24,
@@ -179,10 +173,10 @@ async function sampleRange(rpc: BaseSepoliaRpc, range: BlockRange, cache: Map<nu
   };
 }
 
-async function qualify(secondary: keyof typeof SECONDARY) {
+async function qualify(secondary: keyof typeof SECONDARY_RPC_ENDPOINTS) {
   const startedAt = new Date().toISOString();
   const started = performance.now();
-  const states = [BASE, SECONDARY[secondary]].map((provider) => ({
+  const states = [BASE_RPC_ENDPOINT, SECONDARY_RPC_ENDPOINTS[secondary]].map((provider) => ({
     ...provider,
     rpc: new BaseSepoliaRpc(provider.id, provider.endpoint, LIMITS),
     cache: new Map<number, Header>(),

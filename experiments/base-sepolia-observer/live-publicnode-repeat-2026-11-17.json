@@ -1,0 +1,465 @@
+{
+  "startedAt": "2026-11-17T09:30:48.313Z",
+  "elapsedMs": 1789.02,
+  "chainId": 84532,
+  "sampleMode": "retrospective_finalized_range",
+  "transferFilter": {
+    "address": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+    "topics": [
+      "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    ]
+  },
+  "limits": {
+    "scanBlocks": 3,
+    "numberedBlocks": 4,
+    "maxReceiptReadsPerProvider": 4,
+    "maxTransferLogs": 128,
+    "maxFinalizedAgeSec": 3600,
+    "maxFutureSkewSec": 30,
+    "durableWorkLimit": 64,
+    "maxReceiptLogs": 256,
+    "maxPlannedRequestsPerProvider": 16,
+    "perProvider": {
+      "maxRequests": 24,
+      "maxElapsedMs": 30000,
+      "requestTimeoutMs": 4000,
+      "maxResponseBytes": 262144,
+      "maxTotalResponseBytes": 1048576,
+      "maxRangeBlocks": 3,
+      "maxRequestBytes": 512
+    },
+    "aggregate": {
+      "maxRequests": 48,
+      "maxRequestBytes": 24576,
+      "maxDecodedResponseBytes": 2097152,
+      "maxPlannedRequests": 32
+    }
+  },
+  "sqliteReopenVerified": true,
+  "durable": {
+    "outcome": "unresolved",
+    "reason": "receipt_inclusion_only",
+    "diagnostic": null,
+    "providerIds": [
+      "base",
+      "publicnode"
+    ],
+    "range": {
+      "fromBlock": 59923384,
+      "toBlock": 59923386
+    },
+    "finalizedHeads": [
+      {
+        "height": 59923386,
+        "hash": "0x23fa2f66e170a7a6c6ac176ab4e275f21daa657f7d536213ee3a5d3634118947",
+        "parentHash": "0x1ee3fbc6279e7af3a19d82c9ac478b5d1331cf6a9fe9d3535caf468474d199f2",
+        "timestamp": 1794906546,
+        "transactionCount": 5
+      },
+      {
+        "height": 59923386,
+        "hash": "0x23fa2f66e170a7a6c6ac176ab4e275f21daa657f7d536213ee3a5d3634118947",
+        "parentHash": "0x1ee3fbc6279e7af3a19d82c9ac478b5d1331cf6a9fe9d3535caf468474d199f2",
+        "timestamp": 1794906546,
+        "transactionCount": 5
+      }
+    ],
+    "verifiedCoverageBlocks": 0,
+    "verifiedCoverageCursor": null,
+    "work": {
+      "used": 26,
+      "limit": 64,
+      "byRead": [
+        {
+          "source": "base",
+          "kind": "eth_chainId",
+          "attempts": 1
+        },
+        {
+          "source": "base",
+          "kind": "eth_getBlockByNumber",
+          "attempts": 7
+        },
+        {
+          "source": "base",
+          "kind": "eth_getLogs",
+          "attempts": 4
+        },
+        {
+          "source": "base",
+          "kind": "eth_getTransactionReceipt",
+          "attempts": 1
+        },
+        {
+          "source": "publicnode",
+          "kind": "eth_chainId",
+          "attempts": 1
+        },
+        {
+          "source": "publicnode",
+          "kind": "eth_getBlockByNumber",
+          "attempts": 7
+        },
+        {
+          "source": "publicnode",
+          "kind": "eth_getLogs",
+          "attempts": 4
+        },
+        {
+          "source": "publicnode",
+          "kind": "eth_getTransactionReceipt",
+          "attempts": 1
+        }
+      ]
+    },
+    "evidence": {
+      "sampleTupleSelected": true,
+      "receiptConfirmedOccurrences": 1,
+      "providerAgreement": true,
+      "completeFinalizedHistoricalCoverage": false,
+      "businessInvoiceAttribution": false
+    },
+    "observation": {
+      "predecessor": {
+        "height": 59923383,
+        "hash": "0x637d837d22e92bafad56c277fc1738237eaaf4f46d6a3cef5059d49def904129",
+        "parentHash": "0xbbe53fdcbe1e111d479c34e031fb17d9bfc9d54262847ac0d737bcbf9896ca1d",
+        "timestamp": 1794906545,
+        "transactionCount": 2
+      },
+      "blocks": [
+        {
+          "height": 59923384,
+          "hash": "0xc3ffa73b784d5524e5831496efe6a8dde25f94d7caa128faf9682900367b90ae",
+          "parentHash": "0x637d837d22e92bafad56c277fc1738237eaaf4f46d6a3cef5059d49def904129",
+          "timestamp": 1794906545,
+          "transactionCount": 7
+        },
+        {
+          "height": 59923385,
+          "hash": "0x1ee3fbc6279e7af3a19d82c9ac478b5d1331cf6a9fe9d3535caf468474d199f2",
+          "parentHash": "0xc3ffa73b784d5524e5831496efe6a8dde25f94d7caa128faf9682900367b90ae",
+          "timestamp": 1794906545,
+          "transactionCount": 4
+        },
+        {
+          "height": 59923386,
+          "hash": "0x23fa2f66e170a7a6c6ac176ab4e275f21daa657f7d536213ee3a5d3634118947",
+          "parentHash": "0x1ee3fbc6279e7af3a19d82c9ac478b5d1331cf6a9fe9d3535caf468474d199f2",
+          "timestamp": 1794906546,
+          "transactionCount": 5
+        }
+      ],
+      "sources": [
+        {
+          "id": "base",
+          "rangeLogDigest": "174918785ae496c2149f23bf21470bd2344a35f4ae937e098964cd9755684416",
+          "singleLogDigest": "174918785ae496c2149f23bf21470bd2344a35f4ae937e098964cd9755684416",
+          "receiptDigests": [
+            "06dd896f019641f788b525983dc4261e82da2fa10b269f0dcd533df9f309fefd"
+          ]
+        },
+        {
+          "id": "publicnode",
+          "rangeLogDigest": "174918785ae496c2149f23bf21470bd2344a35f4ae937e098964cd9755684416",
+          "singleLogDigest": "174918785ae496c2149f23bf21470bd2344a35f4ae937e098964cd9755684416",
+          "receiptDigests": [
+            "06dd896f019641f788b525983dc4261e82da2fa10b269f0dcd533df9f309fefd"
+          ]
+        }
+      ]
+    }
+  },
+  "totals": {
+    "requestCount": 26,
+    "requestBytes": 3526,
+    "responseBytes": 37883,
+    "summedLatencyMs": 2372.24
+  },
+  "providers": [
+    {
+      "id": "base",
+      "endpoint": "https://sepolia.base.org",
+      "totals": {
+        "requestCount": 13,
+        "requestBytes": 1763,
+        "responseBytes": 18939,
+        "summedLatencyMs": 1731.81
+      },
+      "byMethod": {
+        "eth_chainId": {
+          "requestCount": 1,
+          "requestBytes": 59,
+          "responseBytes": 43,
+          "summedLatencyMs": 226.15
+        },
+        "eth_getBlockByNumber": {
+          "requestCount": 7,
+          "requestBytes": 597,
+          "responseBytes": 14926,
+          "summedLatencyMs": 865.11
+        },
+        "eth_getLogs": {
+          "requestCount": 4,
+          "requestBytes": 965,
+          "responseBytes": 1482,
+          "summedLatencyMs": 520.92
+        },
+        "eth_getTransactionReceipt": {
+          "requestCount": 1,
+          "requestBytes": 142,
+          "responseBytes": 2488,
+          "summedLatencyMs": 119.64
+        }
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 43,
+          "durationMs": 226.15,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2153,
+          "durationMs": 145,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2153,
+          "durationMs": 115.57,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 1939,
+          "durationMs": 112.52,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2291,
+          "durationMs": 120.81,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2082,
+          "durationMs": 137.56,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 241,
+          "responseBytes": 703,
+          "durationMs": 120.98,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 241,
+          "responseBytes": 37,
+          "durationMs": 117.12,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 241,
+          "responseBytes": 37,
+          "durationMs": 127.37,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 705,
+          "durationMs": 155.45,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getTransactionReceipt",
+          "requestBytes": 142,
+          "responseBytes": 2488,
+          "durationMs": 119.64,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 86,
+          "responseBytes": 2154,
+          "durationMs": 120.02,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 86,
+          "responseBytes": 2154,
+          "durationMs": 113.61,
+          "outcome": "ok",
+          "httpStatus": 200
+        }
+      ]
+    },
+    {
+      "id": "publicnode",
+      "endpoint": "https://base-sepolia-rpc.publicnode.com",
+      "totals": {
+        "requestCount": 13,
+        "requestBytes": 1763,
+        "responseBytes": 18944,
+        "summedLatencyMs": 640.43
+      },
+      "byMethod": {
+        "eth_chainId": {
+          "requestCount": 1,
+          "requestBytes": 59,
+          "responseBytes": 44,
+          "summedLatencyMs": 122.52
+        },
+        "eth_getBlockByNumber": {
+          "requestCount": 7,
+          "requestBytes": 597,
+          "responseBytes": 14933,
+          "summedLatencyMs": 274.35
+        },
+        "eth_getLogs": {
+          "requestCount": 4,
+          "requestBytes": 965,
+          "responseBytes": 1479,
+          "summedLatencyMs": 188.99
+        },
+        "eth_getTransactionReceipt": {
+          "requestCount": 1,
+          "requestBytes": 142,
+          "responseBytes": 2488,
+          "summedLatencyMs": 54.57
+        }
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 44,
+          "durationMs": 122.52,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2154,
+          "durationMs": 37.82,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2154,
+          "durationMs": 40.79,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 1940,
+          "durationMs": 39.03,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2292,
+          "durationMs": 39.86,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 85,
+          "responseBytes": 2083,
+          "durationMs": 44.06,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 241,
+          "responseBytes": 703,
+          "durationMs": 42.24,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 241,
+          "responseBytes": 36,
+          "durationMs": 39.34,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 241,
+          "responseBytes": 36,
+          "durationMs": 36.49,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getLogs",
+          "requestBytes": 242,
+          "responseBytes": 704,
+          "durationMs": 70.92,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getTransactionReceipt",
+          "requestBytes": 142,
+          "responseBytes": 2488,
+          "durationMs": 54.57,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 86,
+          "responseBytes": 2155,
+          "durationMs": 37.26,
+          "outcome": "ok",
+          "httpStatus": 200
+        },
+        {
+          "method": "eth_getBlockByNumber",
+          "requestBytes": 86,
+          "responseBytes": 2155,
+          "durationMs": 35.53,
+          "outcome": "ok",
+          "httpStatus": 200
+        }
+      ]
+    }
+  ]
+}
