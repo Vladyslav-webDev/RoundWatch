@@ -1,0 +1,84 @@
+{
+  "startedAt": "2026-11-17T14:07:03.450Z",
+  "elapsedMs": 44.95,
+  "chainId": 84532,
+  "status": "BLOCKED",
+  "failure": "finalized_tag_unavailable",
+  "evidence": {
+    "headerAgreement": "UNRESOLVED",
+    "authenticatedFinality": false,
+    "receiptsRootRecomputed": false,
+    "verifiedCoverage": "BLOCKED"
+  },
+  "limits": {
+    "sampledNumberedHeights": 1,
+    "fallbackTransactionsPerProvider": 8,
+    "finalizedTagMaxAgeSeconds": 3600,
+    "clockSkewSeconds": 30,
+    "perProvider": {
+      "maxRequests": 12,
+      "maxElapsedMs": 20000,
+      "requestTimeoutMs": 3000,
+      "maxResponseBytes": 262144,
+      "maxTotalResponseBytes": 1048576,
+      "maxRangeBlocks": 1,
+      "maxRequestBytes": 512
+    },
+    "maxAggregateRequests": 24,
+    "maxAggregateRequestBytes": 12288,
+    "maxAggregateDecodedResponseBytes": 2097152
+  },
+  "totals": {
+    "requests": 2,
+    "requestBytes": 118,
+    "decodedResponseBytes": 0
+  },
+  "providers": [
+    {
+      "id": "base",
+      "endpoint": "https://sepolia.base.org",
+      "finalizedTag": {
+        "reason": "rpc_transport_error"
+      },
+      "totals": {
+        "requests": 1,
+        "requestBytes": 59,
+        "decodedResponseBytes": 0
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 0,
+          "durationMs": 43.33,
+          "outcome": "rpc_transport_error",
+          "transportCode": "ENOTFOUND",
+          "params": []
+        }
+      ]
+    },
+    {
+      "id": "publicnode",
+      "endpoint": "https://base-sepolia-rpc.publicnode.com",
+      "finalizedTag": {
+        "reason": "rpc_transport_error"
+      },
+      "totals": {
+        "requests": 1,
+        "requestBytes": 59,
+        "decodedResponseBytes": 0
+      },
+      "requests": [
+        {
+          "method": "eth_chainId",
+          "requestBytes": 59,
+          "responseBytes": 0,
+          "durationMs": 17.82,
+          "outcome": "rpc_transport_error",
+          "transportCode": "ENOTFOUND",
+          "params": []
+        }
+      ]
+    }
+  ]
+}
